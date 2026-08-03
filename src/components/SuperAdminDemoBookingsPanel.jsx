@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import axios from '../api/axios';
 
 const formatDate = (value) => {
   if (!value) return '—';
@@ -50,30 +51,50 @@ const statusLabel = (status) => {
 };
 
 function SuperAdminDemoBookingsPanel() {
-  const [bookings] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
   const [selectedBooking, setSelectedBooking] = useState(null);
+
+  const loadBookings = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await axios.get('/demo-bookings');
+      setBookings(Array.isArray(res?.data?.bookings) ? res.data.bookings : []);
+    } catch (e) {
+      setBookings([]);
+      setError(e?.response?.data?.message || e?.message || 'Failed to load demo bookings');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadBookings();
+  }, [loadBookings]);
 
   const filteredBookings = useMemo(() => {
     const q = search.trim().toLowerCase();
+    if (!q) return bookings;
     return bookings.filter((booking) => {
-      const statusKey = String(booking.status || 'new').toLowerCase();
-      if (statusFilter !== 'all' && statusKey !== statusFilter) return false;
-      if (!q) return true;
       const haystack = [
         booking.full_name,
         booking.email,
         booking.phone,
         booking.company_size,
-        booking.descriptions,
+        booking.country,
+        booking.industry,
+        booking.heard_about,
+        booking.interest,
         booking.status,
       ]
         .map((v) => String(v || '').toLowerCase())
         .join(' ');
       return haystack.includes(q);
     });
-  }, [bookings, search, statusFilter]);
+  }, [bookings, search]);
 
   const stats = useMemo(() => {
     const today = new Date();
@@ -112,8 +133,20 @@ function SuperAdminDemoBookingsPanel() {
               <strong className="font-semibold text-gray-800">techwhizzc.com/waabizx</strong>.
             </p>
           </div>
+          <button
+            type="button"
+            onClick={loadBookings}
+            disabled={loading}
+            className="inline-flex items-center gap-2 self-start rounded-xl border border-sky-200 bg-white px-4 py-2 text-sm font-semibold text-sky-700 hover:bg-sky-50 disabled:opacity-60 transition"
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
         </div>
       </section>
+
+      {error ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
         <div className="rounded-2xl border border-gray-100/90 bg-white/90 p-4 shadow-lg shadow-gray-200/30 ring-1 ring-gray-100/80 motion-hover-lift">
@@ -140,18 +173,6 @@ function SuperAdminDemoBookingsPanel() {
             </p>
           </div>
           <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto sm:min-w-[20rem]">
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
-            >
-              <option value="all">All statuses</option>
-              {STATUS_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
             <div className="relative flex-1 sm:max-w-xs">
               <svg
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
@@ -171,14 +192,18 @@ function SuperAdminDemoBookingsPanel() {
                 type="search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name, email, company…"
+                placeholder="Search name, email, country, industry…"
                 className="w-full rounded-xl border-2 border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
               />
             </div>
           </div>
         </div>
 
-        {filteredBookings.length === 0 ? (
+        {loading ? (
+          <div className="py-16 flex justify-center">
+            <div className="animate-spin rounded-full h-10 w-10 border-2 border-sky-200 border-t-sky-600" />
+          </div>
+        ) : filteredBookings.length === 0 ? (
           <div className="py-16 px-4 text-center">
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-sky-50 ring-1 ring-sky-100">
               <svg className="h-7 w-7 text-sky-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -191,13 +216,13 @@ function SuperAdminDemoBookingsPanel() {
               </svg>
             </div>
             <p className="text-sm font-semibold text-gray-700">
-              {search.trim() || statusFilter !== 'all'
+              {search.trim()
                 ? 'No demo bookings match your filters'
                 : 'No demo bookings yet'}
             </p>
             <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
-              {search.trim() || statusFilter !== 'all'
-                ? 'Try a different search or status filter.'
+              {search.trim()
+                ? 'Try a different search.'
                 : 'When someone confirms a demo slot from the Book Demo popup, their details will appear here.'}
             </p>
           </div>
@@ -210,22 +235,32 @@ function SuperAdminDemoBookingsPanel() {
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Name</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Work email</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Phone</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Country</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Industry</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Heard about</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Interest</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Company size</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Status</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Descriptions</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Submitted</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {filteredBookings.map((booking) => (
-                    <tr key={booking.id} className="hover:bg-sky-50/30 transition-colors">
+                    <tr
+                      key={booking.id}
+                      className="hover:bg-sky-50/30 transition-colors cursor-pointer"
+                      onClick={() => setSelectedBooking(booking)}
+                    >
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
                         {booking.full_name || '—'}
                       </td>
                       <td className="px-4 py-3 text-gray-700">
                         {booking.email ? (
-                          <a href={`mailto:${booking.email}`} className="text-sky-700 hover:underline">
+                          <a
+                            href={`mailto:${booking.email}`}
+                            className="text-sky-700 hover:underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             {booking.email}
                           </a>
                         ) : (
@@ -233,6 +268,16 @@ function SuperAdminDemoBookingsPanel() {
                         )}
                       </td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPhone(booking.phone)}</td>
+                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{booking.country || '—'}</td>
+                      <td className="px-4 py-3 text-gray-700 max-w-[10rem]" title={booking.industry || ''}>
+                        {truncate(booking.industry, 40)}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 max-w-[10rem]" title={booking.heard_about || ''}>
+                        {truncate(booking.heard_about, 40)}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 max-w-[10rem]" title={booking.interest || ''}>
+                        {truncate(booking.interest, 40)}
+                      </td>
                       <td className="px-4 py-3 text-gray-700">{booking.company_size || '—'}</td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <span
@@ -241,20 +286,8 @@ function SuperAdminDemoBookingsPanel() {
                           {statusLabel(booking.status)}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-600 max-w-[180px]">
-                        {truncate(booking.descriptions, 60)}
-                      </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">
                         {formatDate(booking.createdAt)}
-                      </td>
-                      <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedBooking(booking)}
-                          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-sky-700 bg-sky-50 ring-1 ring-sky-200/80 hover:bg-sky-100 transition"
-                        >
-                          View
-                        </button>
                       </td>
                     </tr>
                   ))}
@@ -286,11 +319,18 @@ function SuperAdminDemoBookingsPanel() {
                             {statusLabel(booking.status)}
                           </span>
                         </div>
-                        {booking.company_size ? (
-                          <span className="mt-2 inline-flex text-[10px] font-bold uppercase tracking-wide text-sky-800 bg-sky-50 px-2 py-0.5 rounded-full ring-1 ring-sky-100">
-                            {booking.company_size}
-                          </span>
-                        ) : null}
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {booking.country ? (
+                            <span className="inline-flex text-[10px] font-bold uppercase tracking-wide text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded-full ring-1 ring-indigo-100">
+                              {booking.country}
+                            </span>
+                          ) : null}
+                          {booking.company_size ? (
+                            <span className="inline-flex text-[10px] font-bold uppercase tracking-wide text-sky-800 bg-sky-50 px-2 py-0.5 rounded-full ring-1 ring-sky-100">
+                              {booking.company_size}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                     <div className="mt-3 space-y-1.5 text-xs text-gray-600">
@@ -307,12 +347,12 @@ function SuperAdminDemoBookingsPanel() {
                       <div>
                         <span className="font-semibold text-gray-500">Phone:</span> {formatPhone(booking.phone)}
                       </div>
-                      {booking.descriptions ? (
-                        <div>
-                          <span className="font-semibold text-gray-500">Descriptions:</span>{' '}
-                          {truncate(booking.descriptions, 120)}
-                        </div>
-                      ) : null}
+                      <div>
+                        <span className="font-semibold text-gray-500">Industry:</span> {booking.industry || '—'}
+                      </div>
+                      <div>
+                        <span className="font-semibold text-gray-500">Interest:</span> {booking.interest || '—'}
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -368,6 +408,22 @@ function SuperAdminDemoBookingsPanel() {
                 <p className="mt-1 text-sm text-gray-800">{formatPhone(selectedBooking.phone)}</p>
               </div>
               <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Country</p>
+                <p className="mt-1 text-sm text-gray-800">{selectedBooking.country || '—'}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Industry</p>
+                <p className="mt-1 text-sm text-gray-800">{selectedBooking.industry || '—'}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">How did you hear about us</p>
+                <p className="mt-1 text-sm text-gray-800">{selectedBooking.heard_about || '—'}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">What would you like to Waabizx</p>
+                <p className="mt-1 text-sm text-gray-800">{selectedBooking.interest || '—'}</p>
+              </div>
+              <div>
                 <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Company size</p>
                 <p className="mt-1 text-sm text-gray-800">{selectedBooking.company_size || '—'}</p>
               </div>
@@ -379,12 +435,6 @@ function SuperAdminDemoBookingsPanel() {
                   >
                     {statusLabel(selectedBooking.status)}
                   </span>
-                </p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Descriptions</p>
-                <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed rounded-xl bg-sky-50/60 p-3 ring-1 ring-sky-100">
-                  {selectedBooking.descriptions || '—'}
                 </p>
               </div>
             </div>

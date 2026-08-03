@@ -85,7 +85,7 @@ function Login() {
         try {
           const profile = await getProfile();
           if (profile && typeof profile === 'object') {
-            resolvedUser = profile;
+            resolvedUser = profile.user || profile;
           }
         } catch (_) {
           // Keep fallback from login response if profile fetch fails.
@@ -99,6 +99,7 @@ function Login() {
           .replace(/-/g, '_')
           .replace(/\s+/g, '_');
         localStorage.setItem('role', normalizedRole);
+
 
         try {
           const uid = Number(resolvedUser?.id);

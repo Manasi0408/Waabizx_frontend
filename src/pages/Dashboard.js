@@ -1,25 +1,32 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { getProfile, logout, isAuthenticated, readSessionUser } from '../services/authService';
 import { getNotifications, markAsRead, markAllAsRead } from '../services/notificationService';
 import { getDashboardStats, getConversationQuota } from '../services/dashboardService';
+import { getQualityRating } from '../services/projectService';
+import { getMetaTemplates, getTemplates } from '../services/templateService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
 import AgentRightPanel from '../components/AgentRightPanel';
+import CountUp from '../components/CountUp';
+
+function readSelectedProjectFromStorage() {
+  try {
+    const raw = localStorage.getItem('selectedProject');
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
 
 function Dashboard() {
   const navigate = useNavigate();
-  const selectedProject = (() => {
-    try {
-      const raw = localStorage.getItem('selectedProject');
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) {
-      return null;
-    }
-  })();
+  const location = useLocation();
+  const [selectedProject, setSelectedProject] = useState(readSelectedProjectFromStorage);
+  const [resolvedProjectId, setResolvedProjectId] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
   const [user, setUser] = useState(null);
@@ -43,14 +50,70 @@ function Dashboard() {
     messagesSentToday: 0,
     templatesSentToday: 0,
     accountName: null,
+    projectId: null,
     wccCredits: 0,
+    wccRemainingCredits: 0,
+    remainingEstimatedMessages: 0,
+    creditUnitCost: 1,
+    planInfo: null,
+    wabaTier: null,
+    wabaTierLabel: null,
+    wabaThroughputLevel: null,
+    wabaQualityRating: null,
+    tierDailyLimit: 0,
+    tierRemaining: 0,
+    tierSource: 'local',
   });
   const [loadingQuota, setLoadingQuota] = useState(true);
   const [loadingDashboard, setLoadingDashboard] = useState(true);
+  const [templateCategoryStats, setTemplateCategoryStats] = useState({
+    marketing: 0,
+    utility: 0,
+    authentication: 0,
+    total: 0,
+  });
+  const [loadingTemplateStats, setLoadingTemplateStats] = useState(true);
   const [isWhatsAppApiLive, setIsWhatsAppApiLive] = useState(false);
+  const [qualityRating, setQualityRating] = useState('');
+  const [loadingQualityRating, setLoadingQualityRating] = useState(false);
   const [chartTimeRange, setChartTimeRange] = useState(1); // 1 (Today), 7, 30, or 90 days
   const notificationRef = useRef(null);
-  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+  const API_BASE = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+
+  const activeProjectId = useMemo(() => {
+    const fromSelected = selectedProject?.id;
+    if (fromSelected != null && String(fromSelected).trim() !== '') {
+      return String(fromSelected).trim();
+    }
+    const fromUser = user?.projectId;
+    if (fromUser != null && String(fromUser).trim() !== '') {
+      return String(fromUser).trim();
+    }
+    if (resolvedProjectId != null && String(resolvedProjectId).trim() !== '') {
+      return String(resolvedProjectId).trim();
+    }
+    return null;
+  }, [selectedProject?.id, user?.projectId, resolvedProjectId]);
+
+  const panelSelectedProject = useMemo(() => {
+    if (selectedProject?.id != null) return selectedProject;
+    if (activeProjectId == null) return null;
+    return { id: activeProjectId };
+  }, [selectedProject, activeProjectId]);
+
+  useEffect(() => {
+    setSelectedProject(readSelectedProjectFromStorage());
+  }, [location.key, user?.id]);
+
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key === 'selectedProject' || event.key == null) {
+        setSelectedProject(readSelectedProjectFromStorage());
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Fetch user profile on component mount
   useEffect(() => {
@@ -157,6 +220,64 @@ function Dashboard() {
     }
   }, [loading, chartTimeRange]);
 
+  // Fetch templates and group counts by category (Marketing / Utility / Authentication).
+  useEffect(() => {
+    const normalizeCategory = (raw) => {
+      const value = String(raw || '').trim().toLowerCase();
+      if (value === 'marketing') return 'marketing';
+      if (value === 'utility') return 'utility';
+      if (value === 'authentication' || value === 'notification') return 'authentication';
+      return null;
+    };
+
+    const fetchTemplateStats = async () => {
+      if (!isAuthenticated()) return;
+      setLoadingTemplateStats(true);
+      try {
+        let rows = [];
+        try {
+          rows = await getMetaTemplates();
+        } catch (metaErr) {
+          rows = [];
+        }
+
+        if (!Array.isArray(rows) || rows.length === 0) {
+          const local = await getTemplates({ limit: 500 });
+          rows = Array.isArray(local?.templates) ? local.templates : [];
+        }
+
+        const counts = { marketing: 0, utility: 0, authentication: 0, total: 0 };
+        rows.forEach((tpl) => {
+          const cat = normalizeCategory(tpl?.category || tpl?.metaCategory);
+          if (cat) {
+            counts[cat] += 1;
+            counts.total += 1;
+          }
+        });
+        setTemplateCategoryStats(counts);
+      } catch (error) {
+        console.error('Error fetching template category stats:', error);
+        setTemplateCategoryStats({ marketing: 0, utility: 0, authentication: 0, total: 0 });
+      } finally {
+        setLoadingTemplateStats(false);
+      }
+    };
+
+    if (!loading && isAuthenticated()) {
+      fetchTemplateStats();
+    }
+  }, [loading, activeProjectId]);
+
+  const templatePieData = useMemo(
+    () =>
+      [
+        { key: 'marketing', name: 'Marketing', value: templateCategoryStats.marketing, color: '#0ea5e9' },
+        { key: 'utility', name: 'Utility', value: templateCategoryStats.utility, color: '#8b5cf6' },
+        { key: 'authentication', name: 'Authentication', value: templateCategoryStats.authentication, color: '#10b981' },
+      ].filter((d) => d.value > 0),
+    [templateCategoryStats]
+  );
+
   // Fetch WhatsApp conversation quota (24-hour rolling) for this account.
   // Initial load + poll + tab focus so counts update after sending from Inbox/Live Chat/etc.
   useEffect(() => {
@@ -165,6 +286,16 @@ function Dashboard() {
     if (accountId == null) return;
 
     let cancelled = false;
+
+    // Clear previous project's wallet/plan while the new project quota loads.
+    setConversationQuota((prev) => ({
+      ...prev,
+      projectId: activeProjectId != null ? Number(activeProjectId) || activeProjectId : null,
+      wccCredits: 0,
+      wccRemainingCredits: 0,
+      remainingEstimatedMessages: 0,
+      planInfo: null,
+    }));
 
     const fetchQuota = async (opts = { showLoading: true }) => {
       if (!isAuthenticated()) return;
@@ -197,7 +328,7 @@ function Dashboard() {
       clearInterval(intervalId);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [loading, user?.id, selectedProject?.id]);
+  }, [loading, user?.id, activeProjectId]);
 
   const refreshConversationQuota = useCallback(async () => {
     if (!isAuthenticated() || user?.id == null) return;
@@ -207,73 +338,58 @@ function Dashboard() {
     } catch (error) {
       console.error('Error refreshing conversation quota:', error);
     }
-  }, [user?.id]);
+  }, [user?.id, activeProjectId]);
 
   useEffect(() => {
-    const onWccUpdated = (ev) => {
-      const next = ev?.detail?.wccCredits;
-      if (next != null && Number.isFinite(Number(next))) {
-        setConversationQuota((prev) => ({ ...prev, wccCredits: Number(next) }));
-      } else {
-        refreshConversationQuota();
-      }
+    const onWccUpdated = () => {
+      refreshConversationQuota();
     };
     window.addEventListener('wcc-quota-updated', onWccUpdated);
     return () => window.removeEventListener('wcc-quota-updated', onWccUpdated);
   }, [refreshConversationQuota]);
 
-  // Show WhatsApp API LIVE only when onboarding is completed for the selected project.
+  // WhatsApp API LIVE + project scope from server (not localStorage cache).
   useEffect(() => {
     const clientId = Number(user?.id);
     if (!Number.isInteger(clientId) || clientId <= 0) {
       setIsWhatsAppApiLive(false);
-      return;
+      return undefined;
     }
 
     let cancelled = false;
-    const readStoredLive = () => {
-      const cid = Number(clientId);
-      const pid = selectedProject?.id != null ? Number(selectedProject.id) : null;
-      if (!Number.isInteger(cid) || cid <= 0 || !Number.isInteger(pid) || pid <= 0) {
-        return false;
-      }
-      try {
-        const raw = localStorage.getItem(`wa_wb_meta_live_${cid}_p${pid}`);
-        if (!raw) return false;
-        const pack = JSON.parse(raw);
-        return Boolean(pack?.snapshot?.onboardingCompleted);
-      } catch (_) {
-        return false;
-      }
-    };
 
     const fetchOnboardingStatus = async () => {
-      const projectId =
-        selectedProject?.id != null ? String(selectedProject.id) : null;
-      if (!projectId) {
-        if (!cancelled) setIsWhatsAppApiLive(false);
-        return;
-      }
+      const projectId = activeProjectId;
       try {
         const token = localStorage.getItem('token');
         const headers = {};
         if (token) headers.Authorization = `Bearer ${token}`;
-        headers['x-project-id'] = projectId;
+        if (projectId) headers['x-project-id'] = projectId;
 
         let url = `${API_BASE}/meta/onboarding-status?client_id=${clientId}`;
-        url += `&projectId=${encodeURIComponent(projectId)}`;
+        if (projectId) {
+          url += `&projectId=${encodeURIComponent(projectId)}`;
+        }
         const res = await fetch(url, { headers });
         const data = await res.json().catch(() => ({}));
-        if (!cancelled) {
-          if (!res.ok) {
-            setIsWhatsAppApiLive(readStoredLive());
-            return;
-          }
-          const live = Boolean(data?.success !== false && data?.onboardingCompleted);
-          setIsWhatsAppApiLive(live || readStoredLive());
+        if (cancelled) return;
+
+        if (!res.ok) {
+          setIsWhatsAppApiLive(false);
+          return;
+        }
+
+        const live = Boolean(
+          data?.onboardingCompleted || data?.whatsappConnected || data?.metaLinked
+        );
+        setIsWhatsAppApiLive(live);
+
+        const linkedProjectId = data?.projectId;
+        if (linkedProjectId != null && String(linkedProjectId).trim() !== '') {
+          setResolvedProjectId(String(linkedProjectId).trim());
         }
       } catch (_) {
-        if (!cancelled) setIsWhatsAppApiLive(readStoredLive());
+        if (!cancelled) setIsWhatsAppApiLive(false);
       }
     };
 
@@ -291,7 +407,77 @@ function Dashboard() {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onFocus);
     };
-  }, [API_BASE, user?.id, selectedProject?.id]);
+  }, [API_BASE, user?.id, activeProjectId]);
+
+  useEffect(() => {
+    const projectId = activeProjectId;
+    if (projectId == null) {
+      setQualityRating('');
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const fetchQuality = async () => {
+      try {
+        setLoadingQualityRating(true);
+        const res = await getQualityRating(projectId);
+        if (!cancelled) {
+          setQualityRating(res?.qualityRating || '');
+          if (res?.success !== false) {
+            setIsWhatsAppApiLive(true);
+          }
+        }
+      } catch (error) {
+        if (!cancelled) setQualityRating('');
+      } finally {
+        if (!cancelled) setLoadingQualityRating(false);
+      }
+    };
+
+    fetchQuality();
+    const intervalId = setInterval(fetchQuality, 60000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [activeProjectId]);
+
+  const formatQualityRatingLabel = (rating) => {
+    switch (String(rating || '').toUpperCase()) {
+      case 'GREEN':
+      case 'HIGH':
+        return 'High';
+      case 'YELLOW':
+      case 'MEDIUM':
+        return 'Medium';
+      case 'RED':
+      case 'LOW':
+        return 'Low';
+      default:
+        return '';
+    }
+  };
+
+  const getQualityRatingBadgeClass = (rating) => {
+    switch (String(rating || '').toUpperCase()) {
+      case 'GREEN':
+      case 'HIGH':
+        return 'bg-emerald-50 text-emerald-700 ring-emerald-200/80';
+      case 'YELLOW':
+      case 'MEDIUM':
+        return 'bg-amber-50 text-amber-800 ring-amber-200/80';
+      case 'RED':
+      case 'LOW':
+        return 'bg-rose-50 text-rose-700 ring-rose-200/80';
+      default:
+        return 'bg-gray-50 text-gray-800 ring-gray-200/80';
+    }
+  };
+
+  const qualityRatingDisplay = loadingQualityRating
+    ? '...'
+    : formatQualityRatingLabel(qualityRating) || '—';
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -390,13 +576,25 @@ function Dashboard() {
           <h2 className="text-lg font-semibold text-sky-700 hidden md:block tracking-tight">Dashboard</h2>
           <AdminHeaderProjectSwitch />
           {isWhatsAppApiLive ? (
-            <div className="hidden lg:flex items-center gap-2 ml-2 pl-2 border-l border-sky-100/80">
-              <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-                WhatsApp Business API Status :
-              </span>
-              <span className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-700 px-2.5 py-1 text-[10px] font-bold ring-1 ring-emerald-200/80">
-                LIVE
-              </span>
+            <div className="flex flex-wrap items-center gap-3 md:gap-6 ml-2 pl-2 border-l border-sky-100/80 shrink-0">
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">
+                  WhatsApp Business API Status :
+                </span>
+                <span className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-700 px-2.5 py-1 text-[10px] font-bold ring-1 ring-emerald-200/80">
+                  LIVE
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">
+                  Quality Rating :
+                </span>
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-1 text-[10px] font-bold ring-1 ${getQualityRatingBadgeClass(qualityRating)}`}
+                >
+                  {qualityRatingDisplay}
+                </span>
+              </div>
             </div>
           ) : null}
         </div>
@@ -623,6 +821,28 @@ function Dashboard() {
             </div>
           </div>
 
+          {/* Channel status — WhatsApp live / RCS pending Google approval */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-5 mb-6">
+            <div className="rounded-2xl border border-emerald-100 bg-white p-4 shadow-sm flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-800">WhatsApp</p>
+                <p className="text-xs text-emerald-600 font-medium mt-1">Active</p>
+              </div>
+              <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                Live
+              </span>
+            </div>
+            <div className="rounded-2xl border border-amber-100 bg-white p-4 shadow-sm flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-800">RCS</p>
+                <p className="text-xs text-amber-600 font-medium mt-1">Pending Approval</p>
+              </div>
+              <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-700">
+                Coming Soon
+              </span>
+            </div>
+          </div>
+
           {/* Statistics KPI Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-5 mb-8 md:mb-10">
             <div className="motion-enter motion-delay-1 motion-hover-lift group relative bg-white rounded-2xl border border-gray-100/80 p-5 md:p-6 shadow-sm shadow-gray-200/40 hover:shadow-xl hover:shadow-sky-400/10 hover:border-sky-100 overflow-hidden">
@@ -636,7 +856,7 @@ function Dashboard() {
                 </div>
               </div>
               <p className="text-3xl md:text-4xl font-bold text-gray-900 mb-2 tabular-nums tracking-tight">
-                {loadingDashboard ? '...' : dashboardData.stats.totalContacts.toLocaleString()}
+                {loadingDashboard ? '...' : <CountUp value={dashboardData.stats.totalContacts} />}
               </p>
               <p className="text-xs font-medium text-sky-600 flex items-center gap-1.5">
                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-50">↑</span>
@@ -644,7 +864,7 @@ function Dashboard() {
               </p>
             </div>
 
-            <div className="group relative bg-white rounded-2xl border border-gray-100/80 p-5 md:p-6 shadow-sm shadow-gray-200/40 transition-all duration-300 hover:shadow-xl hover:shadow-sky-400/10 hover:-translate-y-0.5 hover:border-sky-100 overflow-hidden">
+            <div className="motion-enter motion-delay-2 motion-hover-lift group relative bg-white rounded-2xl border border-gray-100/80 p-5 md:p-6 shadow-sm shadow-gray-200/40 transition-all duration-300 hover:shadow-xl hover:shadow-sky-400/10 hover:border-sky-100 overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-sky-300 via-sky-500 to-blue-500 opacity-90" aria-hidden />
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-semibold text-gray-500 tracking-tight">Active Campaigns</h3>
@@ -655,7 +875,7 @@ function Dashboard() {
                 </div>
               </div>
               <p className="text-3xl md:text-4xl font-bold text-gray-900 mb-2 tabular-nums tracking-tight">
-                {loadingDashboard ? '...' : dashboardData.stats.activeCampaigns}
+                {loadingDashboard ? '...' : <CountUp value={dashboardData.stats.activeCampaigns} />}
               </p>
               <p className="text-xs font-medium text-sky-600 flex items-center gap-1.5">
                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-50">↑</span>
@@ -674,7 +894,7 @@ function Dashboard() {
                 </div>
               </div>
               <p className="text-3xl md:text-4xl font-bold text-gray-900 mb-2 tabular-nums tracking-tight">
-                {loadingDashboard ? '...' : dashboardData.stats.messagesToday.toLocaleString()}
+                {loadingDashboard ? '...' : <CountUp value={dashboardData.stats.messagesToday} />}
               </p>
               <p className="text-xs font-medium text-sky-600 flex items-center gap-1.5">
                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-50">→</span>
@@ -693,7 +913,7 @@ function Dashboard() {
                 </div>
               </div>
               <p className="text-3xl md:text-4xl font-bold text-gray-900 mb-2 tabular-nums tracking-tight">
-                {loadingDashboard ? '...' : dashboardData.stats.deliveryRate}
+                {loadingDashboard ? '...' : <CountUp value={parseFloat(dashboardData.stats.deliveryRate) || 0} suffix={String(dashboardData.stats.deliveryRate).includes('%') ? '%' : ''} />}
               </p>
               <p className="text-xs font-medium text-sky-600 flex items-center gap-1.5">
                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-sky-50">↑</span>
@@ -708,8 +928,8 @@ function Dashboard() {
             <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-sky-200/25 blur-3xl" aria-hidden />
             <div className="relative flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-5">
               <div>
-                <h3 className="text-lg md:text-xl font-bold text-slate-900 tracking-tight">Quota &amp; sends</h3>
-                <p className="text-sm text-slate-600 mt-1.5">Track daily sending pace and remaining cap in real time</p>
+                <h3 className="text-lg md:text-xl font-bold text-slate-900 tracking-tight">Wallet, WABA tier &amp; sends</h3>
+                <p className="text-sm text-slate-600 mt-1.5">Credits, Meta messaging tier, and daily cap — refreshed every 10 seconds</p>
                 <p className="text-xs text-slate-500 mt-2">
                   Account: {loadingQuota ? '...' : (conversationQuota.accountName || '—')}
                 </p>
@@ -723,96 +943,229 @@ function Dashboard() {
                 </span>
               </div>
             </div>
-            <div className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div className="rounded-2xl border border-sky-200/80 bg-white/95 backdrop-blur-sm p-5 sm:col-span-2 lg:col-span-1 ring-1 ring-sky-200/60 shadow-md shadow-sky-100/60">
+            <div className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 motion-stagger-children">
+              <div className="motion-hover-lift rounded-2xl border border-amber-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-amber-200/60 shadow-md shadow-amber-100/60">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">Wallet credits</div>
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-amber-100 text-amber-700 text-sm">₹</span>
+                </div>
+                <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
+                  {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.wccRemainingCredits || 0)} />}
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">
+                  Internal prepaid balance (1 credit ≈ ₹1). Deducted after each successful WhatsApp send.
+                </p>
+              </div>
+              <div className="motion-hover-lift rounded-2xl border border-indigo-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-indigo-200/60 shadow-md shadow-indigo-100/50">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-semibold text-indigo-700 uppercase tracking-wide">Est. messages left</div>
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-sm">≈</span>
+                </div>
+                <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
+                  {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.remainingEstimatedMessages || 0)} />}
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">
+                  Credits ÷ {conversationQuota.creditUnitCost || 1} credit(s) per send (configurable on server).
+                </p>
+              </div>
+              <div className="motion-hover-lift rounded-2xl border border-fuchsia-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-fuchsia-200/60 shadow-md shadow-fuchsia-100/50">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-semibold text-fuchsia-700 uppercase tracking-wide">WABA tier</div>
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-fuchsia-100 text-fuchsia-700 text-sm">⬆</span>
+                </div>
+                <div className="mt-2 text-xl md:text-2xl font-bold text-slate-900">
+                  {loadingQuota ? '...' : (conversationQuota.wabaTierLabel || '—')}
+                </div>
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">
+                  {conversationQuota.tierSource === 'meta_graph'
+                    ? `Meta Graph · ${conversationQuota.wabaThroughputLevel || 'throughput n/a'} · ${conversationQuota.wabaQualityRating || 'quality n/a'}`
+                    : 'Link WhatsApp to load tier from Meta'}
+                </p>
+              </div>
+              <div className="motion-hover-lift rounded-2xl border border-sky-200/80 bg-white/95 backdrop-blur-sm p-5 sm:col-span-2 lg:col-span-1 ring-1 ring-sky-200/60 shadow-md shadow-sky-100/60">
                 <div className="flex items-center justify-between">
                   <div className="text-[11px] font-semibold text-sky-700 uppercase tracking-wide">Messages sent today</div>
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-sky-100 text-sky-700 text-sm">✉</span>
                 </div>
                 <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
-                  {loadingQuota ? '...' : Number(conversationQuota.messagesSentToday || 0).toLocaleString()}
+                  {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.messagesSentToday || 0)} />}
                 </div>
                 <p className="mt-2 text-[11px] text-slate-500 leading-snug">Every outbound send (inbox, live chat, campaigns). Resets at midnight (server time).</p>
               </div>
-              <div className="rounded-2xl border border-emerald-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-emerald-200/60 shadow-md shadow-emerald-100/60">
+              <div className="motion-hover-lift rounded-2xl border border-emerald-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-emerald-200/60 shadow-md shadow-emerald-100/60">
                 <div className="flex items-center justify-between">
                   <div className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wide">Remaining</div>
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 text-sm">✓</span>
                 </div>
                 <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
-                  {loadingQuota ? '...' : conversationQuota.remaining}
+                  {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.remaining || 0)} />}
                 </div>
-                <p className="mt-2 text-[11px] text-slate-500 leading-snug">Limit minus messages sent today</p>
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">Tier cap minus template sends today (Meta messaging limit when available).</p>
               </div>
-              <div className="rounded-2xl border border-violet-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-violet-200/60 shadow-md shadow-violet-100/50">
+              <div className="motion-hover-lift rounded-2xl border border-violet-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-violet-200/60 shadow-md shadow-violet-100/50">
                 <div className="flex items-center justify-between">
-                  <div className="text-[11px] font-semibold text-violet-700 uppercase tracking-wide">Limit</div>
+                  <div className="text-[11px] font-semibold text-violet-700 uppercase tracking-wide">Tier daily limit</div>
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-violet-100 text-violet-700 text-sm">⚑</span>
                 </div>
                 <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
-                  {loadingQuota ? '...' : conversationQuota.limit}
+                  {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.tierDailyLimit || conversationQuota.limit || 0)} />}
                 </div>
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">
+                  {conversationQuota.tierSource === 'meta_graph' ? 'From Meta messaging_limit_tier' : 'Local account default until Meta tier loads'}
+                </p>
               </div>
             </div>
           </div>
 
           {/* Main Chart Area */}
-          <div className="motion-enter motion-delay-5 bg-white rounded-2xl border border-gray-100/90 shadow-lg shadow-gray-200/50 p-6 md:p-8 mb-8 md:mb-10 ring-1 ring-gray-100/80">
-            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-6">
-              <div>
-                <h3 className="text-lg md:text-xl font-bold text-gray-900 tracking-tight">
-                  {chartTimeRange === 1 
-                    ? 'Messages Sent Today' 
-                    : `Messages Sent Over Last ${chartTimeRange} Days`}
-                </h3>
-                <p className="text-sm text-gray-500 mt-1.5">Track your messaging performance</p>
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 md:gap-8 mb-8 md:mb-10">
+            <div className="motion-enter motion-delay-5 xl:col-span-2 bg-white rounded-2xl border border-gray-100/90 shadow-lg shadow-gray-200/50 p-6 md:p-8 ring-1 ring-gray-100/80">
+              <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-6">
+                <div>
+                  <h3 className="text-lg md:text-xl font-bold text-gray-900 tracking-tight">
+                    {chartTimeRange === 1 
+                      ? 'Messages Sent Today' 
+                      : `Messages Sent Over Last ${chartTimeRange} Days`}
+                  </h3>
+                  <p className="text-sm text-gray-500 mt-1.5">Track your messaging performance</p>
+                </div>
+                <select 
+                  value={chartTimeRange}
+                  onChange={(e) => setChartTimeRange(parseInt(e.target.value))}
+                  className="text-sm font-medium border-2 border-gray-200 rounded-xl px-4 py-2.5 text-gray-700 bg-gray-50/80 hover:bg-white hover:border-sky-300/70 focus:outline-none focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 transition-all cursor-pointer shadow-sm"
+                >
+                  <option value={1}>Today</option>
+                  <option value={7}>Last 7 days</option>
+                  <option value={30}>Last 30 days</option>
+                  <option value={90}>Last 90 days</option>
+                </select>
               </div>
-              <select 
-                value={chartTimeRange}
-                onChange={(e) => setChartTimeRange(parseInt(e.target.value))}
-                className="text-sm font-medium border-2 border-gray-200 rounded-xl px-4 py-2.5 text-gray-700 bg-gray-50/80 hover:bg-white hover:border-sky-300/70 focus:outline-none focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 transition-all cursor-pointer shadow-sm"
-              >
-                <option value={1}>Today</option>
-                <option value={7}>Last 7 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={90}>Last 90 days</option>
-              </select>
+              <div className="h-64 md:h-80 rounded-xl bg-gradient-to-b from-slate-50/80 to-white border border-gray-100/80 p-2">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={dashboardData.chartData.length > 0 ? dashboardData.chartData : []}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis 
+                      dataKey="name" 
+                      stroke="#94a3b8"
+                      tick={{ fill: '#64748b', fontSize: 12 }}
+                      angle={chartTimeRange === 1 ? -45 : 0}
+                      textAnchor={chartTimeRange === 1 ? 'end' : 'middle'}
+                      height={chartTimeRange === 1 ? 80 : 30}
+                    />
+                    <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12 }} />
+                    <Tooltip 
+                      contentStyle={{ 
+                        backgroundColor: '#fff', 
+                        border: '1px solid #e2e8f0', 
+                        borderRadius: '12px',
+                        boxShadow: '0 10px 40px -10px rgba(14, 165, 233, 0.28)'
+                      }} 
+                      labelFormatter={(label) => chartTimeRange === 1 ? `Hour: ${label}` : `Date: ${label}`}
+                      formatter={(value) => [`${value} messages`, 'Messages']}
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '12px' }} />
+                    <Line 
+                      type="monotone" 
+                      dataKey="messages" 
+                      stroke="#0284c7" 
+                      strokeWidth={3}
+                      dot={{ fill: '#0284c7', r: 4, strokeWidth: 2, stroke: '#fff' }}
+                      activeDot={{ r: 7, stroke: '#fff', strokeWidth: 2 }}
+                      name="Messages Sent"
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-            <div className="h-64 md:h-80 rounded-xl bg-gradient-to-b from-slate-50/80 to-white border border-gray-100/80 p-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={dashboardData.chartData.length > 0 ? dashboardData.chartData : []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                  <XAxis 
-                    dataKey="name" 
-                    stroke="#94a3b8"
-                    tick={{ fill: '#64748b', fontSize: 12 }}
-                    angle={chartTimeRange === 1 ? -45 : 0}
-                    textAnchor={chartTimeRange === 1 ? 'end' : 'middle'}
-                    height={chartTimeRange === 1 ? 80 : 30}
-                  />
-                  <YAxis stroke="#94a3b8" tick={{ fill: '#64748b', fontSize: 12 }} />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: '#fff', 
-                      border: '1px solid #e2e8f0', 
-                      borderRadius: '12px',
-                      boxShadow: '0 10px 40px -10px rgba(14, 165, 233, 0.28)'
-                    }} 
-                    labelFormatter={(label) => chartTimeRange === 1 ? `Hour: ${label}` : `Date: ${label}`}
-                    formatter={(value) => [`${value} messages`, 'Messages']}
-                  />
-                  <Legend wrapperStyle={{ paddingTop: '12px' }} />
-                  <Line 
-                    type="monotone" 
-                    dataKey="messages" 
-                    stroke="#0284c7" 
-                    strokeWidth={3}
-                    dot={{ fill: '#0284c7', r: 4, strokeWidth: 2, stroke: '#fff' }}
-                    activeDot={{ r: 7, stroke: '#fff', strokeWidth: 2 }}
-                    name="Messages Sent"
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+
+            {/* Templates by Category (Pie) */}
+            <div className="motion-enter motion-delay-5 bg-white rounded-2xl border border-gray-100/90 shadow-lg shadow-gray-200/50 p-6 md:p-8 ring-1 ring-gray-100/80 flex flex-col">
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <div>
+                  <h3 className="text-lg md:text-xl font-bold text-gray-900 tracking-tight">Templates by Category</h3>
+                  <p className="text-sm text-gray-500 mt-1.5">Approved &amp; submitted templates</p>
+                </div>
+                <span className="inline-flex items-center rounded-full bg-sky-50 text-sky-700 px-3 py-1 text-[11px] font-bold ring-1 ring-sky-200/70">
+                  {loadingTemplateStats ? '...' : <><CountUp value={templateCategoryStats.total} /> total</>}
+                </span>
+              </div>
+
+              <div className="relative h-56 md:h-60 mt-2">
+                {loadingTemplateStats ? (
+                  <div className="h-full flex items-center justify-center text-sm text-gray-400">Loading…</div>
+                ) : templatePieData.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center px-4">
+                    <div className="h-12 w-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
+                      <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </div>
+                    <p className="text-sm text-gray-500">No templates yet</p>
+                    <button
+                      onClick={() => navigate('/templates')}
+                      className="mt-3 text-sm font-semibold text-sky-600 hover:text-sky-700"
+                    >
+                      Create a template
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={templatePieData}
+                          dataKey="value"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={55}
+                          outerRadius={85}
+                          paddingAngle={2}
+                          stroke="#fff"
+                          strokeWidth={2}
+                        >
+                          {templatePieData.map((entry) => (
+                            <Cell key={entry.key} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: '#fff',
+                            border: '1px solid #e2e8f0',
+                            borderRadius: '12px',
+                            boxShadow: '0 10px 40px -10px rgba(14, 165, 233, 0.28)',
+                          }}
+                          formatter={(value, name) => [`${value} template${value === 1 ? '' : 's'}`, name]}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                      <span className="text-2xl md:text-3xl font-bold text-gray-900 tabular-nums">
+                        <CountUp value={templateCategoryStats.total} />
+                      </span>
+                      <span className="text-[11px] uppercase tracking-wide text-gray-500 font-semibold">Templates</span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-2 motion-stagger-children">
+                {[
+                  { label: 'Marketing', value: templateCategoryStats.marketing, color: '#0ea5e9' },
+                  { label: 'Utility', value: templateCategoryStats.utility, color: '#8b5cf6' },
+                  { label: 'Auth', value: templateCategoryStats.authentication, color: '#10b981' },
+                ].map((item) => (
+                  <div key={item.label} className="motion-hover-lift rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2.5 text-center">
+                    <div className="flex items-center justify-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} aria-hidden />
+                      <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">{item.label}</span>
+                    </div>
+                    <div className="mt-1 text-lg font-bold text-gray-900 tabular-nums">
+                      {loadingTemplateStats ? '...' : <CountUp value={item.value} />}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -894,7 +1247,7 @@ function Dashboard() {
           <aside className="w-full xl:w-[22rem] shrink-0 xl:sticky xl:top-4 xl:self-start">
             <AgentRightPanel
               user={user}
-              selectedProject={selectedProject}
+              selectedProject={panelSelectedProject}
               conversationQuota={conversationQuota}
               loadingQuota={loadingQuota}
               onRefreshConversationQuota={refreshConversationQuota}

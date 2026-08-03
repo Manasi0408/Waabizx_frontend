@@ -3,76 +3,67 @@ import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import axios from "../api/axios";
 import { fetchActivePlans } from "../services/planService";
+import PlanSubscriptionView, { PlanGstBreakdown } from "./PlanSubscriptionView";
+import {
+  PLAN_MONTHLY_DEFAULT,
+  cycleBillingAmount,
+  computeQuarterlyFromMonthly,
+  computeYearlyFromMonthly,
+  formatInr,
+  gstAmount,
+  payableWithGst,
+  resolvePlanBillingAmount,
+} from "../utils/planPricing";
 
-const PLAN_PRICING = {
-  monthly: { basic: 1245, pro: 3040, enterprise: 6490 },
-  quarterly: { basic: 3540, pro: 8650, enterprise: 16245 },
-  yearly: { basic: 13200, pro: 32500, enterprise: 69000 },
-};
+const PLAN_MONTHLY_PRICE = PLAN_MONTHLY_DEFAULT;
 
-const PLAN_DISCOUNT_LABEL = {
-  monthly: "",
-  quarterly: "(5% Off)",
-  yearly: "(10% Off)",
-};
-
-const PLAN_FEATURES = {
-  basic: ["Upto 1 Agent", "Upto 5 Custom Attributes", "Template Message APIs", "1200 messages/month"],
-  pro: ["All in Basic", "Upto 10 Tags", "Campaign click tracking", "Project APIs"],
-  enterprise: ["Unlimited tags", "Dedicated account manager", "Highest messaging speed", "Upto 10GB cloud storage"],
-};
-
-const buildFallbackCatalog = () =>
-  ["basic", "pro", "enterprise"].map((slug, idx) => ({
-    id: idx + 1,
-    slug,
-    name: slug.charAt(0).toUpperCase() + slug.slice(1),
-    price_monthly: PLAN_PRICING.monthly[slug],
-    price_quarterly: PLAN_PRICING.quarterly[slug],
-    price_yearly: PLAN_PRICING.yearly[slug],
-    users_limit: slug === "basic" ? 1 : slug === "pro" ? 5 : 50,
-    messages_limit: slug === "basic" ? 1200 : slug === "pro" ? 10000 : 100000,
-    features: PLAN_FEATURES[slug] || [],
+const buildFallbackCatalog = () => [
+  {
+    id: 1,
+    slug: "standard",
+    name: "Standard Project Plan",
+    price_monthly: PLAN_MONTHLY_PRICE,
+    price_quarterly: computeQuarterlyFromMonthly(PLAN_MONTHLY_PRICE),
+    price_yearly: computeYearlyFromMonthly(PLAN_MONTHLY_PRICE),
+    users_limit: 0,
+    messages_limit: 0,
+    features: [
+      "Unlimited Agents",
+      "Unlimited Campaigns",
+      "Unlimited Templates",
+      "Unlimited Flows",
+      "Unlimited Contacts",
+      "Multi Agent Live Chat",
+    ],
     is_active: true,
-    sort_order: idx + 1,
-  }));
+    sort_order: 1,
+  },
+];
 
-const WCC_GST_RATE = 0.18;
-
-const wccGstAmount = (base) => Math.round(Math.max(0, Number(base) || 0) * WCC_GST_RATE * 100) / 100;
-
-const wccPayableTotal = (base) => {
-  const b = Math.max(0, Number(base) || 0);
-  return Math.round((b + wccGstAmount(b)) * 100) / 100;
-};
-
-const formatInr = (value) =>
-  Number(value).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
-
-function PlanGstBreakdown({ subtotal }) {
-  const base = Math.max(0, Number(subtotal) || 0);
-  const gst = wccGstAmount(base);
-  const total = wccPayableTotal(base);
-  return (
-    <div className="rounded-xl border border-sky-100/90 bg-sky-50/40 px-3 py-3 space-y-2 text-sm">
-      <div className="flex items-center justify-between gap-2 text-gray-700">
-        <span>Plan amount</span>
-        <span className="font-semibold tabular-nums">₹ {formatInr(base)}</span>
-      </div>
-      <div className="flex items-center justify-between gap-2 text-gray-600">
-        <span>GST (18%)</span>
-        <span className="font-semibold tabular-nums">₹ {formatInr(gst)}</span>
-      </div>
-      <div className="flex items-center justify-between gap-2 pt-2 border-t border-sky-200/80 text-gray-900">
-        <span className="font-semibold">Total payable (incl. GST)</span>
-        <span className="font-bold text-emerald-700 tabular-nums">₹ {formatInr(total)}</span>
-      </div>
-      <p className="text-[11px] text-gray-500 leading-snug">Payment is charged inclusive of 18% GST.</p>
-    </div>
-  );
-}
+const wccGstAmount = gstAmount;
+const wccPayableTotal = payableWithGst;
 
 const COUNTRY_CODES = ["+971", "+91", "+65", "+44", "+1"];
+
+/**
+ * Razorpay Checkout expects contact as +{country}{number}.
+ * Invalid / empty / sandbox WA contacts often block Test Mode netbanking after bank selection
+ * (Live is more lenient). Prefer a valid Indian mobile: +91 + 10 digits.
+ */
+const toRazorpayPrefillContact = (raw) => {
+  let digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return "";
+  digits = digits.replace(/^0+/, "");
+  if (digits.length >= 12 && digits.startsWith("91")) {
+    digits = digits.slice(-10);
+  } else if (digits.length > 10) {
+    digits = digits.slice(-10);
+  }
+  if (digits.length !== 10) return "";
+  // AiSensy / Meta sandbox sender — not a valid payer contact for Razorpay Test NB
+  if (digits === "9810765443") return "";
+  return `+91${digits}`;
+};
 
 const splitWhatsappNumber = (value = "", fallbackCountryCode = "+91") => {
   const cleaned = String(value || "").replace(/\s+/g, "");
@@ -133,6 +124,34 @@ const readMetaLiveFromStorage = (clientId, projectId = null) => {
 };
 
 const PROJECT_PROFILE_PREFIX = "waabiz_project_profile_";
+
+const getApiOrigin = () => {
+  const base = String(
+    process.env.REACT_APP_API_URL || "https://api.waabizx.com"
+  )
+    .trim()
+    .replace(/\/$/, "");
+  return base.replace(/\/api$/i, "") || "https://api.waabizx.com";
+};
+
+/** Build display URL: uploads/123.png → https://api.waabizx.com/uploads/123.png */
+const toLogoSrc = (logo) => {
+  const value = logo != null ? String(logo).trim() : "";
+  if (!value) return "";
+  if (
+    value.startsWith("data:") ||
+    value.startsWith("blob:") ||
+    /^https?:\/\//i.test(value)
+  ) {
+    return value;
+  }
+  const origin = getApiOrigin();
+  if (value.startsWith("uploads/")) return `${origin}/${value}`;
+  if (value.startsWith("/uploads/")) return `${origin}${value}`;
+  if (value.startsWith("/api/uploads/")) return `${origin}${value}`;
+  if (value.startsWith("api/uploads/")) return `${origin}/${value}`;
+  return value;
+};
 
 const readProjectProfile = (projectId) => {
   const pid = Number(projectId);
@@ -247,14 +266,21 @@ function AgentRightPanel({
     category: "",
     countryCode: "+91",
     phone: "",
+    description: "",
+    address: "",
+    email: "",
+    website: "",
     logo: "",
   });
   const logoFileInputRef = useRef(null);
+  const [logoFile, setLogoFile] = useState(null);
+  const [logoRemoved, setLogoRemoved] = useState(false);
+  const [accountSaving, setAccountSaving] = useState(false);
   const [planInfo, setPlanInfo] = useState(null);
 
   const [planStep, setPlanStep] = useState(1);
-  const [billingCycle, setBillingCycle] = useState("quarterly");
-  const [selectedPlan, setSelectedPlan] = useState("pro");
+  const [billingCycle, setBillingCycle] = useState("monthly");
+  const [selectedPlan, setSelectedPlan] = useState("standard");
   const [flowBuilderEnabled, setFlowBuilderEnabled] = useState(false);
   const [agentSeatCount, setAgentSeatCount] = useState(0);
 
@@ -265,7 +291,12 @@ function AgentRightPanel({
       try {
         const list = await fetchActivePlans();
         if (!cancelled) {
-          setCatalogPlans(list.length ? list : buildFallbackCatalog());
+          const active = list.filter((p) => p.is_active !== false);
+          const sorted = (active.length ? active : list).slice().sort(
+            (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
+          );
+          const primary = sorted[0];
+          setCatalogPlans(primary ? [primary] : buildFallbackCatalog());
         }
       } catch {
         if (!cancelled) setCatalogPlans(buildFallbackCatalog());
@@ -291,11 +322,38 @@ function AgentRightPanel({
 
     const savedProfile = readProjectProfile(selectedProjectId);
     setAccountProfile(savedProfile);
+    setLogoFile(null);
+    setLogoRemoved(false);
 
     let mounted = true;
     (async () => {
       if (mounted) setProjectPhoneLoaded(false);
       try {
+        try {
+          const profileRes = await axios.get("/profile", {
+            params: { projectId: selectedProjectId },
+          });
+          const serverProfile = profileRes?.data?.profile;
+          if (mounted && serverProfile) {
+            const normalized = {
+              name: serverProfile.name || "",
+              category: serverProfile.category || "",
+              countryCode: serverProfile.countryCode || "+91",
+              phone: serverProfile.phone || "",
+              description: serverProfile.description || "",
+              address: serverProfile.address || "",
+              email: serverProfile.email || "",
+              website: serverProfile.website || "",
+              logo: serverProfile.logo || "",
+              updatedAt: new Date().toISOString(),
+            };
+            setAccountProfile(normalized);
+            writeProjectProfile(selectedProjectId, normalized);
+          }
+        } catch (_) {
+          /* keep local cache if profile API fails */
+        }
+
         const res = await axios.get("/projects/list");
         const projects = Array.isArray(res?.data?.projects) ? res.data.projects : [];
         const matched = projects.find((p) => Number(p?.id) === selectedProjectId);
@@ -401,28 +459,67 @@ function AgentRightPanel({
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onFocus);
     window.addEventListener("storage", onStorage);
+    const onPaymentSuccess = () => refreshWhatsAppLiveStatus();
+    window.addEventListener("whatsapp-payment-success", onPaymentSuccess);
     return () => {
       window.clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("storage", onStorage);
+      window.removeEventListener("whatsapp-payment-success", onPaymentSuccess);
     };
   }, [refreshWhatsAppLiveStatus, location.pathname, selectedProject?.id]);
 
   useEffect(() => {
     const userId = Number(user?.id);
+    const projectId = Number(selectedProject?.id);
     if (!Number.isInteger(userId) || userId <= 0) {
       setPlanInfo(null);
       return;
     }
+
+    // Prefer server plan for the active project (source of truth).
+    const fromApi = conversationQuota?.planInfo;
+    const apiProjectMatches =
+      conversationQuota?.projectId == null ||
+      !Number.isInteger(projectId) ||
+      projectId <= 0 ||
+      Number(conversationQuota.projectId) === projectId;
+    if (fromApi && typeof fromApi === "object" && apiProjectMatches) {
+      setPlanInfo(fromApi.active ? fromApi : null);
+      if (Number.isInteger(projectId) && projectId > 0 && fromApi.active) {
+        try {
+          localStorage.setItem(`planInfo:${userId}:${projectId}`, JSON.stringify(fromApi));
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      return;
+    }
+
+    if (!Number.isInteger(projectId) || projectId <= 0) {
+      setPlanInfo(null);
+      return;
+    }
+
     try {
-      const raw = localStorage.getItem(`planInfo:${userId}`);
+      const projectKey = `planInfo:${userId}:${projectId}`;
+      let raw = localStorage.getItem(projectKey);
+      // One-time migrate legacy user-scoped plan onto the *current* project only.
+      if (!raw) {
+        const legacy = localStorage.getItem(`planInfo:${userId}`);
+        if (legacy) {
+          localStorage.setItem(projectKey, legacy);
+          localStorage.removeItem(`planInfo:${userId}`);
+          raw = legacy;
+        }
+      }
       const parsed = raw ? JSON.parse(raw) : null;
       setPlanInfo(parsed && parsed.active ? parsed : null);
     } catch (_) {
       setPlanInfo(null);
     }
-  }, [user?.id]);
+  }, [user?.id, selectedProject?.id, conversationQuota?.planInfo, conversationQuota?.projectId]);
 
   const businessName =
     (accountProfile?.name && String(accountProfile.name).trim()) ||
@@ -442,7 +539,7 @@ function AgentRightPanel({
     .trim()
     .toUpperCase()
     .slice(0, 32);
-  const accountLogoUrl = resolveProjectLogo(matchedProject, accountProfile);
+  const accountLogoUrl = toLogoSrc(resolveProjectLogo(matchedProject, accountProfile));
   const businessInitial = String(businessName).trim().charAt(0).toUpperCase() || "B";
   const fallbackCc = (user?.countryCode || user?.country_code || "+91").toString().trim();
 
@@ -487,8 +584,14 @@ function AgentRightPanel({
       category: businessCategory,
       countryCode: accountProfile?.countryCode || split.countryCode || fallbackCc,
       phone: accountProfile?.phone || split.localNumber || "",
+      description: accountProfile?.description || "",
+      address: accountProfile?.address || "",
+      email: accountProfile?.email || "",
+      website: accountProfile?.website || "",
       logo: accountLogoUrl || "",
     });
+    setLogoFile(null);
+    setLogoRemoved(false);
     setShowAccountEditModal(true);
   };
 
@@ -503,16 +606,14 @@ function AgentRightPanel({
       alert("Logo must be 2 MB or smaller.");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      setAccountEditForm((prev) => ({ ...prev, logo: result }));
-    };
-    reader.readAsDataURL(file);
+    setLogoFile(file);
+    setLogoRemoved(false);
+    const previewUrl = URL.createObjectURL(file);
+    setAccountEditForm((prev) => ({ ...prev, logo: previewUrl }));
     event.target.value = "";
   };
 
-  const saveAccountProfile = () => {
+  const saveAccountProfile = async () => {
     const pid = Number(selectedProject?.id);
     if (!Number.isInteger(pid) || pid <= 0) {
       alert("Select a workspace project before saving account details.");
@@ -529,35 +630,84 @@ function AgentRightPanel({
       .trim()
       .toUpperCase()
       .slice(0, 32);
-    const profile = {
-      name,
-      category,
-      countryCode,
-      phone,
-      logo: String(accountEditForm.logo || "").trim(),
-      updatedAt: new Date().toISOString(),
-    };
-    writeProjectProfile(pid, profile);
-    setAccountProfile(profile);
-    if (phone) {
-      setProjectWhatsappNumber(`${countryCode}${phone}`);
-      setProjectPhoneApproved(true);
+    const description = String(accountEditForm.description || "").trim();
+    const address = String(accountEditForm.address || "").trim();
+    const email = String(accountEditForm.email || "").trim();
+    const website = String(accountEditForm.website || "").trim();
+
+    const formData = new FormData();
+    formData.append("name", name);
+    formData.append("category", category);
+    formData.append("countryCode", countryCode);
+    formData.append("phone", phone);
+    formData.append("description", description);
+    formData.append("address", address);
+    formData.append("email", email);
+    formData.append("website", website);
+    formData.append("projectId", String(pid));
+    if (logoFile) {
+      formData.append("logo", logoFile);
     }
+    if (logoRemoved && !logoFile) {
+      formData.append("removeLogo", "1");
+    }
+
+    setAccountSaving(true);
     try {
-      const raw = localStorage.getItem("selectedProject");
-      if (raw) {
-        const sp = JSON.parse(raw);
-        if (Number(sp?.id) === pid) {
-          localStorage.setItem(
-            "selectedProject",
-            JSON.stringify({ ...sp, project_name: name, category })
-          );
-        }
+      const res = await axios.put("/profile", formData);
+      const savedLogo = res?.data?.logo ?? res?.data?.profile?.logo ?? null;
+      const metaSync = res?.data?.metaSync;
+      const profile = {
+        name,
+        category,
+        countryCode,
+        phone,
+        description,
+        address,
+        email,
+        website,
+        logo: savedLogo ? String(savedLogo) : "",
+        updatedAt: new Date().toISOString(),
+      };
+      writeProjectProfile(pid, profile);
+      setAccountProfile(profile);
+      setLogoFile(null);
+      setLogoRemoved(false);
+      if (phone) {
+        setProjectWhatsappNumber(`${countryCode}${phone}`);
+        setProjectPhoneApproved(true);
       }
-    } catch (_) {
-      /* ignore */
+      try {
+        const raw = localStorage.getItem("selectedProject");
+        if (raw) {
+          const sp = JSON.parse(raw);
+          if (Number(sp?.id) === pid) {
+            localStorage.setItem(
+              "selectedProject",
+              JSON.stringify({ ...sp, project_name: name, category })
+            );
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      setShowAccountEditModal(false);
+      if (metaSync && metaSync.synced === false && !metaSync.skipped) {
+        alert(
+          `Saved locally, but WhatsApp profile sync failed: ${metaSync.message || "Meta API error"}`
+        );
+      } else if (metaSync?.synced && logoFile && metaSync.profilePictureSynced === false) {
+        alert(
+          `Saved, but WhatsApp profile photo sync failed: ${
+            metaSync.pictureUpload?.message || metaSync.note || "Meta photo upload error"
+          }`
+        );
+      }
+    } catch (e) {
+      alert(e?.response?.data?.message || e?.message || "Failed to save account details.");
+    } finally {
+      setAccountSaving(false);
     }
-    setShowAccountEditModal(false);
   };
 
   const userMobileDigits = String(
@@ -570,39 +720,33 @@ function AgentRightPanel({
       ""
   ).replace(/\D/g, "");
 
-  const paymentContactDigits = businessPhoneDigits || userMobileDigits;
+  // Prefer account mobile for Razorpay — not WhatsApp Business / sandbox sender number.
+  const paymentContactDigits = userMobileDigits || businessPhoneDigits;
 
-  const whatsappConnected = Boolean(
-    isWhatsAppApiLive || metaOnboardingLive
+  const whatsappConnected = Boolean(isWhatsAppApiLive || metaOnboardingLive);
+
+  const unifiedPlan = useMemo(() => {
+    if (!catalogPlans.length) return null;
+    const active = catalogPlans.filter((p) => p.is_active !== false);
+    const sorted = (active.length ? active : catalogPlans).slice().sort(
+      (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
+    );
+    const plan = sorted[0];
+    const monthly = Number(plan?.price_monthly) || PLAN_MONTHLY_PRICE;
+    return { ...plan, monthly };
+  }, [catalogPlans]);
+
+  const planMonthlyBase = unifiedPlan?.monthly ?? PLAN_MONTHLY_PRICE;
+
+  const basePlanPrice = useMemo(
+    () => (unifiedPlan ? resolvePlanBillingAmount(unifiedPlan, billingCycle) : cycleBillingAmount(planMonthlyBase, billingCycle)),
+    [unifiedPlan, planMonthlyBase, billingCycle]
   );
 
-  const planPricing = useMemo(() => {
-    const cycles = { monthly: {}, quarterly: {}, yearly: {} };
-    catalogPlans.forEach((p) => {
-      const slug = p.slug;
-      if (!slug) return;
-      cycles.monthly[slug] = Number(p.price_monthly) || 0;
-      cycles.quarterly[slug] = Number(p.price_quarterly) || 0;
-      cycles.yearly[slug] = Number(p.price_yearly) || 0;
-    });
-    return cycles;
-  }, [catalogPlans]);
-
-  const planFeaturesMap = useMemo(() => {
-    const map = {};
-    catalogPlans.forEach((p) => {
-      if (p.slug) map[p.slug] = Array.isArray(p.features) ? p.features : [];
-    });
-    return map;
-  }, [catalogPlans]);
-
   useEffect(() => {
-    if (!catalogPlans.length) return;
-    const slugs = catalogPlans.map((p) => p.slug).filter(Boolean);
-    if (!slugs.includes(selectedPlan)) setSelectedPlan(slugs[0]);
-  }, [catalogPlans, selectedPlan]);
+    if (unifiedPlan?.slug) setSelectedPlan(unifiedPlan.slug);
+  }, [unifiedPlan?.slug]);
 
-  const basePlanPrice = Number(planPricing[billingCycle]?.[selectedPlan]) || 0;
   const flowBuilderPrice = billingCycle === "quarterly" ? 7125 : billingCycle === "yearly" ? 24900 : 2499;
   const agentSeatPrice = billingCycle === "quarterly" ? 1200 : billingCycle === "yearly" ? 4200 : 450;
   const addonPrice = (flowBuilderEnabled ? flowBuilderPrice : 0) + agentSeatCount * agentSeatPrice;
@@ -619,8 +763,31 @@ function AgentRightPanel({
   const wccPurchaseDisabled = paymentLoading || wccBaseAmount < 100;
   const hasActivePlan = Boolean(planInfo?.active);
   const renewDateLabel = planInfo?.renewsOn
-    ? new Date(planInfo.renewsOn).toLocaleDateString()
+    ? new Date(planInfo.renewsOn).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      })
     : null;
+
+  const planEndingSoon = useMemo(() => {
+    if (!hasActivePlan || !planInfo?.renewsOn) return null;
+    const endDate = new Date(planInfo.renewsOn);
+    if (Number.isNaN(endDate.getTime())) return null;
+    const now = Date.now();
+    const endMs = endDate.getTime();
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    const msLeft = endMs - now;
+    if (msLeft < 0 || msLeft > weekMs) return null;
+    return {
+      endDate: endDate.toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      }),
+      daysLeft: Math.max(1, Math.ceil(msLeft / (24 * 60 * 60 * 1000))),
+    };
+  }, [hasActivePlan, planInfo?.renewsOn]);
 
   const planSummaryText = useMemo(() => {
     if (billingCycle === "monthly") return "Renews every month";
@@ -666,21 +833,27 @@ function AgentRightPanel({
       }
 
       await loadRazorpayScript();
+      const razorpayContact = toRazorpayPrefillContact(paymentContactDigits);
+      const razorpayEmail = String(user?.email || "").trim();
       const options = {
         key: createOrderData.keyId,
-        amount: String(createOrderData.amount),
-        currency: createOrderData.currency,
+        amount: Number(createOrderData.amount),
+        currency: createOrderData.currency || "INR",
         name: "Waabizx",
         description,
         order_id: createOrderData.orderId,
         prefill: {
-          name: user?.name || "",
-          email: user?.email || "",
-          contact: paymentContactDigits || "",
+          name: String(user?.name || "").trim() || "Customer",
+          ...(razorpayEmail ? { email: razorpayEmail } : {}),
+          // Omit invalid contact — empty/wrong format breaks Test Mode netbanking proceed
+          ...(razorpayContact ? { contact: razorpayContact } : {}),
         },
         theme: { color: "#0284c7" },
+        // Keep bank / mock pages able to open (Test Mode netbanking uses a redirect/mock page)
         modal: {
           ondismiss: () => setPaymentLoading(false),
+          escape: true,
+          backdropclose: false,
         },
         handler: async (response) => {
           try {
@@ -750,12 +923,18 @@ function AgentRightPanel({
       },
     });
 
-  const purchasePlan = () =>
-    openRazorpayCheckout({
+  const purchasePlan = () => {
+    const projectId = selectedProject?.id || null;
+    if (!(Number(projectId) > 0)) {
+      alert("Select a project before purchasing a plan.");
+      return;
+    }
+    return openRazorpayCheckout({
       amount: planTotalPayable,
       purpose: "plan_purchase",
       description: `${selectedPlan.toUpperCase()} plan (${billingCycle})`,
       metadata: {
+        projectId,
         cycle: billingCycle,
         plan: selectedPlan,
         planId: catalogPlans.find((p) => p.slug === selectedPlan)?.id ?? null,
@@ -765,7 +944,7 @@ function AgentRightPanel({
         addonPrice,
         planSubtotal: grandTotal,
       },
-      onSuccess: () => {
+      onSuccess: async () => {
         const nowIso = new Date().toISOString();
         const renewsOn =
           billingCycle === "monthly"
@@ -782,15 +961,21 @@ function AgentRightPanel({
         };
         setPlanInfo(nextPlanInfo);
         const uid = Number(user?.id);
-        if (Number.isInteger(uid) && uid > 0) {
-          localStorage.setItem(`planInfo:${uid}`, JSON.stringify(nextPlanInfo));
+        const pid = Number(projectId);
+        if (Number.isInteger(uid) && uid > 0 && Number.isInteger(pid) && pid > 0) {
+          localStorage.setItem(`planInfo:${uid}:${pid}`, JSON.stringify(nextPlanInfo));
+          localStorage.removeItem(`planInfo:${uid}`);
         }
         setShowPlanModal(false);
         setPlanStep(1);
         setPaymentLoading(false);
+        if (typeof onRefreshConversationQuota === "function") {
+          await onRefreshConversationQuota();
+        }
         alert("Plan purchased successfully!");
       },
     });
+  };
 
   const cardShell =
     "relative overflow-hidden rounded-2xl border border-gray-100/90 bg-white/95 backdrop-blur-sm shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80";
@@ -889,7 +1074,9 @@ function AgentRightPanel({
               <div className="flex items-center justify-between gap-3 border-b border-sky-100/90 bg-gradient-to-r from-sky-50 via-white to-blue-50 px-5 py-4">
                 <div>
                   <h3 className="text-base font-bold text-gray-900">Edit account</h3>
-                  <p className="mt-0.5 text-[11px] text-gray-500">Update logo, name, category, and phone</p>
+                  <p className="mt-0.5 text-[11px] text-gray-500">
+                    Update logo &amp; WhatsApp Business Profile fields
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -931,12 +1118,19 @@ function AgentRightPanel({
                     {accountEditForm.logo ? (
                       <button
                         type="button"
-                        onClick={() => setAccountEditForm((prev) => ({ ...prev, logo: "" }))}
+                        onClick={() => {
+                          setLogoFile(null);
+                          setLogoRemoved(true);
+                          setAccountEditForm((prev) => ({ ...prev, logo: "" }));
+                        }}
                         className="text-left text-[11px] font-semibold text-rose-600 hover:text-rose-700"
                       >
                         Remove logo
                       </button>
                     ) : null}
+                    <p className="text-[10px] text-gray-400 leading-snug max-w-[14rem]">
+                      Logo is saved on Waabizx and synced to WhatsApp Business profile photo on Save.
+                    </p>
                   </div>
                 </div>
                 <div>
@@ -988,6 +1182,52 @@ function AgentRightPanel({
                     />
                   </div>
                 </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700">Description</label>
+                  <textarea
+                    value={accountEditForm.description}
+                    onChange={(e) =>
+                      setAccountEditForm((prev) => ({ ...prev, description: e.target.value }))
+                    }
+                    rows={3}
+                    maxLength={512}
+                    className="mt-1.5 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/30 outline-none resize-y"
+                    placeholder="Business description (synced to WhatsApp)"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700">Address</label>
+                  <input
+                    type="text"
+                    value={accountEditForm.address}
+                    onChange={(e) => setAccountEditForm((prev) => ({ ...prev, address: e.target.value }))}
+                    maxLength={256}
+                    className="mt-1.5 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/30 outline-none"
+                    placeholder="Business address"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700">Email</label>
+                  <input
+                    type="email"
+                    value={accountEditForm.email}
+                    onChange={(e) => setAccountEditForm((prev) => ({ ...prev, email: e.target.value }))}
+                    maxLength={128}
+                    className="mt-1.5 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/30 outline-none"
+                    placeholder="business@example.com"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700">Website</label>
+                  <input
+                    type="url"
+                    value={accountEditForm.website}
+                    onChange={(e) => setAccountEditForm((prev) => ({ ...prev, website: e.target.value }))}
+                    maxLength={256}
+                    className="mt-1.5 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/30 outline-none"
+                    placeholder="https://example.com"
+                  />
+                </div>
               </div>
               <div className="flex justify-end gap-2 border-t border-gray-100 bg-gray-50/80 px-5 py-4">
                 <button
@@ -1000,9 +1240,10 @@ function AgentRightPanel({
                 <button
                   type="button"
                   onClick={saveAccountProfile}
-                  className="rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-sky-500/25 hover:from-sky-500 hover:to-blue-500"
+                  disabled={accountSaving}
+                  className="rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-sky-500/25 hover:from-sky-500 hover:to-blue-500 disabled:opacity-60"
                 >
-                  Save
+                  {accountSaving ? "Saving…" : "Save"}
                 </button>
               </div>
             </div>
@@ -1033,9 +1274,14 @@ function AgentRightPanel({
             {whatsappConnected ? (
               <>
                 <p className="text-[10px] text-emerald-700 mt-1 font-semibold leading-snug">Your WhatsApp Business API is live.</p>
-                <span className="inline-flex items-center mt-2 rounded-full bg-emerald-50 text-emerald-700 px-2.5 py-1 text-[10px] font-bold ring-1 ring-emerald-200/80">
-                  LIVE
-                </span>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center rounded-full bg-emerald-50 text-emerald-700 px-2.5 py-1 text-[10px] font-bold ring-1 ring-emerald-200/80">
+                    LIVE
+                  </span>
+                </div>
+                <p className="text-[10px] text-emerald-700 mt-2 leading-snug">
+                  Connected and ready to send WhatsApp messages.
+                </p>
               </>
             ) : (
               <p className="text-[10px] text-gray-500 mt-1 leading-snug">Link your Meta account to send campaigns and templates.</p>
@@ -1044,7 +1290,7 @@ function AgentRightPanel({
           <button
             type="button"
             onClick={() => {
-              if (!whatsappConnected) navigate("/connect-whatsapp");
+              if (!whatsappConnected) navigate("/connect-whatsapp?autoConnect=1");
             }}
             disabled={whatsappConnected}
             aria-disabled={whatsappConnected}
@@ -1094,7 +1340,17 @@ function AgentRightPanel({
           <h3 className="mt-1.5 font-bold text-base md:text-lg bg-gradient-to-r from-sky-700 to-blue-800 bg-clip-text text-transparent tracking-tight">
             {hasActivePlan ? String(planInfo?.plan || "basic").toUpperCase() : "BASIC"}
           </h3>
-          {hasActivePlan && renewDateLabel ? (
+          {planEndingSoon ? (
+            <div className="mt-3 rounded-xl border border-amber-200/90 bg-gradient-to-br from-amber-50 to-orange-50/60 px-3 py-2.5 ring-1 ring-amber-100/80">
+              <p className="text-[11px] font-semibold text-amber-900 leading-snug">
+                Plan ends soon — please recharge to continue
+              </p>
+              <p className="mt-1 text-[10px] text-amber-800/90">
+                Ends on <span className="font-bold">{planEndingSoon.endDate}</span>
+                {planEndingSoon.daysLeft === 1 ? " (tomorrow)" : ` (${planEndingSoon.daysLeft} days left)`}
+              </p>
+            </div>
+          ) : hasActivePlan && renewDateLabel ? (
             <p className="mt-2 text-[11px] text-gray-500 leading-snug">Renews on {renewDateLabel}</p>
           ) : (
             <p className="mt-2 text-[11px] text-gray-500 leading-snug">Upgrade anytime from billing when you need higher limits.</p>
@@ -1106,9 +1362,13 @@ function AgentRightPanel({
               setPaymentLoading(false);
               setShowPlanModal(true);
             }}
-            className="mt-3 w-full px-3 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 shadow-md shadow-emerald-600/25 hover:from-emerald-500 hover:to-teal-500 transition"
+            className={`mt-3 w-full px-3 py-2.5 rounded-xl text-xs font-semibold text-white shadow-md transition ${
+              planEndingSoon
+                ? "bg-gradient-to-r from-amber-500 to-orange-600 shadow-amber-500/25 hover:from-amber-400 hover:to-orange-500"
+                : "bg-gradient-to-r from-emerald-600 to-teal-600 shadow-emerald-600/25 hover:from-emerald-500 hover:to-teal-500"
+            }`}
           >
-            {hasActivePlan ? "Upgrade Now" : "Get Plan"}
+            {planEndingSoon ? "Recharge Now" : hasActivePlan ? "Upgrade Now" : "Get Plan"}
           </button>
         </div>
       </div>
@@ -1367,77 +1627,35 @@ function AgentRightPanel({
                       <p className="text-sm font-semibold text-emerald-800">Upgrade your plan to unlock this feature</p>
                       <p className="text-xs text-emerald-700 mt-1">Get advanced features to elevate your marketing game</p>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 rounded-xl bg-sky-50/90 p-1.5 ring-1 ring-sky-100/80">
-                      {["monthly", "quarterly", "yearly"].map((cycle) => (
-                        <button
-                          key={cycle}
-                          type="button"
-                          onClick={() => setBillingCycle(cycle)}
-                          className={`px-3 py-2 text-xs font-semibold rounded-lg transition ${
-                            billingCycle === cycle ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow" : "bg-transparent text-slate-700 hover:bg-white"
-                          }`}
-                        >
-                          {cycle.charAt(0).toUpperCase() + cycle.slice(1)} {PLAN_DISCOUNT_LABEL[cycle]}
-                        </button>
-                      ))}
-                    </div>
-                    {plansLoading ? (
-                      <div className="py-8 flex justify-center">
-                        <div className="h-8 w-8 animate-spin rounded-full border-2 border-sky-200 border-t-sky-600" />
-                      </div>
-                    ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      {catalogPlans.map((plan) => {
-                        const slug = plan.slug;
-                        const price = Number(planPricing[billingCycle]?.[slug]) || 0;
-                        const features = planFeaturesMap[slug] || [];
-                        return (
-                        <button
-                          key={slug}
-                          type="button"
-                          onClick={() => setSelectedPlan(slug)}
-                          className={`text-left rounded-2xl border-2 p-4 transition ${
-                            selectedPlan === slug
-                              ? "border-emerald-400 ring-2 ring-emerald-200 bg-gradient-to-b from-emerald-50/60 to-white shadow-md"
-                              : "border-gray-200 bg-white hover:border-sky-200 hover:shadow-sm"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <h4 className="text-base font-bold text-slate-900 uppercase">{plan.name || slug}</h4>
-                            {selectedPlan === slug ? <span className="text-[10px] font-bold text-emerald-700">CHOSEN</span> : null}
+                    <PlanSubscriptionView
+                      monthly={planMonthlyBase}
+                      billingCycle={billingCycle}
+                      onBillingCycleChange={setBillingCycle}
+                      loading={plansLoading}
+                      showGst={false}
+                      planName={unifiedPlan?.name || "Standard Project Plan"}
+                      features={unifiedPlan?.features?.length ? unifiedPlan.features : null}
+                      plan={unifiedPlan}
+                    >
+                      <PlanGstBreakdown monthly={planMonthlyBase} billingCycle={billingCycle} plan={unifiedPlan} />
+                      <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-800">Total</p>
+                            <p className="text-xs text-slate-500">{planSummaryText}</p>
                           </div>
-                          <p className="mt-1 text-sm font-semibold text-emerald-700">₹ {price.toLocaleString("en-IN")}/{billingCycle === "monthly" ? "month" : billingCycle === "quarterly" ? "quarter" : "year"}</p>
-                          <p className="text-[10px] text-gray-500 mt-1">{plan.users_limit} users · {Number(plan.messages_limit || 0).toLocaleString("en-IN")} messages</p>
-                          <ul className="mt-3 space-y-1">
-                            {features.map((f) => (
-                              <li key={f} className="text-[11px] text-gray-600">
-                                • {f}
-                              </li>
-                            ))}
-                          </ul>
-                        </button>
-                        );
-                      })}
-                    </div>
-                    )}
-                    <PlanGstBreakdown subtotal={basePlanPrice} />
-                    <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-800">Total</p>
-                          <p className="text-xs text-slate-500">{planSummaryText}</p>
+                          <p className="text-xl font-bold text-emerald-700 tabular-nums">₹ {formatInr(planStep1Payable)}</p>
                         </div>
-                        <p className="text-xl font-bold text-emerald-700 tabular-nums">₹ {formatInr(planStep1Payable)}</p>
+                        <p className="text-[11px] text-gray-500 mt-1">
+                          Incl. GST ₹ {formatInr(planStep1Gst)} on plan ₹ {formatInr(basePlanPrice)}
+                        </p>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button type="button" onClick={() => setPlanStep(2)} className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition shadow-md shadow-emerald-500/25">
+                            Continue
+                          </button>
+                        </div>
                       </div>
-                      <p className="text-[11px] text-gray-500 mt-1">
-                        Incl. GST ₹ {formatInr(planStep1Gst)} on plan ₹ {formatInr(basePlanPrice)}
-                      </p>
-                      <div className="mt-4 flex justify-end gap-2">
-                        <button type="button" onClick={() => setPlanStep(2)} className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition shadow-md shadow-emerald-500/25">
-                          Continue
-                        </button>
-                      </div>
-                    </div>
+                    </PlanSubscriptionView>
                   </>
                 ) : (
                   <>
@@ -1489,7 +1707,12 @@ function AgentRightPanel({
                       </div>
                     </div>
 
-                    <PlanGstBreakdown subtotal={grandTotal} />
+                    <PlanGstBreakdown
+                      monthly={planMonthlyBase}
+                      billingCycle={billingCycle}
+                      subtotal={grandTotal}
+                      plan={unifiedPlan}
+                    />
                     <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                         <div className="rounded-xl border border-gray-200 p-3">

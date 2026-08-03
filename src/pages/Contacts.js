@@ -13,6 +13,7 @@ import {
   getContactById,
   uploadContactsCSV
 } from '../services/contactService';
+import { fetchTags } from '../services/tagService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
@@ -29,7 +30,8 @@ function Contacts() {
   const [contacts, setContacts] = useState([]);
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [pagination, setPagination] = useState({ total: 0, page: 1, pages: 1, limit: 20 });
-  const [filters, setFilters] = useState({ status: '', type: '', search: '', page: 1 });
+  const [filters, setFilters] = useState({ status: '', type: '', search: '', tag: '', page: 1 });
+  const [projectTags, setProjectTags] = useState([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importFile, setImportFile] = useState(null);
@@ -80,6 +82,12 @@ function Contacts() {
     fetchProfile();
   }, [navigate]);
 
+  useEffect(() => {
+    fetchTags()
+      .then(setProjectTags)
+      .catch((e) => console.warn('[Contacts] fetchTags', e?.message || e));
+  }, []);
+
   // Fetch notifications
   const fetchNotifications = async (forceRefresh = false) => {
     try {
@@ -124,6 +132,7 @@ function Contacts() {
         status: q.status,
         type: q.type,
         search: q.search,
+        tag: q.tag,
         page: q.page,
         limit: q.limit ?? 20
       });
@@ -218,7 +227,7 @@ function Contacts() {
       showToast(msg, 'info');
       setShowImportModal(false);
       setImportFile(null);
-      setFilters((prev) => ({ ...prev, status: '', type: '', search: '', page: 1 }));
+      setFilters((prev) => ({ ...prev, status: '', type: '', search: '', tag: '', page: 1 }));
       await fetchContacts({ status: '', type: '', search: '', page: 1 });
       if (Array.isArray(data.contacts) && data.contacts.length > 0) {
         setContacts((prev) => {
@@ -397,6 +406,14 @@ function Contacts() {
 
   const handlePageChange = (newPage) => {
     setFilters({ ...filters, page: newPage });
+  };
+
+  const handleTagFilter = (tagName) => {
+    setFilters((prev) => ({
+      ...prev,
+      tag: prev.tag === tagName ? '' : tagName,
+      page: 1,
+    }));
   };
 
   const handleFilterChange = (e) => {
@@ -765,6 +782,43 @@ function Contacts() {
                 </select>
               </div>
             </div>
+            {projectTags.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-gray-100">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Filter by tag</label>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setFilters((prev) => ({ ...prev, tag: '', page: 1 }))}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
+                      !filters.tag
+                        ? 'bg-sky-600 text-white border-sky-600'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-sky-300'
+                    }`}
+                  >
+                    All
+                  </button>
+                  {projectTags.map((tag) => (
+                    <button
+                      key={tag.id}
+                      type="button"
+                      onClick={() => handleTagFilter(tag.name)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition ${
+                        filters.tag === tag.name
+                          ? 'text-white border-transparent'
+                          : 'bg-white text-gray-700 border-gray-200 hover:border-sky-300'
+                      }`}
+                      style={
+                        filters.tag === tag.name
+                          ? { backgroundColor: tag.color || '#3B82F6' }
+                          : undefined
+                      }
+                    >
+                      {tag.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="motion-enter motion-delay-2">

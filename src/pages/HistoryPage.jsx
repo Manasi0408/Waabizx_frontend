@@ -1,9 +1,19 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import axios from "../api/axios";
-import { getInboxList, getContactMessages } from "../services/inboxService";
+import { getInboxList, getContactMessages, getContactCampaigns, getContactPayments } from "../services/inboxService";
+import { getTemplates } from "../services/templateService";
+import { normalizeTemplateKey } from "../utils/whatsappTemplatePreview";
+import InboxMessageThread from "../components/InboxMessageThread";
 import AgentSidebar from "../components/AgentSidebar";
 import AgentTopbar from "../components/AgentTopbar";
+import {
+  fetchTags,
+  fetchContactTags,
+  assignContactTag,
+  removeContactTag,
+  createTag,
+} from "../services/tagService";
 
 function formatMessageTime(dateStr) {
   if (!dateStr) return "";
@@ -28,6 +38,30 @@ function formatDateTime(dateStr) {
   return d.toLocaleString();
 }
 
+function phoneDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+/** Prefer a real contact name; fall back to phone when name is missing or equals the number */
+function resolveContactDisplayName(item) {
+  const phone = String(item?.phone || "").trim();
+  const rawName = String(item?.name || item?.customer_name || "").trim();
+  if (!rawName) return phone || "Unknown";
+  const nDigits = phoneDigits(rawName);
+  const pDigits = phoneDigits(phone);
+  if (pDigits && nDigits && nDigits === pDigits) return phone || rawName;
+  if (/^unknown$/i.test(rawName)) return phone || "Unknown";
+  return rawName;
+}
+
+function formatPhoneDisplay(phone) {
+  const raw = String(phone || "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("+")) return raw;
+  const digits = phoneDigits(raw);
+  return digits ? `+${digits}` : raw;
+}
+
 function HistoryPage() {
   const location = useLocation();
 
@@ -37,7 +71,12 @@ function HistoryPage() {
   const [messages, setMessages] = useState([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [optedIn, setOptedIn] = useState(true);
-  const [openSections, setOpenSections] = useState({ payments: false, campaigns: false, attributes: false, tags: false });
+  const [openSections, setOpenSections] = useState({
+    payments: true,
+    campaigns: true,
+    attributes: false,
+    tags: true,
+  });
   const [role, setRole] = useState(null);
   const [currentUserId, setCurrentUserId] = useState(null);
   const [currentUserName, setCurrentUserName] = useState("");
@@ -45,6 +84,15 @@ function HistoryPage() {
   const [agentsList, setAgentsList] = useState([]);
   const [selectedAgent, setSelectedAgentState] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [templateCatalog, setTemplateCatalog] = useState(() => new Map());
+  const [contactCampaigns, setContactCampaigns] = useState([]);
+  const [contactPayments, setContactPayments] = useState([]);
+  const [contactTags, setContactTags] = useState([]);
+  const [allTags, setAllTags] = useState([]);
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [tagBusy, setTagBusy] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const chatScrollRef = useRef(null);
   const messagesEndRef = useRef(null);
 
@@ -138,9 +186,23 @@ function HistoryPage() {
             id: first.contactId || first.phone,
             contactId: first.contactId,
             phone: first.phone,
-            name: first.name || first.phone,
+            name: resolveContactDisplayName(first),
+            email: first.email || null,
+            status: first.status || null,
             lastMessage: first.lastMessage,
           };
+        }
+        if (prev?.phone) {
+          const hit = list.find((c) => phoneDigits(c.phone) === phoneDigits(prev.phone));
+          if (hit) {
+            return {
+              ...prev,
+              contactId: hit.contactId || prev.contactId,
+              name: resolveContactDisplayName({ ...hit, name: hit.name || prev.name }),
+              email: hit.email || prev.email,
+              status: hit.status || prev.status,
+            };
+          }
         }
         return prev;
       });
@@ -156,12 +218,58 @@ function HistoryPage() {
     fetchInboxList();
   }, [fetchInboxList]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [localRes, metaRes] = await Promise.all([
+          getTemplates({ page: 1, limit: 500, status: "approved" }),
+          axios.get("/templates/meta"),
+        ]);
+        const map = new Map();
+        (localRes?.templates || []).forEach((t) => {
+          if (t?.name) map.set(normalizeTemplateKey(t.name), t);
+        });
+        (metaRes?.data?.templates || []).forEach((t) => {
+          if (t?.name) map.set(normalizeTemplateKey(t.name), t);
+        });
+        if (!cancelled) setTemplateCatalog(map);
+      } catch (_) {
+        if (!cancelled) setTemplateCatalog(new Map());
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const fetchMessages = useCallback(async (phone) => {
     if (!phone) return;
     setLoadingMessages(true);
     try {
       const data = await getContactMessages(phone);
       setMessages(data.messages || []);
+      const contact = data.contact;
+      if (contact) {
+        const displayName = resolveContactDisplayName(contact);
+        setSelectedContact((prev) =>
+          prev && phoneDigits(prev.phone) === phoneDigits(phone)
+            ? {
+                ...prev,
+                contactId: contact.id || prev.contactId,
+                id: contact.id || prev.id,
+                name: displayName,
+                email: contact.email || prev.email,
+                status: contact.status || prev.status,
+              }
+            : prev
+        );
+        setInboxList((prev) =>
+          (prev || []).map((row) =>
+            phoneDigits(row.phone) === phoneDigits(phone)
+              ? { ...row, name: displayName, contactId: contact.id || row.contactId, email: contact.email || row.email }
+              : row
+          )
+        );
+      }
     } catch (e) {
       console.error("History getContactMessages error:", e);
       setMessages([]);
@@ -170,40 +278,155 @@ function HistoryPage() {
     }
   }, []);
 
+  const loadContactProfile = useCallback(async (contact) => {
+    if (!contact?.phone) {
+      setContactCampaigns([]);
+      setContactPayments([]);
+      setContactTags([]);
+      return;
+    }
+    setProfileLoading(true);
+    try {
+      const [campaigns, payments, tags, projectTags] = await Promise.all([
+        getContactCampaigns(contact.phone).catch(() => []),
+        getContactPayments(contact.phone).catch(() => []),
+        fetchContactTags({ contactId: contact.contactId, phone: contact.phone }).catch(() => []),
+        fetchTags().catch(() => []),
+      ]);
+      setContactCampaigns(Array.isArray(campaigns) ? campaigns : []);
+      setContactPayments(Array.isArray(payments) ? payments : []);
+      setContactTags(Array.isArray(tags) ? tags : []);
+      setAllTags(Array.isArray(projectTags) ? projectTags : []);
+    } finally {
+      setProfileLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (selectedContact?.phone) {
       fetchMessages(selectedContact.phone);
+      loadContactProfile(selectedContact);
     } else {
       setMessages([]);
+      setContactCampaigns([]);
+      setContactPayments([]);
+      setContactTags([]);
     }
-  }, [selectedContact?.phone, fetchMessages]);
+  }, [selectedContact?.phone, selectedContact?.contactId, fetchMessages, loadContactProfile]);
 
   const selectedContactFromList = useMemo(() => {
     if (!selectedContact?.phone) return null;
-    return inboxList.find((c) => c.phone === selectedContact.phone) || null;
+    return inboxList.find((c) => phoneDigits(c.phone) === phoneDigits(selectedContact.phone)) || null;
   }, [inboxList, selectedContact?.phone]);
+
+  const displayName = resolveContactDisplayName(selectedContact || selectedContactFromList || {});
+  const displayPhone = formatPhoneDisplay(selectedContact?.phone);
+
+  const filteredInboxList = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return inboxList;
+    return inboxList.filter((item) => {
+      const name = resolveContactDisplayName(item).toLowerCase();
+      const phone = String(item.phone || "").toLowerCase();
+      return name.includes(q) || phone.includes(q) || phoneDigits(phone).includes(phoneDigits(q));
+    });
+  }, [inboxList, searchQuery]);
 
   const computedOptedIn = useMemo(() => {
     return !!selectedContactFromList?.whatsappOptInAt;
   }, [selectedContactFromList?.whatsappOptInAt]);
 
   useEffect(() => {
-    // Keep the toggle reflecting contact's current opt-in value
     setOptedIn(computedOptedIn);
   }, [computedOptedIn]);
 
-  // Always scroll to the bottom when opening a chat (read-only history).
   useEffect(() => {
     if (!selectedContact?.phone) return;
     if (loadingMessages) return;
     if (!messagesEndRef.current) return;
-
-    // Use auto so it feels immediate when you switch chats.
     messagesEndRef.current.scrollIntoView({ behavior: "auto", block: "end" });
   }, [selectedContact?.phone, loadingMessages, messages.length]);
 
   const toggleSection = (key) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const assignedTagIds = useMemo(() => new Set((contactTags || []).map((t) => t.id)), [contactTags]);
+  const availableTags = useMemo(
+    () => (allTags || []).filter((t) => !assignedTagIds.has(t.id)),
+    [allTags, assignedTagIds]
+  );
+
+  const handleAssignTag = async (tagId) => {
+    if (!selectedContact?.phone || tagBusy) return;
+    setTagBusy(true);
+    try {
+      const result = await assignContactTag({
+        contactId: selectedContact.contactId,
+        tagId,
+        phone: selectedContact.phone,
+      });
+      if (result?.contactId) {
+        setSelectedContact((prev) => (prev ? { ...prev, contactId: result.contactId, id: result.contactId } : prev));
+      }
+      const tags = await fetchContactTags({
+        contactId: result?.contactId || selectedContact.contactId,
+        phone: selectedContact.phone,
+      });
+      setContactTags(tags);
+      setTagPickerOpen(false);
+    } catch (e) {
+      alert(e?.response?.data?.message || e?.message || "Failed to add tag");
+    } finally {
+      setTagBusy(false);
+    }
+  };
+
+  const handleRemoveTag = async (tagId) => {
+    if (!selectedContact?.phone || tagBusy) return;
+    setTagBusy(true);
+    try {
+      await removeContactTag({
+        contactId: selectedContact.contactId,
+        tagId,
+        phone: selectedContact.phone,
+      });
+      setContactTags((prev) => (prev || []).filter((t) => t.id !== tagId));
+    } catch (e) {
+      alert(e?.response?.data?.message || e?.message || "Failed to remove tag");
+    } finally {
+      setTagBusy(false);
+    }
+  };
+
+  const handleCreateAndAddTag = async () => {
+    if (!selectedContact?.phone || tagBusy) return;
+    const name = window.prompt("New tag name");
+    if (!name || !String(name).trim()) return;
+    setTagBusy(true);
+    try {
+      const tag = await createTag({ name: String(name).trim(), color: "#0ea5e9" });
+      if (!tag?.id) return;
+      setAllTags((prev) => [...(prev || []), tag]);
+      const result = await assignContactTag({
+        contactId: selectedContact.contactId,
+        tagId: tag.id,
+        phone: selectedContact.phone,
+      });
+      if (result?.contactId) {
+        setSelectedContact((prev) => (prev ? { ...prev, contactId: result.contactId, id: result.contactId } : prev));
+      }
+      const tags = await fetchContactTags({
+        contactId: result?.contactId || selectedContact.contactId,
+        phone: selectedContact.phone,
+      });
+      setContactTags(tags);
+      setTagPickerOpen(false);
+    } catch (e) {
+      alert(e?.response?.data?.message || e?.message || "Failed to create tag");
+    } finally {
+      setTagBusy(false);
+    }
   };
 
   return (
@@ -226,6 +449,8 @@ function HistoryPage() {
                 <input
                   type="text"
                   placeholder="Search name or mobile number"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full bg-white/95 border-2 border-gray-200/90 rounded-xl pl-10 pr-12 py-2.5 text-sm text-gray-900 placeholder-gray-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-sky-400/40 focus:border-sky-500 transition"
                 />
                 <svg className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-sky-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -295,7 +520,7 @@ function HistoryPage() {
                     <div className="h-8 w-8 rounded-full border-2 border-sky-200 border-t-sky-600 animate-spin" />
                     Loading…
                   </div>
-                ) : inboxList.length === 0 ? (
+                ) : filteredInboxList.length === 0 ? (
                   <div className="p-8 text-center text-gray-500 text-sm motion-enter">
                     <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-sky-100 text-sky-600">
                       <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -305,10 +530,13 @@ function HistoryPage() {
                     No conversations
                   </div>
                 ) : (
-                  inboxList.map((item) => {
+                  filteredInboxList.map((item) => {
                     const id = item.contactId || item.phone;
+                    const itemName = resolveContactDisplayName(item);
                     const isConvSelected =
-                      selectedContact && (selectedContact.phone === item.phone || selectedContact.contactId === item.contactId);
+                      selectedContact &&
+                      (phoneDigits(selectedContact.phone) === phoneDigits(item.phone) ||
+                        selectedContact.contactId === item.contactId);
                     return (
                       <button
                         key={id || item.phone}
@@ -318,7 +546,9 @@ function HistoryPage() {
                             id: item.contactId || item.phone,
                             contactId: item.contactId,
                             phone: item.phone,
-                            name: item.name || item.phone,
+                            name: itemName,
+                            email: item.email || null,
+                            status: item.status || null,
                             lastMessage: item.lastMessage,
                           })
                         }
@@ -329,10 +559,15 @@ function HistoryPage() {
                         }`}
                       >
                         <div className="w-10 h-10 rounded-full bg-gradient-to-br from-sky-100 to-sky-200 text-sky-800 flex items-center justify-center text-sm font-bold flex-shrink-0 ring-2 ring-white shadow-sm">
-                          {getInitial(item.name || item.phone)}
+                          {getInitial(itemName)}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="font-semibold text-gray-900 truncate text-sm">{item.name || item.phone}</p>
+                          <p className="font-semibold text-gray-900 truncate text-sm">{itemName}</p>
+                          {item.phone ? (
+                            <p className="text-xs text-sky-600 font-medium truncate">
+                              {formatPhoneDisplay(item.phone)}
+                            </p>
+                          ) : null}
                           <p className="text-xs text-gray-500 truncate">{item.lastMessage || "—"}</p>
                         </div>
                       </button>
@@ -341,7 +576,7 @@ function HistoryPage() {
                 )}
               </div>
               <div className="p-3 text-center text-xs font-medium text-sky-800/80 border-t border-gray-200/80 bg-gradient-to-r from-sky-50/50 to-white/80 flex-shrink-0">
-                {inboxList.length} conversation{inboxList.length !== 1 ? "s" : ""}
+                {filteredInboxList.length} conversation{filteredInboxList.length !== 1 ? "s" : ""}
               </div>
             </div>
 
@@ -350,7 +585,7 @@ function HistoryPage() {
                 <div className="min-w-0 flex-1">
                   <span className="font-bold text-gray-900 truncate block">
                     {selectedContact
-                      ? `${selectedContact.name || selectedContact.phone} (${selectedContact.phone})`
+                      ? `${displayName}${displayPhone ? ` (${displayPhone})` : ""}`
                       : "Select a conversation"}
                   </span>
                   {selectedContact && (
@@ -363,11 +598,7 @@ function HistoryPage() {
               </div>
 
               <div className="flex-1 flex min-h-0">
-                <div className="flex-1 flex flex-col min-w-0 min-h-0 relative bg-white/40 backdrop-blur-[2px] border-x border-gray-200/60">
-                  <div
-                    className="absolute inset-0 opacity-[0.04] pointer-events-none bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22%230ea5e9%22%3E%3Cpath d=%22M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z%22/%3E%3C/svg%3E')] bg-repeat bg-center"
-                    style={{ backgroundSize: "100px" }}
-                  />
+                <div className="flex-1 flex flex-col min-w-0 min-h-0 relative bg-[#e5ddd5] border-x border-gray-200/60">
                   <div ref={chatScrollRef} className="flex-1 overflow-y-auto min-h-0 p-4 relative z-10">
                     {!selectedContact ? (
                       <div className="flex flex-col items-center justify-center h-full min-h-[200px] text-gray-500 motion-enter px-4">
@@ -389,41 +620,14 @@ function HistoryPage() {
                         No messages yet
                       </div>
                     ) : (
-                      messages.map((msg) => {
-                        const isOutgoing = msg.type === "outgoing";
-                        const content = msg.content || msg.message || "";
-                        const sentAt = msg.sentAt || msg.createdAt || msg.timestamp;
-                        return (
-                          <div
-                            key={msg.id || `${sentAt}-${content.slice(0, 20)}`}
-                            className={`flex ${isOutgoing ? "justify-end" : "justify-start"} mb-3 motion-enter`}
-                          >
-                            <div className={`flex items-end gap-2 max-w-[75%] ${isOutgoing ? "flex-row-reverse" : ""}`}>
-                              {!isOutgoing && (
-                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-sky-500 to-blue-600 text-white flex items-center justify-center text-xs font-bold flex-shrink-0 shadow-md ring-2 ring-white">
-                                  {getInitial(selectedContact.name || selectedContact.phone)}
-                                </div>
-                              )}
-                              <div
-                                className={`rounded-2xl px-4 py-2.5 shadow-md ${
-                                  isOutgoing
-                                    ? "bg-gradient-to-br from-sky-700 to-slate-800 text-white rounded-bl-md ring-1 ring-sky-600/30"
-                                    : "bg-white text-gray-800 rounded-br-md border border-sky-100/90 ring-1 ring-gray-100/80"
-                                }`}
-                              >
-                                <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{content}</p>
-                                {sentAt && (
-                                  <p className={`text-[10px] mt-1.5 ${isOutgoing ? "text-sky-200" : "text-gray-400"}`}>
-                                    {formatMessageTime(sentAt)}
-                                  </p>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })
+                      <InboxMessageThread
+                        messages={messages}
+                        templateCatalog={templateCatalog}
+                        formatMessageTime={formatMessageTime}
+                        userName={currentUserName || currentUserEmail}
+                        messagesEndRef={messagesEndRef}
+                      />
                     )}
-                    {selectedContact?.phone && messages.length > 0 && <div ref={messagesEndRef} />}
                   </div>
                 </div>
 
@@ -436,15 +640,15 @@ function HistoryPage() {
                     <>
                       <div className="p-4 flex flex-col items-center border-b border-gray-100/80">
                         <div className="w-20 h-20 rounded-full bg-gradient-to-br from-sky-400 to-blue-700 text-white flex items-center justify-center text-2xl font-bold mb-3 shadow-lg shadow-sky-500/30 ring-4 ring-sky-100">
-                          {getInitial(selectedContact.name || selectedContact.phone)}
+                          {getInitial(displayName)}
                         </div>
-                        <p className="font-bold text-gray-900 text-center">{selectedContact.name || selectedContact.phone}</p>
-                        <p className="text-sky-600 font-semibold text-sm mt-1">{selectedContact.phone}</p>
+                        <p className="font-bold text-gray-900 text-center">{displayName}</p>
+                        <p className="text-sky-600 font-semibold text-sm mt-1">{displayPhone}</p>
                       </div>
                       <div className="px-4 pb-4 space-y-0 text-sm">
                         {[
-                          { label: "Status", value: selectedContact?.status || "—" },
-                          { label: "Email", value: selectedContact?.email || "—" },
+                          { label: "Status", value: selectedContact?.status || selectedContactFromList?.status || "—" },
+                          { label: "Email", value: selectedContact?.email || selectedContactFromList?.email || "—" },
                           { label: "Last message", value: selectedContactFromList?.lastMessage || "—" },
                           { label: "Last message time", value: formatDateTime(selectedContactFromList?.lastMessageTime) },
                           { label: "Unread", value: String(selectedContactFromList?.unreadCount ?? "—") },
@@ -490,34 +694,185 @@ function HistoryPage() {
                           </button>
                         </div>
                       </div>
-                      {["Payments", "Campaigns", "Attributes", "Tags"].map((title) => {
-                        const key = title.toLowerCase();
-                        const isOpen = openSections[key];
-                        return (
-                          <div key={title} className="border-t border-gray-200/80">
-                            <button
-                              type="button"
-                              onClick={() => toggleSection(key)}
-                              className="w-full flex items-center justify-between px-4 py-3 text-left text-sm font-bold text-gray-800 hover:bg-sky-50/50 transition"
-                            >
-                              {title}
-                              <svg
-                                className={`w-5 h-5 text-sky-600 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                              >
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                              </svg>
-                            </button>
-                            {isOpen && (
-                              <div className="px-4 pb-3 text-sm text-gray-500 motion-enter">
-                                No {title.toLowerCase()} data.
+
+                      {/* Payments */}
+                      <div className="border-t border-gray-200/80">
+                        <button
+                          type="button"
+                          onClick={() => toggleSection("payments")}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left text-sm font-bold text-gray-800 hover:bg-sky-50/50 transition"
+                        >
+                          Payments
+                          <svg className={`w-5 h-5 text-sky-600 transition-transform duration-200 ${openSections.payments ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {openSections.payments && (
+                          <div className="px-4 pb-3 motion-enter">
+                            <div className="overflow-hidden rounded-lg border border-gray-200">
+                              <div className="grid grid-cols-3 gap-2 bg-slate-50 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                                <span>Order Id</span>
+                                <span>Amount</span>
+                                <span>Status</span>
                               </div>
+                              {profileLoading ? (
+                                <p className="px-3 py-3 text-xs text-gray-500">Loading…</p>
+                              ) : contactPayments.length === 0 ? (
+                                <p className="px-3 py-3 text-xs text-gray-400">No payments for this contact</p>
+                              ) : (
+                                contactPayments.map((p, idx) => (
+                                  <div key={p.id || idx} className="grid grid-cols-3 gap-2 border-t border-gray-100 px-3 py-2 text-xs text-gray-800">
+                                    <span className="truncate font-medium">{p.orderId || p.id || "—"}</span>
+                                    <span>{p.amount != null ? `₹ ${p.amount}` : "—"}</span>
+                                    <span className="capitalize">{p.status || "—"}</span>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Campaigns */}
+                      <div className="border-t border-gray-200/80">
+                        <button
+                          type="button"
+                          onClick={() => toggleSection("campaigns")}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left text-sm font-bold text-gray-800 hover:bg-sky-50/50 transition"
+                        >
+                          Campaigns
+                          <svg className={`w-5 h-5 text-sky-600 transition-transform duration-200 ${openSections.campaigns ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {openSections.campaigns && (
+                          <div className="px-4 pb-3 space-y-2 motion-enter">
+                            {profileLoading ? (
+                              <p className="text-xs text-gray-500">Loading…</p>
+                            ) : contactCampaigns.length === 0 ? (
+                              <p className="text-xs text-gray-400">No campaigns for this contact</p>
+                            ) : (
+                              contactCampaigns.map((c) => (
+                                <div key={c.id} className="flex items-center gap-2 rounded-lg border border-gray-100 bg-slate-50/80 px-3 py-2">
+                                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 shrink-0">
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-xs font-semibold text-gray-900 truncate">{c.name}</p>
+                                    <p className="text-[10px] text-gray-500 capitalize">{c.status || "sent"}</p>
+                                  </div>
+                                </div>
+                              ))
                             )}
                           </div>
-                        );
-                      })}
+                        )}
+                      </div>
+
+                      {/* Attributes */}
+                      <div className="border-t border-gray-200/80">
+                        <button
+                          type="button"
+                          onClick={() => toggleSection("attributes")}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left text-sm font-bold text-gray-800 hover:bg-sky-50/50 transition"
+                        >
+                          Attributes
+                          <svg className={`w-5 h-5 text-sky-600 transition-transform duration-200 ${openSections.attributes ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {openSections.attributes && (
+                          <div className="px-4 pb-3 text-sm text-gray-500 motion-enter">No attributes data.</div>
+                        )}
+                      </div>
+
+                      {/* Tags */}
+                      <div className="border-t border-gray-200/80">
+                        <button
+                          type="button"
+                          onClick={() => toggleSection("tags")}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left text-sm font-bold text-gray-800 hover:bg-sky-50/50 transition"
+                        >
+                          Tags
+                          <svg className={`w-5 h-5 text-sky-600 transition-transform duration-200 ${openSections.tags ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {openSections.tags && (
+                          <div className="px-4 pb-4 space-y-3 motion-enter">
+                            <div className="flex flex-wrap gap-1.5">
+                              {contactTags.map((tag) => (
+                                <span
+                                  key={tag.id}
+                                  className="inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold"
+                                  style={{
+                                    backgroundColor: `${tag.color || "#0ea5e9"}18`,
+                                    borderColor: `${tag.color || "#0ea5e9"}55`,
+                                    color: tag.color || "#0369a1",
+                                  }}
+                                >
+                                  {tag.name}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveTag(tag.id)}
+                                    className="ml-0.5 text-current/70 hover:text-current"
+                                    aria-label={`Remove ${tag.name}`}
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                            <div className="relative flex gap-2">
+                              <div className="relative flex-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setTagPickerOpen((v) => !v)}
+                                  disabled={tagBusy}
+                                  className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-xs text-gray-600 hover:border-sky-300 disabled:opacity-50"
+                                >
+                                  Select &amp; add tag
+                                </button>
+                                {tagPickerOpen && (
+                                  <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-40 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-xl">
+                                    {availableTags.length === 0 ? (
+                                      <p className="px-3 py-2 text-xs text-gray-400">No more tags</p>
+                                    ) : (
+                                      availableTags.map((tag) => (
+                                        <button
+                                          key={tag.id}
+                                          type="button"
+                                          onClick={() => handleAssignTag(tag.id)}
+                                          className="w-full px-3 py-2 text-left text-xs text-gray-800 hover:bg-sky-50"
+                                        >
+                                          {tag.name}
+                                        </button>
+                                      ))
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => availableTags[0] && handleAssignTag(availableTags[0].id)}
+                                disabled={tagBusy || availableTags.length === 0}
+                                className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-bold text-white hover:bg-sky-500 disabled:opacity-40"
+                              >
+                                + Add
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleCreateAndAddTag}
+                              disabled={tagBusy}
+                              className="text-xs font-semibold text-sky-700 hover:underline disabled:opacity-50"
+                            >
+                              Create &amp; Add Tag
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </>
                   ) : (
                     <div className="p-6 text-center text-gray-500 text-sm motion-enter">

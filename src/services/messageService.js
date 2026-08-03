@@ -1,4 +1,6 @@
-const API_URL = 'https://wabizx.techwhizzc.com/api';
+// const API_BASE = (process.env.REACT_APP_API_URL || 'https://wabizx.techwhizzc.com').replace(/\/$/, '');
+const API_BASE = (process.env.REACT_APP_API_URL || 'https://api.waabizx.com').replace(/\/$/, '');
+const API_URL = `${API_BASE}/api`;
 
 const getToken = () => {
   return localStorage.getItem('token');
@@ -107,12 +109,23 @@ export const searchMessages = async (contactId, query, limit = 50, offset = 0) =
 };
 
 // Get paginated messages
-export const getPaginatedMessages = async (contactId, page = 1, limit = 50) => {
+export const getPaginatedMessages = async (contactId, page = 1, limit = 50, phone = '') => {
   try {
     const token = getToken();
     if (!token) throw new Error('No token found');
 
-    const response = await fetch(`${API_URL}/messages/paginated?contactId=${contactId}&page=${page}&limit=${limit}`, {
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+    });
+    if (contactId != null && String(contactId).trim() !== '') {
+      params.set('contactId', String(contactId));
+    }
+    if (phone) {
+      params.set('phone', String(phone));
+    }
+
+    const response = await fetch(`${API_URL}/messages/paginated?${params.toString()}`, {
       method: 'GET',
       headers: buildHeaders(token)
     });
@@ -130,21 +143,27 @@ export const sendTemplateMessage = async (
   phone,
   templateName,
   templateLanguage = 'en_US',
-  templateParams = []
+  templateParams = [],
+  headerMediaUrl = null
 ) => {
   try {
     const token = getToken();
     if (!token) throw new Error('No token found');
 
+    const payload = {
+      phone,
+      templateName,
+      templateLanguage,
+      templateParams,
+    };
+    if (headerMediaUrl) {
+      payload.headerMediaUrl = headerMediaUrl;
+    }
+
     const response = await fetch(`${API_URL}/messages/send-template`, {
       method: 'POST',
       headers: buildHeaders(token),
-      body: JSON.stringify({
-        phone,
-        templateName,
-        templateLanguage,
-        templateParams,
-      })
+      body: JSON.stringify(payload),
     });
 
     const data = await response.json();

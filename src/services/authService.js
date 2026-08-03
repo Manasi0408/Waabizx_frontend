@@ -140,6 +140,48 @@ export const resetPassword = async (email, otp, newPassword) => {
   return data;
 };
 
+/** Logged-in settings: request OTP (same flow as forgot password). */
+export const requestChangePassword = async () => {
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${getToken()}`,
+  };
+  if (API_BASE && API_BASE.includes('ngrok')) {
+    headers['ngrok-skip-browser-warning'] = 'true';
+  }
+  const response = await fetch(`${API_URL}/auth/change-password/request`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.message || 'Password change request failed');
+  }
+  return data;
+};
+
+/** Logged-in settings: reset password with OTP. */
+export const changePasswordWithOtp = async (otp, newPassword) => {
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${getToken()}`,
+  };
+  if (API_BASE && API_BASE.includes('ngrok')) {
+    headers['ngrok-skip-browser-warning'] = 'true';
+  }
+  const response = await fetch(`${API_URL}/auth/change-password/reset`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ otp, newPassword }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.message || 'Password change failed');
+  }
+  return data;
+};
+
 // Login user
 export const login = async (email, password) => {
   try {

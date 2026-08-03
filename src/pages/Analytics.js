@@ -10,6 +10,8 @@ import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
 
+const CAMPAIGN_ANALYTICS_PAGE_SIZE = 6;
+
 function Analytics() {
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -27,6 +29,7 @@ function Analytics() {
     replies: 0
   });
   const [campaignAnalytics, setCampaignAnalytics] = useState([]);
+  const [campaignPage, setCampaignPage] = useState(1);
   const [messageAnalytics, setMessageAnalytics] = useState({
     textMessages: 0,
     imageMessages: 0,
@@ -223,6 +226,19 @@ function Analytics() {
       fetchAnalytics();
     }
   }, [loading, timeRange]);
+
+  useEffect(() => {
+    setCampaignPage(1);
+  }, [timeRange]);
+
+  const campaignTotalPages = Math.max(
+    1,
+    Math.ceil(campaignAnalytics.length / CAMPAIGN_ANALYTICS_PAGE_SIZE)
+  );
+  const paginatedCampaigns = campaignAnalytics.slice(
+    (campaignPage - 1) * CAMPAIGN_ANALYTICS_PAGE_SIZE,
+    campaignPage * CAMPAIGN_ANALYTICS_PAGE_SIZE
+  );
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -602,8 +618,9 @@ function Analytics() {
                   <p className="text-gray-500">No campaign data available</p>
                 </div>
               ) : (
+                <>
                 <div className="space-y-3 md:space-y-4 motion-stagger-children">
-                  {campaignAnalytics.map((campaign, index) => {
+                  {paginatedCampaigns.map((campaign, index) => {
                     const sent = campaign.sent || 0;
                     const delivered = campaign.delivered || 0;
                     const read = campaign.read || 0;
@@ -667,6 +684,37 @@ function Analytics() {
                     );
                   })}
                 </div>
+                {campaignTotalPages > 1 && (
+                  <div className="mt-4 pt-4 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="text-sm text-gray-700">
+                      Showing {(campaignPage - 1) * CAMPAIGN_ANALYTICS_PAGE_SIZE + 1} to{' '}
+                      {Math.min(campaignPage * CAMPAIGN_ANALYTICS_PAGE_SIZE, campaignAnalytics.length)} of{' '}
+                      {campaignAnalytics.length} campaigns
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setCampaignPage((p) => Math.max(1, p - 1))}
+                        disabled={campaignPage === 1}
+                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                      >
+                        Previous
+                      </button>
+                      <span className="px-3 py-2 text-sm text-gray-600 tabular-nums">
+                        Page {campaignPage} of {campaignTotalPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setCampaignPage((p) => Math.min(campaignTotalPages, p + 1))}
+                        disabled={campaignPage >= campaignTotalPages}
+                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
+                </>
               )}
             </div>
           </div>

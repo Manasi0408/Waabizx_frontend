@@ -1,9 +1,19 @@
-const API = "https://wabizx.techwhizzc.com/api/chat";
-const API_BASE = "https://wabizx.techwhizzc.com/api";
+// const API = "https://wabizx.techwhizzc.com/api/chat";
+// const API_BASE = "https://wabizx.techwhizzc.com/api";
+const API = "https://api.waabizx.com/api/chat";
+const API_BASE = "https://api.waabizx.com/api";
 
 const getAuthHeaders = () => {
   const token = localStorage.getItem("token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  try {
+    const raw = localStorage.getItem("selectedProject");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.id != null) headers["x-project-id"] = String(parsed.id);
+    }
+  } catch (_) {}
+  return headers;
 };
 
 export const getActiveChats = async () => {
@@ -20,6 +30,14 @@ export const getRequestingChats = async () => {
     headers: {
       ...getAuthHeaders(),
     },
+  });
+  return res.json();
+};
+
+/** Open Requesting queue (unassigned) — for agent pickup + manager assign */
+export const getUnassignedRequestingChats = async () => {
+  const res = await fetch(`${API}/unassigned-requesting`, {
+    headers: getAuthHeaders(),
   });
   return res.json();
 };
@@ -50,11 +68,18 @@ export const getIntervenedChats = async () => {
   return res.json();
 };
 
-export const getMessages = async (conversationId) => {
-  const res = await fetch(`${API}/messages/${conversationId}`, {
+export const getHistoryChats = async () => {
+  const res = await fetch(`${API}/history`, {
     headers: {
       ...getAuthHeaders(),
     },
+  });
+  return res.json();
+};
+
+export const getMessages = async (conversationId) => {
+  const res = await fetch(`${API}/messages/${conversationId}`, {
+    headers: getAuthHeaders(),
   });
   return res.json();
 };
@@ -66,7 +91,11 @@ export const acceptChat = async (id) => {
       ...getAuthHeaders(),
     },
   });
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.success === false) {
+    throw new Error(data?.error || data?.message || "Failed to accept chat");
+  }
+  return data;
 };
 
 export const interveneChat = async (id) => {
@@ -101,15 +130,24 @@ export const sendMessage = async (conversation_id, message) => {
   return data;
 };
 
-export const closeChat = async (id) => {
+export const closeChat = async (id, disposition) => {
+  const dispositionValue = String(disposition || "").trim();
+  if (!dispositionValue) {
+    throw new Error("Disposition is required to resolve the chat");
+  }
   const res = await fetch(`${API}/close/${id}`, {
     method: "POST",
     headers: {
+      "Content-Type": "application/json",
       ...getAuthHeaders(),
     },
+    body: JSON.stringify({ disposition: dispositionValue }),
   });
-
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error || data?.message || "Failed to close chat");
+  }
+  return data;
 };
 
 // Manager/Admin: intervene by phone (for /inbox)
@@ -142,9 +180,9 @@ export const assignChatToAgent = async (conversationId, agentId) => {
   return res.json();
 };
 
-// Agent takeover / explicit assignment endpoint
+// Agent takeover / transfer — mounted at /api/chat/assign-agent
 export const assignAgentTakeover = async (conversationId, agentId) => {
-  const res = await fetch(`${API_BASE}/assign-agent`, {
+  const res = await fetch(`${API}/assign-agent`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -156,5 +194,13 @@ export const assignAgentTakeover = async (conversationId, agentId) => {
     }),
   });
 
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return {
+      success: false,
+      message: data?.message || data?.error || "Failed to transfer chat",
+      ...data,
+    };
+  }
+  return data;
 };

@@ -6,9 +6,7 @@ import { getNotifications, markAsRead, markAllAsRead } from '../services/notific
 import {
   getTemplates,
   createTemplate,
-  updateTemplate,
   deleteTemplate,
-  getTemplateById,
   createMetaTemplate,
   getMetaTemplates
 } from '../services/templateService';
@@ -16,6 +14,9 @@ import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import CreateLocalTemplateModal, { templateToLocalForm } from '../components/CreateLocalTemplateModal';
+import TemplateFullViewModal from '../components/TemplateFullViewModal';
+import { resolvePublicMediaUrl } from '../utils/mediaUrl';
 
 function Templates() {
   const navigate = useNavigate();
@@ -30,8 +31,8 @@ function Templates() {
   const [pagination, setPagination] = useState({ total: 0, page: 1, pages: 1, limit: 20 });
   const [filters, setFilters] = useState({ category: '', status: '', page: 1 });
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showCreateMetaModal, setShowCreateMetaModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
+  const [createPrefill, setCreatePrefill] = useState(null);
+  const [showViewModal, setShowViewModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showRejectionModal, setShowRejectionModal] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
@@ -42,21 +43,6 @@ function Templates() {
     content: '',
     category: 'other',
     variables: []
-  });
-  const [metaFormData, setMetaFormData] = useState({
-    name: '',
-    category: 'MARKETING',
-    language: 'en_US',
-    components: [
-      { type: 'BODY', text: '' }
-    ],
-    auth: {
-      otpType: 'one_time_password',
-      codeType: 'numeric',
-      codeLength: 6,
-      expiryMinutes: 5,
-      copyCodeButton: true
-    }
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -197,49 +183,32 @@ function Templates() {
   };
 
   // Template handlers
-  const handleCreateTemplate = async (e) => {
-    e.preventDefault();
+  const handleCreateTemplate = async (eOrPayload, onSuccess) => {
+    const isEvent = eOrPayload && typeof eOrPayload.preventDefault === 'function';
+    if (isEvent) eOrPayload.preventDefault();
     setError('');
     setSuccess('');
     setSaving(true);
 
     try {
-      const isAuthCategory = String(formData.category || '').toLowerCase() === 'authentication';
-      const payload = isAuthCategory
-        ? {
-          ...formData,
-          content: 'Your OTP is {{1}}. Do not share it with anyone.'
-        }
-        : formData;
-      const template = await createTemplate(payload);
+      let payload = eOrPayload;
+      if (isEvent) {
+        const isAuthCategory = String(formData.category || '').toLowerCase() === 'authentication';
+        payload = isAuthCategory
+          ? { ...formData, content: 'Your OTP is {{1}}. Do not share it with anyone.' }
+          : formData;
+      }
+      await createTemplate(payload);
       setSuccess('Template created successfully!');
       setShowCreateModal(false);
+      setCreatePrefill(null);
       setFormData({ name: '', content: '', category: 'other', variables: [] });
+      if (typeof onSuccess === 'function') onSuccess();
       fetchTemplates();
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
       const msg = error?.message;
-      setError(typeof msg === 'string' && msg !== '[object Object]' ? msg : 'Failed to submit template to Meta');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleEditTemplate = async (e) => {
-    e.preventDefault();
-    setError('');
-    setSuccess('');
-    setSaving(true);
-
-    try {
-      await updateTemplate(selectedTemplate.id, formData);
-      setSuccess('Template updated successfully!');
-      setShowEditModal(false);
-      setSelectedTemplate(null);
-      fetchTemplates();
-      setTimeout(() => setSuccess(''), 3000);
-    } catch (error) {
-      setError(error.message || 'Failed to update template');
+      setError(typeof msg === 'string' && msg !== '[object Object]' ? msg : 'Failed to create template');
     } finally {
       setSaving(false);
     }
@@ -274,80 +243,26 @@ function Templates() {
     }
   };
 
-  const handleCreateMetaTemplate = async (e) => {
-    e.preventDefault();
+  const handleSubmitLocalToMeta = async (metaPayload, onSuccess) => {
     setError('');
     setSuccess('');
     setSaving(true);
 
     try {
-      const normalizedName = String(metaFormData.name || '')
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, '_')
-        .replace(/[^a-z0-9_]/g, '');
-      if (!normalizedName) {
-        throw new Error('Template name invalid. Use letters/numbers/underscores only (Meta requirement).');
-      }
-      const normalizedComponents = (metaFormData.components || []).map(c => ({
-        ...c,
-        type: String(c.type || '').toUpperCase()
-      }));
-      const isAuthCategory = String(metaFormData.category || '').toUpperCase() === 'AUTHENTICATION';
-      const auth = metaFormData.auth || {};
-      const builtAuthBody = 'Your OTP is {{1}}. Do not share it with anyone.';
-      const authFooter = `Code expires in ${Number(auth.expiryMinutes || 5)} minutes.`;
-      const authButtons = auth.copyCodeButton
-        ? [{ type: 'QUICK_REPLY', text: 'COPY CODE' }]
-        : [];
-      const authComponents = [
-        { type: 'BODY', text: builtAuthBody },
-        { type: 'FOOTER', text: authFooter },
-        ...(authButtons.length > 0 ? [{ type: 'BUTTONS', buttons: authButtons }] : [])
-      ];
-
-      const result = await createMetaTemplate({
-        ...metaFormData,
-        name: normalizedName,
-        components: isAuthCategory ? authComponents : normalizedComponents
-      });
-      setSuccess(`Template submitted to Meta! Status: ${result.status}`);
-      setShowCreateMetaModal(false);
-      setMetaFormData({
-        name: '',
-        category: 'MARKETING',
-        language: 'en_US',
-        components: [{ type: 'BODY', text: '' }],
-        auth: {
-          otpType: 'one_time_password',
-          codeType: 'numeric',
-          codeLength: 6,
-          expiryMinutes: 5,
-          copyCodeButton: true
-        }
-      });
-      fetchTemplates();
+      const result = await createMetaTemplate(metaPayload);
+      setSuccess(`Template submitted to Meta! Status: ${result.status || 'PENDING'}`);
+      setShowCreateModal(false);
+      setCreatePrefill(null);
+      if (typeof onSuccess === 'function') onSuccess();
+      await fetchTemplates();
+      await handleFetchMetaTemplates();
       setTimeout(() => setSuccess(''), 5000);
     } catch (error) {
-      setError(error.message || 'Failed to create template');
+      const msg = error.message || 'Failed to submit template to Meta';
+      setError(msg);
+      throw new Error(msg);
     } finally {
       setSaving(false);
-    }
-  };
-
-  const openEditModal = async (template) => {
-    try {
-      const fullTemplate = await getTemplateById(template.id);
-      setSelectedTemplate(fullTemplate);
-      setFormData({
-        name: fullTemplate.name || '',
-        content: fullTemplate.content || '',
-        category: fullTemplate.category || 'other',
-        variables: fullTemplate.variables || []
-      });
-      setShowEditModal(true);
-    } catch (error) {
-      setError(error.message || 'Failed to load template details');
     }
   };
 
@@ -635,7 +550,7 @@ function Templates() {
               <button
                 type="button"
                 onClick={() => {
-                  setFormData({ name: '', content: '', category: 'other', variables: [] });
+                  setCreatePrefill(null);
                   setShowCreateModal(true);
                   setError('');
                 }}
@@ -646,26 +561,6 @@ function Templates() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                 </svg>
                 <span className="relative">Create Local</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMetaFormData({
-                    name: '',
-                    category: 'MARKETING',
-                    language: 'en_US',
-                    components: [{ type: 'BODY', text: '' }]
-                  });
-                  setShowCreateMetaModal(true);
-                  setError('');
-                }}
-                className="group relative overflow-hidden shrink-0 bg-gradient-to-r from-emerald-600 via-green-600 to-teal-700 text-white px-5 py-3 sm:px-6 rounded-xl font-semibold shadow-lg shadow-emerald-600/25 hover:shadow-xl hover:shadow-emerald-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 flex items-center gap-2"
-              >
-                <span className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/15 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700" aria-hidden />
-                <svg className="w-5 h-5 relative" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
-                <span className="relative">Submit to Meta</span>
               </button>
             </div>
           </div>
@@ -723,6 +618,7 @@ function Templates() {
                   type="button"
                   onClick={() => {
                     setFormData({ name: '', content: '', category: 'other', status: 'draft', variables: [] });
+                    setCreatePrefill(null);
                     setShowCreateModal(true);
                   }}
                   className="bg-sky-600 text-white px-6 py-2.5 rounded-xl hover:bg-sky-700 transition-all duration-300 shadow-md shadow-sky-600/25 hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] font-medium"
@@ -815,19 +711,47 @@ function Templates() {
                           </div>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3 lg:flex-nowrap lg:justify-end lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0 xl:min-w-[120px]">
+                        <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3 lg:flex-nowrap lg:justify-end lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0 xl:min-w-[72px]">
                           <button
                             type="button"
-                            onClick={() => openEditModal(template)}
-                            className="p-2 text-gray-600 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-all duration-200 active:scale-95"
-                            title="Edit template"
+                            onClick={() => {
+                              setSelectedTemplate(template);
+                              setShowViewModal(true);
+                            }}
+                            className="p-2 text-gray-600 hover:text-sky-700 hover:bg-sky-50 rounded-lg transition-all duration-200 active:scale-95"
+                            title="View template"
                           >
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
                                 strokeWidth={2}
-                                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                              />
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                              />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCreatePrefill(templateToLocalForm(template));
+                              setShowCreateModal(true);
+                              setError('');
+                            }}
+                            className="p-2 text-gray-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all duration-200 active:scale-95"
+                            title="Copy template"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
                               />
                             </svg>
                           </button>
@@ -888,217 +812,75 @@ function Templates() {
         </main>
       </div>
 
-      {/* Create Template Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-2xl w-full max-h-[90vh] overflow-y-auto ring-1 ring-black/5">
-            <div className="p-5 md:p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 via-sky-50/50 to-sky-50/30">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-xl md:text-2xl font-bold text-gray-900 tracking-tight">Create New Template</h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCreateModal(false);
-                    setFormData({ name: '', content: '', category: 'other', variables: [] });
-                    setError('');
-                  }}
-                  className="shrink-0 text-gray-400 hover:text-gray-700 rounded-xl p-2 transition-all duration-200 hover:bg-white/90 active:scale-95 ring-1 ring-transparent hover:ring-gray-200/80"
-                  aria-label="Close"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <form onSubmit={handleCreateTemplate} className="p-5 md:p-6 space-y-5 bg-gradient-to-b from-white to-sky-50/20">
-              <div className="rounded-2xl border border-gray-100/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-gray-100/70 space-y-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-800 mb-2">Template Name *</label>
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    required
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                    placeholder="Enter template name"
-                  />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Category *</label>
-                    <select
-                      value={formData.category}
-                      onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                    >
-                      <option value="welcome">Welcome</option>
-                      <option value="promotional">Promotional</option>
-                      <option value="marketing">Marketing</option>
-                      <option value="utility">Utility</option>
-                      <option value="authentication">Authentication</option>
-                      <option value="transactional">Transactional</option>
-                      <option value="notification">Notification</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                  <div className="flex items-center">
-                    <p className="text-xs text-gray-500">
-                      Status is controlled by Meta approval (Create Local starts as <b>draft</b>).
-                    </p>
-                  </div>
-                </div>
-                {String(formData.category || '').toLowerCase() === 'authentication' ? (
-                  <div className="rounded-2xl border border-sky-200/80 bg-sky-50/40 p-4">
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template Content *</label>
-                    <div className="px-4 py-3 border-2 border-sky-200 rounded-xl bg-white text-sm text-gray-800 font-mono">
-                      Your OTP is {'{{1}}'}. Do not share it with anyone.
-                    </div>
-                    <p className="mt-1.5 text-xs text-gray-500">For Authentication category, message format is auto-handled by Waabizx.</p>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template Content *</label>
-                    <textarea
-                      value={formData.content}
-                      onChange={(e) => setFormData({ ...formData, content: e.target.value })}
-                      required
-                      rows={8}
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm font-mono text-sm"
-                      placeholder="Enter your template message content..."
-                    />
-                    <p className="mt-1.5 text-xs text-gray-500">You can use variables like {'{{name}}'}, {'{{order_id}}'}, etc.</p>
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCreateModal(false);
-                    setFormData({ name: '', content: '', category: 'other', variables: [] });
-                    setError('');
-                  }}
-                  className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
-                >
-                  {saving ? 'Creating...' : 'Create Template'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <CreateLocalTemplateModal
+        open={showCreateModal}
+        saving={saving}
+        initialForm={createPrefill}
+        onClose={() => {
+          setShowCreateModal(false);
+          setCreatePrefill(null);
+          setError('');
+        }}
+        onSubmit={handleSubmitLocalToMeta}
+      />
 
-      {/* Edit Template Modal */}
-      {showEditModal && selectedTemplate && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-2xl w-full max-h-[90vh] overflow-y-auto ring-1 ring-black/5">
-            <div className="p-5 md:p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 via-sky-50/50 to-sky-50/30">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-xl md:text-2xl font-bold text-gray-900 tracking-tight">Edit Template</h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowEditModal(false);
-                    setSelectedTemplate(null);
-                    setFormData({ name: '', content: '', category: 'other', variables: [] });
-                    setError('');
-                  }}
-                  className="shrink-0 text-gray-400 hover:text-gray-700 rounded-xl p-2 transition-all duration-200 hover:bg-white/90 active:scale-95 ring-1 ring-transparent hover:ring-gray-200/80"
-                  aria-label="Close"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <form onSubmit={handleEditTemplate} className="p-5 md:p-6 space-y-5 bg-gradient-to-b from-white to-sky-50/20">
-              <div className="rounded-2xl border border-gray-100/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-gray-100/70 space-y-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-800 mb-2">Template Name *</label>
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    required
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                  />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Category *</label>
-                    <select
-                      value={formData.category}
-                      onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                    >
-                      <option value="welcome">Welcome</option>
-                      <option value="promotional">Promotional</option>
-                      <option value="marketing">Marketing</option>
-                      <option value="utility">Utility</option>
-                      <option value="authentication">Authentication</option>
-                      <option value="transactional">Transactional</option>
-                      <option value="notification">Notification</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                  <div className="flex items-center">
-                    <p className="text-xs text-gray-500">
-                      Status is controlled by Meta approval (manual changes disabled).
-                    </p>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-800 mb-2">Template Content *</label>
-                  <textarea
-                    value={formData.content}
-                    onChange={(e) => setFormData({ ...formData, content: e.target.value })}
-                    required
-                    rows={8}
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm font-mono text-sm"
-                  />
-                  <p className="mt-1.5 text-xs text-gray-500">You can use variables like {'{{name}}'}, {'{{order_id}}'}, etc.</p>
-                </div>
-              </div>
-              <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowEditModal(false);
-                    setSelectedTemplate(null);
-                    setFormData({ name: '', content: '', category: 'other', variables: [] });
-                    setError('');
-                  }}
-                  className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
-                >
-                  {saving ? 'Updating...' : 'Update Template'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <TemplateFullViewModal
+        open={showViewModal && Boolean(selectedTemplate)}
+        template={selectedTemplate}
+        onClose={() => {
+          setShowViewModal(false);
+          setSelectedTemplate(null);
+        }}
+        previewParts={
+          selectedTemplate
+            ? (() => {
+                const vars =
+                  selectedTemplate.variables &&
+                  typeof selectedTemplate.variables === 'object' &&
+                  !Array.isArray(selectedTemplate.variables)
+                    ? selectedTemplate.variables
+                    : {};
+                const components = Array.isArray(selectedTemplate.components)
+                  ? selectedTemplate.components
+                  : Array.isArray(vars.components)
+                    ? vars.components
+                    : [];
+                const find = (type) =>
+                  components.find((c) => String(c?.type || '').toUpperCase() === type);
+                const body = find('BODY');
+                const footer = find('FOOTER');
+                const header = find('HEADER');
+                const buttonsComp = find('BUTTONS');
+                let headerFormat = String(header?.format || '').toUpperCase() || null;
+                if (!headerFormat) {
+                  const rawType = String(vars.templateType || '').toLowerCase();
+                  if (rawType === 'image') headerFormat = 'IMAGE';
+                  else if (rawType === 'video') headerFormat = 'VIDEO';
+                  else if (rawType === 'document') headerFormat = 'DOCUMENT';
+                }
+                return {
+                  headerFormat,
+                  headerText: header?.text || '',
+                  headerImageUrl:
+                    resolvePublicMediaUrl(
+                      vars.headerMediaUrl ||
+                        vars.header_media_url ||
+                        selectedTemplate.headerMediaUrl ||
+                        selectedTemplate.header_media_url ||
+                        ''
+                    ) || '',
+                  body: body?.text || selectedTemplate.content || '',
+                  footer: footer?.text || vars.footer || '',
+                  buttons: Array.isArray(buttonsComp?.buttons)
+                    ? buttonsComp.buttons
+                    : Array.isArray(vars.interactiveButtons)
+                      ? vars.interactiveButtons
+                      : [],
+                };
+              })()
+            : null
+        }
+      />
 
       {/* Rejection Reason Modal */}
       {showRejectionModal && selectedTemplate && (
@@ -1189,233 +971,6 @@ function Templates() {
         </div>
       )}
 
-      {/* Create Meta Template Modal */}
-      {showCreateMetaModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-3xl w-full max-h-[90vh] overflow-y-auto ring-1 ring-black/5">
-            <div className="p-5 md:p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 via-emerald-50/50 to-green-50/30">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-xl md:text-2xl font-bold text-gray-900 tracking-tight">Submit Template to Meta</h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCreateMetaModal(false);
-                    setMetaFormData({
-                      name: '',
-                      category: 'MARKETING',
-                      language: 'en_US',
-                      components: [{ type: 'BODY', text: '' }],
-                      auth: {
-                        otpType: 'one_time_password',
-                        codeType: 'numeric',
-                        codeLength: 6,
-                        expiryMinutes: 5,
-                        copyCodeButton: true
-                      }
-                    });
-                    setError('');
-                  }}
-                  className="shrink-0 text-gray-400 hover:text-gray-700 rounded-xl p-2 transition-all duration-200 hover:bg-white/90 active:scale-95 ring-1 ring-transparent hover:ring-gray-200/80"
-                  aria-label="Close"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <form onSubmit={handleCreateMetaTemplate} className="p-5 md:p-6 space-y-5 bg-gradient-to-b from-white to-emerald-50/15">
-              <div className="rounded-2xl border border-gray-100/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-gray-100/70 space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template Name *</label>
-                    <input
-                      type="text"
-                      value={metaFormData.name}
-                      onChange={(e) => setMetaFormData({ ...metaFormData, name: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm"
-                      placeholder="e.g., welcome_message"
-                    />
-                    <p className="mt-1.5 text-xs text-gray-500">Use lowercase with underscores</p>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Category *</label>
-                    <select
-                      value={metaFormData.category}
-                      onChange={(e) => setMetaFormData({ ...metaFormData, category: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                    >
-                      <option value="MARKETING">MARKETING</option>
-                      <option value="UTILITY">UTILITY</option>
-                      <option value="AUTHENTICATION">AUTHENTICATION</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-800 mb-2">Language *</label>
-                  <select
-                    value={metaFormData.language}
-                    onChange={(e) => setMetaFormData({ ...metaFormData, language: e.target.value })}
-                    required
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                  >
-                    <option value="en_US">English (US)</option>
-                    <option value="en_GB">English (UK)</option>
-                    <option value="es_ES">Spanish</option>
-                    <option value="fr_FR">French</option>
-                    <option value="de_DE">German</option>
-                    <option value="hi_IN">Hindi</option>
-                    <option value="mr_IN">Marathi</option>
-                  </select>
-                </div>
-                {String(metaFormData.category || '').toUpperCase() === 'AUTHENTICATION' ? (
-                  <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/40 p-4 space-y-4">
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-800 mb-2">OTP Type</label>
-                      <select
-                        value={metaFormData.auth?.otpType || 'one_time_password'}
-                        onChange={(e) =>
-                          setMetaFormData({
-                            ...metaFormData,
-                            auth: { ...(metaFormData.auth || {}), otpType: e.target.value }
-                          })
-                        }
-                        className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                      >
-                        <option value="one_time_password">One Time Password (OTP)</option>
-                        <option value="verification_code">Verification Code</option>
-                      </select>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-800 mb-2">Code Type</label>
-                        <select
-                          value={metaFormData.auth?.codeType || 'numeric'}
-                          onChange={(e) =>
-                            setMetaFormData({
-                              ...metaFormData,
-                              auth: { ...(metaFormData.auth || {}), codeType: e.target.value }
-                            })
-                          }
-                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                        >
-                          <option value="numeric">Numeric</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-800 mb-2">Code Length</label>
-                        <input
-                          type="number"
-                          min={4}
-                          max={8}
-                          value={metaFormData.auth?.codeLength || 6}
-                          onChange={(e) =>
-                            setMetaFormData({
-                              ...metaFormData,
-                              auth: { ...(metaFormData.auth || {}), codeLength: Number(e.target.value || 6) }
-                            })
-                          }
-                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm"
-                        />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-semibold text-gray-800 mb-2">Expiry (minutes)</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={15}
-                          value={metaFormData.auth?.expiryMinutes || 5}
-                          onChange={(e) =>
-                            setMetaFormData({
-                              ...metaFormData,
-                              auth: { ...(metaFormData.auth || {}), expiryMinutes: Number(e.target.value || 5) }
-                            })
-                          }
-                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm"
-                        />
-                      </div>
-                      <div className="flex items-end">
-                        <label className="inline-flex items-center gap-2 text-sm font-semibold text-gray-800">
-                          <input
-                            type="checkbox"
-                            checked={!!metaFormData.auth?.copyCodeButton}
-                            onChange={(e) =>
-                              setMetaFormData({
-                                ...metaFormData,
-                                auth: { ...(metaFormData.auth || {}), copyCodeButton: e.target.checked }
-                              })
-                            }
-                          />
-                          Copy Code Button
-                        </label>
-                      </div>
-                    </div>
-                    <div className="rounded-xl border border-gray-200 bg-white p-3">
-                      <div className="text-xs font-semibold text-gray-700">Body Preview</div>
-                      <div className="mt-1 text-sm text-gray-800">Your OTP is {'{{1}}'}. Do not share it with anyone.</div>
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Body Text *</label>
-                    <textarea
-                      value={metaFormData.components[0]?.text || ''}
-                      onChange={(e) => {
-                        const newComponents = [...metaFormData.components];
-                        newComponents[0] = { ...newComponents[0], text: e.target.value };
-                        setMetaFormData({ ...metaFormData, components: newComponents });
-                      }}
-                      required
-                      rows={6}
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-emerald-400/45 focus:border-emerald-400 outline-none transition-all shadow-sm text-sm"
-                      placeholder="Enter your template message. Use {1}, {2}, etc. for variables."
-                    />
-                    <p className="mt-1.5 text-xs text-gray-500">Use {'{{1}}'}, {'{{2}}'}, etc. for variables</p>
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCreateMetaModal(false);
-                    setMetaFormData({
-                      name: '',
-                      category: 'MARKETING',
-                      language: 'en_US',
-                      components: [{ type: 'BODY', text: '' }],
-                      auth: {
-                        otpType: 'one_time_password',
-                        codeType: 'numeric',
-                        codeLength: 6,
-                        expiryMinutes: 5,
-                        copyCodeButton: true
-                      }
-                    });
-                    setError('');
-                  }}
-                  className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-6 py-2.5 bg-green-600 text-white rounded-xl font-semibold hover:bg-green-700 shadow-md shadow-green-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
-                >
-                  {saving ? 'Submitting...' : 'Submit to Meta'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

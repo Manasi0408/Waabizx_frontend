@@ -3,7 +3,7 @@ import BrandLogoMark from '../components/BrandLogoMark';
 import { useNavigate, Link } from 'react-router-dom';
 import { getProfile, isAuthenticated, logout, readSessionUser } from '../services/authService';
 import { getNotifications, markAsRead, markAllAsRead } from '../services/notificationService';
-import { getTemplates, getMetaTemplates } from '../services/templateService';
+import { getTemplates, getMetaTemplates, getMetaTemplateDetails, getTemplateById } from '../services/templateService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
@@ -12,9 +12,411 @@ import {
   uploadCSV,
   getBroadcastContacts,
   validateTemplate,
-  createBroadcast
+  createBroadcast,
+  uploadBroadcastHeaderMedia,
 } from '../services/broadcastService';
 import { startCampaign } from '../services/campaignService';
+import { getConversationQuota } from '../services/dashboardService';
+import {
+  CONVERSATION_METRICS,
+  estimateCampaignMessageCost,
+  formatInr,
+  getBillingCategoryLabel,
+  getMessageRateForBillingCategory,
+  resolveTemplateBillingCategory,
+} from '../utils/planPricing';
+// Temporary: allow broadcast send even when WCC balance is below estimated cost (testing).
+const DISABLE_WCC_RECHARGE_CHECK = true;
+
+function parseTemplateVariablesMeta(variables) {
+  if (!variables) return {};
+  if (typeof variables === 'string') {
+    try {
+      const parsed = JSON.parse(variables);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof variables === 'object' && !Array.isArray(variables)) return variables;
+  return {};
+}
+
+function normalizeTemplateButtons(buttons) {
+  return (buttons || [])
+    .map((b) => {
+      if (typeof b === 'string') return { type: 'QUICK_REPLY', text: b };
+      const rawType = String(b?.type || 'QUICK_REPLY').toUpperCase();
+      return {
+        type: rawType === 'PHONE' ? 'PHONE_NUMBER' : rawType,
+        text: b?.text || b?.title || b?.label || '',
+        url: b?.url,
+        phone_number: b?.phone_number || b?.phoneNumber,
+      };
+    })
+    .filter((b) => String(b.text || '').trim());
+}
+
+function getTemplateComponentsList(template) {
+  if (Array.isArray(template?.components) && template.components.length) {
+    return template.components;
+  }
+  const meta = parseTemplateVariablesMeta(template?.variables);
+  if (Array.isArray(meta.components) && meta.components.length) {
+    return meta.components;
+  }
+  return [];
+}
+
+function extractButtonsFromComponents(components) {
+  const buttons = [];
+  (components || []).forEach((comp) => {
+    const type = String(comp?.type || '').toUpperCase();
+    if (type === 'BUTTONS' && Array.isArray(comp.buttons)) {
+      buttons.push(...comp.buttons);
+    }
+  });
+  return normalizeTemplateButtons(buttons);
+}
+
+function buildInteractiveButtonsFromMeta(meta) {
+  if (!meta || typeof meta !== 'object') return [];
+
+  if (Array.isArray(meta.interactiveButtons) && meta.interactiveButtons.length) {
+    return normalizeTemplateButtons(meta.interactiveButtons);
+  }
+
+  const buttons = [];
+  const showCta = meta.actionMode === 'cta' || meta.actionMode === 'all';
+  const showQr = meta.actionMode === 'quick_reply' || meta.actionMode === 'all';
+
+  if (showCta && Array.isArray(meta.callToActions)) {
+    meta.callToActions
+      .filter((a) => {
+        if (!String(a?.label || '').trim()) return false;
+        if (a.type === 'button') return true;
+        return Boolean(String(a?.value || '').trim());
+      })
+      .forEach((cta) => {
+        if (cta.type === 'button') {
+          buttons.push({ type: 'QUICK_REPLY', text: cta.label });
+        } else {
+          buttons.push({
+            type: cta.type === 'phone' ? 'PHONE_NUMBER' : 'URL',
+            text: cta.label,
+            url: cta.type === 'url' ? cta.value : undefined,
+            phone_number: cta.type === 'phone' ? cta.value : undefined,
+          });
+        }
+      });
+  }
+  if (showQr && Array.isArray(meta.quickReplies)) {
+    meta.quickReplies
+      .filter((a) => String(a?.label || '').trim())
+      .forEach((qr) => buttons.push({ type: 'QUICK_REPLY', text: qr.label }));
+  }
+
+  return normalizeTemplateButtons(buttons);
+}
+
+function mergeTemplateButtons(componentButtons, metaButtons) {
+  const fromComponents = normalizeTemplateButtons(componentButtons);
+  if (!metaButtons.length) return fromComponents;
+  if (!fromComponents.length) return metaButtons;
+
+  const merged = [...fromComponents];
+  const seen = new Set(
+    fromComponents.map((b) => `${String(b.type).toUpperCase()}::${String(b.text).toLowerCase()}`)
+  );
+  metaButtons.forEach((btn) => {
+    const key = `${String(btn.type).toUpperCase()}::${String(btn.text).toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(btn);
+    }
+  });
+  return merged;
+}
+
+async function resolveBroadcastTemplate(template) {
+  if (!template) return null;
+
+  let resolved = { ...template };
+  resolved.variables = parseTemplateVariablesMeta(resolved.variables);
+
+  if (!Array.isArray(resolved.components) || !resolved.components.length) {
+    const fromVars = resolved.variables?.components;
+    if (Array.isArray(fromVars) && fromVars.length) {
+      resolved.components = fromVars;
+    }
+  }
+
+  const needsButtons = !getTemplatePreviewParts(resolved)?.buttons?.length;
+
+  if (resolved.id && needsButtons) {
+    try {
+      const full = await getTemplateById(resolved.id);
+      if (full) {
+        const fullVars = parseTemplateVariablesMeta(full.variables);
+        resolved = {
+          ...resolved,
+          ...full,
+          variables: { ...resolved.variables, ...fullVars },
+          components: full.components || fullVars.components || resolved.components,
+          metaTemplateId: full.metaTemplateId || resolved.metaTemplateId,
+        };
+      }
+    } catch (_) {
+      /* optional */
+    }
+  }
+
+  if (getTemplatePreviewParts(resolved)?.buttons?.length) return resolved;
+
+  const metaId = resolved.metaTemplateId;
+  if (!metaId) return resolved;
+
+  try {
+    const details = await getMetaTemplateDetails(metaId);
+    if (!details?.components?.length) return resolved;
+    const header = details.components.find((c) => String(c.type || '').toUpperCase() === 'HEADER');
+    const format = String(header?.format || '').toUpperCase();
+    const templateType =
+      format === 'IMAGE' ? 'image' : format === 'VIDEO' ? 'video' : format === 'DOCUMENT' ? 'document' : 'text';
+    return {
+      ...resolved,
+      language: details.language || resolved.language,
+      components: details.components,
+      content:
+        details.components.find((c) => String(c.type || '').toUpperCase() === 'BODY')?.text ||
+        resolved.content,
+      variables: {
+        ...parseTemplateVariablesMeta(resolved.variables),
+        templateType,
+        language: details.language || resolved.variables?.language,
+        components: details.components,
+      },
+    };
+  } catch (_) {
+    return resolved;
+  }
+}
+
+function getTemplatePreviewParts(template) {
+  if (!template) return null;
+
+  const meta = parseTemplateVariablesMeta(template.variables);
+  const components = getTemplateComponentsList(template);
+  const metaButtons = buildInteractiveButtonsFromMeta(meta);
+  const componentButtons = extractButtonsFromComponents(components);
+
+  const findComp = (type) =>
+    components.find((c) => String(c.type || '').toUpperCase() === type);
+  const header = findComp('HEADER');
+  const body = findComp('BODY');
+  const footerComp = findComp('FOOTER');
+  const bodyText = body?.text || template?.content || '';
+
+  const buttons = mergeTemplateButtons(componentButtons, metaButtons);
+
+  const templateType = String(meta.templateType || 'text').toLowerCase();
+  const headerFormat =
+    (header?.format ? String(header.format).toUpperCase() : null) ||
+    ({ image: 'IMAGE', video: 'VIDEO', document: 'DOCUMENT' }[templateType] || null);
+
+  return {
+    headerFormat,
+    headerText: header?.text || '',
+    body: bodyText,
+    footer: footerComp?.text || meta.footer || '',
+    buttons: normalizeTemplateButtons(buttons),
+  };
+}
+
+function templateHasMedia(template) {
+  const parts = getTemplatePreviewParts(template);
+  if (parts.headerFormat && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(parts.headerFormat).toUpperCase())) {
+    return true;
+  }
+  return false;
+}
+
+function templateIsImage(template) {
+  const parts = getTemplatePreviewParts(template);
+  return String(parts.headerFormat || '').toUpperCase() === 'IMAGE';
+}
+
+function isSameBroadcastTemplate(a, b) {
+  if (!a || !b) return false;
+  if (a.id != null && b.id != null) return a.id === b.id;
+  return String(a.name || '').toLowerCase() === String(b.name || '').toLowerCase();
+}
+
+function applyBroadcastSubstitutions(text, templateVariables, variableMapping, sampleRow) {
+  let out = String(text || '');
+  (templateVariables || []).forEach((v) => {
+    const col = variableMapping[v.placeholder];
+    const val = col && sampleRow && sampleRow[col] != null ? String(sampleRow[col]) : null;
+    if (val) out = out.split(v.placeholder).join(val);
+  });
+  return out;
+}
+
+function BroadcastWhatsAppPreview({ template, mediaPreviewUrl, templateVariables, variableMapping, sampleRow }) {
+  if (!template) return null;
+  const parts = getTemplatePreviewParts(template);
+  const bodyText = applyBroadcastSubstitutions(parts.body, templateVariables, variableMapping, sampleRow);
+  const headerText = parts.headerText
+    ? applyBroadcastSubstitutions(parts.headerText, templateVariables, variableMapping, sampleRow)
+    : '';
+
+  return (
+    <div className="mx-auto w-full max-w-[300px]">
+      <div className="rounded-[1.75rem] border-[6px] border-slate-900 bg-[#e5ddd5] p-3 shadow-xl">
+        <div className="rounded-2xl bg-white overflow-hidden shadow-sm">
+          {(parts.headerFormat === 'IMAGE' || parts.headerFormat === 'VIDEO' || mediaPreviewUrl) && (
+            <div className="bg-gray-100 aspect-[4/3] flex items-center justify-center overflow-hidden">
+              {mediaPreviewUrl ? (
+                parts.headerFormat === 'VIDEO' ? (
+                  <video src={mediaPreviewUrl} className="w-full h-full object-cover" controls muted />
+                ) : (
+                  <img src={mediaPreviewUrl} alt="" className="w-full h-full object-cover" />
+                )
+              ) : (
+                <div className="text-center text-gray-400 px-4">
+                  <span className="text-2xl block mb-1">🖼</span>
+                  <span className="text-[11px]">Upload media to preview</span>
+                </div>
+              )}
+            </div>
+          )}
+          {headerText && parts.headerFormat === 'TEXT' && (
+            <p className="px-3 pt-2.5 text-sm font-semibold text-gray-900">{headerText}</p>
+          )}
+          <div className="px-3.5 py-3 text-[13px] text-gray-800 leading-relaxed whitespace-pre-wrap break-words min-h-[60px]">
+            {bodyText || 'Template body'}
+          </div>
+          {parts.footer ? (
+            <p className="px-3.5 pb-2 text-[11px] text-gray-500">{parts.footer}</p>
+          ) : null}
+          {parts.buttons?.length > 0 ? (
+            <div className="border-t border-gray-100">
+              {parts.buttons.map((btn, i) => {
+                const type = String(btn.type || '').toUpperCase();
+                const icon = type === 'URL' ? '🔗' : type === 'PHONE_NUMBER' ? '📞' : null;
+                const sub =
+                  type === 'URL' && btn.url
+                    ? btn.url
+                    : type === 'PHONE_NUMBER' && btn.phone_number
+                      ? btn.phone_number
+                      : null;
+                return (
+                  <div
+                    key={i}
+                    className="flex flex-col items-center justify-center gap-0.5 px-3 py-2.5 text-[12px] font-semibold text-[#008069] border-t border-gray-100 first:border-t-0"
+                  >
+                    <div className="flex items-center justify-center gap-1.5">
+                      {icon ? <span aria-hidden>{icon}</span> : null}
+                      <span>{btn.text || btn.type}</span>
+                    </div>
+                    {sub ? (
+                      <span className="text-[10px] font-normal text-gray-500 truncate max-w-full px-2">{sub}</span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+        <p className="mt-2 text-[10px] text-center text-gray-600 font-medium">
+          {template.name} · {template.variables?.language || 'en_US'}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** Full template phone preview used on card hover (same content as View modal). */
+function BroadcastTemplateHoverPreview({ template }) {
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      el.scrollTop += e.deltaY;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [template?.id, template?.name]);
+
+  if (!template) return null;
+  const parts = getTemplatePreviewParts(template);
+  const body = String(parts?.body || template.content || '').trim() || 'No content';
+  const footer = String(parts?.footer || '').trim();
+  const headerText = String(parts?.headerText || '').trim();
+  const headerFormat = String(parts?.headerFormat || '').toUpperCase();
+  const buttons = Array.isArray(parts?.buttons) ? parts.buttons : [];
+
+  return (
+    <div
+      ref={scrollRef}
+      className="h-full w-full max-w-[280px] overflow-y-auto overscroll-contain rounded-2xl border border-gray-200 bg-white p-3 shadow-xl shadow-gray-900/10 ring-1 ring-black/5"
+    >
+      <p className="mb-2 truncate text-xs font-bold text-gray-800">{template.name}</p>
+      <div className="rounded-[1.25rem] border-[5px] border-slate-900 bg-[#e5ddd5] p-2">
+        <div className="overflow-hidden rounded-xl bg-white shadow-sm">
+          {['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerFormat) ? (
+            <div className="flex aspect-[4/3] flex-col items-center justify-center gap-1 bg-gray-100 text-gray-400">
+              <span className="text-xl" aria-hidden>
+                {headerFormat === 'VIDEO' ? '🎬' : headerFormat === 'DOCUMENT' ? '📄' : '🖼'}
+              </span>
+              <span className="text-[10px] font-medium">{headerFormat} header</span>
+            </div>
+          ) : null}
+          {headerText ? (
+            <p className="px-3 pt-2.5 text-[12px] font-semibold text-gray-900 whitespace-pre-wrap break-words">
+              {headerText}
+            </p>
+          ) : null}
+          <div className="px-3 py-2.5 text-[12px] leading-relaxed text-gray-800 whitespace-pre-wrap break-words">
+            {body}
+          </div>
+          {footer ? (
+            <p className="px-3 pb-2 text-[10px] text-gray-500 whitespace-pre-wrap break-words">{footer}</p>
+          ) : null}
+          {buttons.length > 0 ? (
+            <div className="border-t border-gray-100">
+              {buttons.map((btn, i) => {
+                const type = String(btn.type || '').toUpperCase();
+                const label = btn.text || btn.type || 'Button';
+                const sub =
+                  type === 'URL' && btn.url
+                    ? btn.url
+                    : type === 'PHONE_NUMBER' && btn.phone_number
+                      ? btn.phone_number
+                      : null;
+                return (
+                  <div
+                    key={i}
+                    className="flex flex-col items-center justify-center gap-0.5 border-t border-gray-100 px-2 py-2 text-[11px] font-semibold text-[#008069] first:border-t-0"
+                  >
+                    <span>{label}</span>
+                    {sub ? (
+                      <span className="max-w-full truncate px-1 text-[9px] font-normal text-gray-500">{sub}</span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function Broadcast() {
   const navigate = useNavigate();
@@ -51,9 +453,22 @@ function Broadcast() {
   const [contacts, setContacts] = useState([]);
   const [contactsPagination, setContactsPagination] = useState({ total: 0, page: 1, pages: 1 });
   const [contactsSearch, setContactsSearch] = useState('');
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
+  const [headerMediaFile, setHeaderMediaFile] = useState(null);
+  const [wccCredits, setWccCredits] = useState(null);
   
   const notificationRef = useRef(null);
   const fileInputRef = useRef(null);
+  const mediaFileInputRef = useRef(null);
+
+  const previewSampleRow = useMemo(() => {
+    if (audienceType === 'csv' && csvData[0]) return csvData[0];
+    if (audienceType === 'contacts' && selectedContacts[0]) return selectedContacts[0];
+    return {};
+  }, [audienceType, csvData, selectedContacts]);
+
+  const effectiveMediaPreview = mediaPreviewUrl || mediaUrl.trim() || '';
 
   const filteredTemplates = useMemo(() => {
     const q = templateSearch.trim().toLowerCase();
@@ -96,8 +511,101 @@ function Broadcast() {
   const fetchTemplates = async () => {
     try {
       setLoadingTemplates(true);
-      const data = await getTemplates({ status: 'approved' });
-      setTemplates(data.templates || []);
+      const data = await getTemplates({ limit: 200 });
+      let list = (data.templates || []).filter((t) => {
+        const st = String(t.status || '').toLowerCase();
+        const ms = String(t.metaStatus || '').toUpperCase();
+        return st === 'approved' || ms === 'APPROVED';
+      });
+      try {
+        const metaList = await getMetaTemplates();
+        const approvedMeta = (metaList || []).filter(
+          (t) => String(t.status || t.metaStatus || '').toUpperCase() === 'APPROVED'
+        );
+        const metaByName = new Map(
+          approvedMeta.map((t) => [String(t.name || '').toLowerCase(), t])
+        );
+
+        list = list.map((t) => {
+          const meta = metaByName.get(String(t.name || '').toLowerCase());
+          if (!meta) return t;
+          const merged = { ...t };
+          if (meta.metaTemplateId && !merged.metaTemplateId) {
+            merged.metaTemplateId = meta.metaTemplateId;
+          }
+          if (Array.isArray(meta.components) && meta.components.length) {
+            merged.components = meta.components;
+          }
+          if (meta.language) merged.language = meta.language;
+          if (meta.category) merged.metaCategory = String(meta.category).toUpperCase();
+          if (meta.variables && typeof meta.variables === 'object' && !Array.isArray(meta.variables)) {
+            const localVars =
+              typeof t.variables === 'object' && !Array.isArray(t.variables) ? t.variables : {};
+            merged.variables = {
+              ...localVars,
+              ...meta.variables,
+              actionMode: localVars.actionMode || meta.variables.actionMode,
+              callToActions: localVars.callToActions?.length ? localVars.callToActions : meta.variables.callToActions,
+              quickReplies: localVars.quickReplies?.length ? localVars.quickReplies : meta.variables.quickReplies,
+              interactiveButtons: localVars.interactiveButtons?.length
+                ? localVars.interactiveButtons
+                : meta.variables.interactiveButtons,
+              footer: localVars.footer || meta.variables.footer,
+              language: localVars.language || meta.variables.language || meta.language,
+            };
+          } else if (
+            merged.variables &&
+            typeof merged.variables === 'object' &&
+            !Array.isArray(merged.variables) &&
+            Array.isArray(merged.components) &&
+            merged.components.length &&
+            !merged.variables.templateType
+          ) {
+            const header = merged.components.find(
+              (c) => String(c.type || '').toUpperCase() === 'HEADER'
+            );
+            const format = String(header?.format || '').toUpperCase();
+            if (format === 'IMAGE') merged.variables = { ...merged.variables, templateType: 'image' };
+            else if (format === 'VIDEO') merged.variables = { ...merged.variables, templateType: 'video' };
+            else if (format === 'DOCUMENT') merged.variables = { ...merged.variables, templateType: 'document' };
+          }
+          return merged;
+        });
+
+        const names = new Set(list.map((t) => String(t.name || '').toLowerCase()));
+        approvedMeta.forEach((t) => {
+          const key = String(t.name || '').toLowerCase();
+          if (!names.has(key)) {
+            list.push({
+              id: t.id,
+              name: t.name,
+              content:
+                t.content ||
+                t.components?.find((c) => String(c.type || '').toUpperCase() === 'BODY')?.text ||
+                '',
+              components: t.components,
+              variables: t.variables,
+              metaTemplateId: t.metaTemplateId,
+              metaCategory: t.category ? String(t.category).toUpperCase() : null,
+              language: t.language,
+              status: 'approved',
+            });
+            names.add(key);
+          }
+        });
+      } catch (_) {
+        /* meta optional */
+      }
+
+      list = await Promise.all(
+        list.map(async (t) => {
+          const parts = getTemplatePreviewParts(t);
+          if (parts?.buttons?.length) return t;
+          return resolveBroadcastTemplate(t);
+        })
+      );
+
+      setTemplates(list);
     } catch (error) {
       console.error('Error fetching templates:', error);
       setError('Failed to fetch templates');
@@ -155,6 +663,13 @@ function Broadcast() {
     }
   }, [audienceType, contactsSearch]);
 
+  useEffect(() => {
+    if (!user?.id || step !== 4) return;
+    getConversationQuota(user.id)
+      .then((q) => setWccCredits(Number(q.wccCredits ?? 0)))
+      .catch(() => setWccCredits(null));
+  }, [user?.id, step]);
+
   // Handle CSV upload
   const handleCSVUpload = async (e) => {
     const file = e.target.files[0];
@@ -179,10 +694,22 @@ function Broadcast() {
 
   // Handle template selection
   const handleTemplateSelect = async (template) => {
-    setSelectedTemplate(template);
+    const resolved = await resolveBroadcastTemplate(template);
+    setSelectedTemplate(resolved);
+
+    const lang =
+      resolved?.language ||
+      parseTemplateVariablesMeta(resolved?.variables)?.language ||
+      templateLanguage ||
+      'en_US';
+    setTemplateLanguage(lang);
+
+    setMediaUrl('');
+    setMediaPreviewUrl('');
+    setHeaderMediaFile(null);
     
     // Parse template variables from content
-    const content = template.content || '';
+    const content = resolved.content || template.content || '';
     const matches = content.match(/\{\{(\d+)\}\}/g) || [];
     const vars = matches.map(m => {
       const num = parseInt(m.replace(/[{}]/g, ''));
@@ -204,7 +731,7 @@ function Broadcast() {
     
     // Validate template
     try {
-      const validation = await validateTemplate(template.name, templateLanguage, variableMapping);
+      const validation = await validateTemplate(resolved.name, lang, variableMapping);
       setValidationResult(validation);
     } catch (error) {
       console.error('Validation error:', error);
@@ -271,6 +798,32 @@ function Broadcast() {
     return [];
   };
 
+  const audienceCount = useMemo(() => prepareAudienceData().length, [
+    audienceType,
+    csvData,
+    selectedContacts,
+    manualNumbers,
+    variableMapping,
+    templateVariables,
+  ]);
+
+  const templateBillingCategory = useMemo(
+    () => resolveTemplateBillingCategory(selectedTemplate),
+    [selectedTemplate]
+  );
+
+  const templateRatePerMessage = useMemo(
+    () => getMessageRateForBillingCategory(templateBillingCategory),
+    [templateBillingCategory]
+  );
+
+  const estimatedCampaignCost = useMemo(
+    () => estimateCampaignMessageCost(audienceCount, templateBillingCategory),
+    [audienceCount, templateBillingCategory]
+  );
+
+  const wccSufficient = wccCredits == null ? true : Number(wccCredits) >= estimatedCampaignCost;
+
   // Create broadcast
   const handleCreateBroadcast = async () => {
     if (!selectedTemplate) {
@@ -303,35 +856,59 @@ function Broadcast() {
       return;
     }
 
+    if (!DISABLE_WCC_RECHARGE_CHECK && !wccSufficient) {
+      setError('Insufficient balance. Please recharge your WCC credits before sending.');
+      return;
+    }
+
+    if (selectedTemplate && templateHasMedia(selectedTemplate)) {
+      const hasUrl = mediaUrl.trim() && !mediaUrl.trim().startsWith('blob:');
+      if (!headerMediaFile && !hasUrl) {
+        setError('This template needs header media. Upload a file or paste a public HTTPS URL.');
+        return;
+      }
+    }
+
     setSaving(true);
     setError('');
     setSuccess('');
 
     try {
+      const scheduleDate = scheduleTime ? new Date(scheduleTime) : null;
+      const isFutureSchedule = scheduleDate && scheduleDate.getTime() > Date.now();
+
+      let headerMediaUrl = mediaUrl.trim() || null;
+      if (headerMediaFile) {
+        const uploaded = await uploadBroadcastHeaderMedia(headerMediaFile);
+        headerMediaUrl = uploaded.url;
+      } else if (headerMediaUrl?.startsWith('blob:')) {
+        throw new Error('Please upload the image file again before sending.');
+      }
+
       const broadcastData = {
         name: campaignName,
         template_name: selectedTemplate.name,
         template_language: templateLanguage,
-        schedule_time: scheduleTime || null,
+        schedule_time: scheduleDate ? scheduleDate.toISOString() : null,
         audience_type: audienceType,
         audience_data: audienceData,
         variable_mapping: variableMapping,
-        segment_tag: null
+        segment_tag: null,
+        header_media_url: headerMediaUrl,
       };
 
       const campaign = await createBroadcast(broadcastData);
       
-      setSuccess('Broadcast created successfully!');
-      
-      // Auto-start if not scheduled
-      if (!scheduleTime) {
+      if (isFutureSchedule) {
+        setSuccess(`Broadcast scheduled for ${scheduleDate.toLocaleString()}`);
+      } else {
+        setSuccess('Broadcast created successfully!');
         try {
           await startCampaign(campaign.id);
           setSuccess('Broadcast created and started successfully!');
         } catch (startError) {
           console.error('Error starting campaign:', startError);
           setError(startError.message || 'Broadcast created, but failed to start sending. Check template approval/token/WABA/recipient.');
-          // Do not redirect automatically; let user see the error.
           setSaving(false);
           return;
         }
@@ -727,6 +1304,28 @@ function Broadcast() {
                   />
                 </div>
 
+                <div className="mb-6 flex flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-center">
+                  <p className="text-sm text-gray-500">
+                    {selectedTemplate ? (
+                      <>
+                        Selected:{' '}
+                        <span className="font-semibold text-gray-800">{selectedTemplate.name}</span>
+                      </>
+                    ) : (
+                      <>Select a template to continue.</>
+                    )}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setStep(2)}
+                    disabled={!selectedTemplate}
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-sky-600/25 transition-all hover:from-sky-500 hover:to-blue-500 hover:shadow-xl active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none disabled:active:scale-100"
+                  >
+                    Next: Select audience
+                    <span aria-hidden>→</span>
+                  </button>
+                </div>
+
                 {loadingTemplates ? (
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                     {[1, 2, 3, 4, 5, 6].map((i) => (
@@ -780,85 +1379,140 @@ function Broadcast() {
                     {filteredTemplates.map((template) => {
                       const varNums = [...(template.content || '').matchAll(/\{\{(\d+)\}\}/g)].map((m) => m[1]);
                       const varCount = new Set(varNums).size;
-                      const isSelected = selectedTemplate?.id === template.id;
+                      const isSelected = isSameBroadcastTemplate(selectedTemplate, template);
+                      const isImageTemplate = templateIsImage(template);
                       return (
-                        <button
-                          key={template.id}
-                          type="button"
-                          onClick={() => handleTemplateSelect(template)}
-                          className={`group relative w-full overflow-hidden rounded-2xl border-2 text-left transition-all duration-300 motion-hover-lift focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 ${
-                            isSelected
-                              ? 'border-sky-500 bg-gradient-to-br from-sky-50/95 via-white to-blue-50/40 shadow-lg shadow-sky-500/20 ring-1 ring-sky-200/70'
-                              : 'border-gray-100/90 bg-white hover:border-sky-200 hover:shadow-md hover:shadow-sky-500/5'
-                          }`}
-                        >
-                          <span
-                            className={`pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r transition-opacity ${
+                          <div
+                            key={template.id ?? template.name}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => handleTemplateSelect(template)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                handleTemplateSelect(template);
+                              }
+                            }}
+                            className={`group relative z-0 w-full cursor-pointer overflow-visible rounded-2xl border-2 text-left transition-all duration-300 motion-hover-lift hover:z-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 ${
                               isSelected
-                                ? 'from-sky-500 via-emerald-500 to-blue-600 opacity-100'
-                                : 'from-sky-200/80 via-sky-300/60 to-blue-200/80 opacity-0 group-hover:opacity-100'
+                                ? 'z-10 border-sky-500 bg-gradient-to-br from-sky-50/95 via-white to-blue-50/40 shadow-lg shadow-sky-500/20 ring-1 ring-sky-200/70'
+                                : 'border-gray-100/90 bg-white hover:border-sky-200 hover:shadow-md hover:shadow-sky-500/5'
                             }`}
-                            aria-hidden
-                          />
-                          <div className="relative p-4 md:p-5">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1">
-                                <h4 className="truncate font-bold text-gray-900 md:text-[17px]">{template.name}</h4>
-                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                  <span
-                                    className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
-                                      template.status === 'approved'
-                                        ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200/80'
-                                        : 'bg-amber-100 text-amber-900 ring-1 ring-amber-200/80'
-                                    }`}
-                                  >
-                                    {template.status === 'approved' ? (
-                                      <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20" aria-hidden>
-                                        <path
-                                          fillRule="evenodd"
-                                          d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                                          clipRule="evenodd"
-                                        />
-                                      </svg>
+                          >
+                            <span
+                              className={`pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r transition-opacity ${
+                                isSelected
+                                  ? 'from-sky-500 via-emerald-500 to-blue-600 opacity-100'
+                                  : 'from-sky-200/80 via-sky-300/60 to-blue-200/80 opacity-0 group-hover:opacity-100'
+                              }`}
+                              aria-hidden
+                            />
+                            <div className="relative p-4 md:p-5">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <h4 className="truncate font-bold text-gray-900 md:text-[17px]">{template.name}</h4>
+                                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                                    <span
+                                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                                        template.status === 'approved'
+                                          ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200/80'
+                                          : 'bg-amber-100 text-amber-900 ring-1 ring-amber-200/80'
+                                      }`}
+                                    >
+                                      {template.status === 'approved' ? (
+                                        <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20" aria-hidden>
+                                          <path
+                                            fillRule="evenodd"
+                                            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                            clipRule="evenodd"
+                                          />
+                                        </svg>
+                                      ) : null}
+                                      {template.status}
+                                    </span>
+                                    {isImageTemplate ? (
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-800 ring-1 ring-violet-100">
+                                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                          <path
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            strokeWidth={2}
+                                            d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                                          />
+                                        </svg>
+                                        Image
+                                      </span>
                                     ) : null}
-                                    {template.status}
-                                  </span>
-                                  {varCount > 0 ? (
-                                    <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-800 ring-1 ring-sky-100">
-                                      {varCount} variable{varCount !== 1 ? 's' : ''}
-                                    </span>
-                                  ) : (
-                                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600 ring-1 ring-gray-200/80">
-                                      No variables
-                                    </span>
-                                  )}
+                                    {varCount > 0 ? (
+                                      <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-800 ring-1 ring-sky-100">
+                                        {varCount} variable{varCount !== 1 ? 's' : ''}
+                                      </span>
+                                    ) : (
+                                      <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600 ring-1 ring-gray-200/80">
+                                        No variables
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <div
+                                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 transition-all ${
+                                    isSelected
+                                      ? 'border-sky-500 bg-sky-500 text-white shadow-md shadow-sky-500/30'
+                                      : 'border-gray-200 bg-white text-transparent group-hover:border-sky-300'
+                                  }`}
+                                  aria-hidden
+                                >
+                                  <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                  </svg>
                                 </div>
                               </div>
-                              <div
-                                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 transition-all ${
-                                  isSelected
-                                    ? 'border-sky-500 bg-sky-500 text-white shadow-md shadow-sky-500/30'
-                                    : 'border-gray-200 bg-white text-transparent group-hover:border-sky-300'
-                                }`}
-                                aria-hidden
-                              >
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                                </svg>
+
+                              <div className="mt-4 rounded-xl bg-[#e7ffdb] px-3 py-2.5 shadow-sm ring-1 ring-black/[0.04]">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-900/60">Preview</p>
+                                  <span className="text-[10px] font-medium text-emerald-800/50 opacity-0 transition group-hover:opacity-100">
+                                    Hover for full view
+                                  </span>
+                                </div>
+                                {isImageTemplate ? (
+                                  <div className="mt-2 overflow-hidden rounded-lg bg-white/80 ring-1 ring-black/[0.04]">
+                                    <div className="flex aspect-[4/3] flex-col items-center justify-center gap-1.5 text-violet-500/80">
+                                      <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                        <path
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          strokeWidth={1.5}
+                                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                                        />
+                                      </svg>
+                                      <span className="text-[11px] font-medium text-gray-500">Image header</span>
+                                    </div>
+                                    {template.content ? (
+                                      <p className="line-clamp-2 border-t border-black/[0.04] px-2.5 py-2 text-left text-[12px] leading-snug text-gray-700">
+                                        {template.content}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                ) : (
+                                  <p className="mt-1 line-clamp-3 text-left text-[13px] leading-snug text-gray-800">
+                                    {template.content || '—'}
+                                  </p>
+                                )}
                               </div>
                             </div>
 
-                            <div className="mt-4 rounded-xl bg-[#e7ffdb] px-3 py-2.5 shadow-sm ring-1 ring-black/[0.04]">
-                              <p className="text-[10px] font-semibold uppercase tracking-wider text-emerald-900/60">Preview</p>
-                              <p className="mt-1 line-clamp-3 text-left text-[13px] leading-snug text-gray-800">
-                                {template.content || '—'}
-                              </p>
+                            {/* Full template preview on card hover (same phone UI as former View modal) */}
+                            <div
+                              className="absolute inset-0 z-50 hidden items-stretch justify-center overflow-hidden rounded-2xl bg-white/95 p-3 backdrop-blur-[2px] group-hover:flex"
+                              onWheel={(e) => e.stopPropagation()}
+                            >
+                              <BroadcastTemplateHoverPreview template={template} />
                             </div>
                           </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
                 )}
 
                 <div className="mt-8 flex flex-col items-stretch justify-between gap-4 border-t border-gray-100/90 pt-6 sm:flex-row sm:items-center">
@@ -876,7 +1530,7 @@ function Broadcast() {
                     type="button"
                     onClick={() => setStep(2)}
                     disabled={!selectedTemplate}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-sky-600/25 transition-all hover:from-sky-500 hover:to-blue-500 hover:shadow-xl active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none disabled:active:scale-100"
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-sky-600/25 transition-all hover:from-sky-500 hover:to-blue-500 hover:shadow-xl active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none disabled:active:scale-100"
                   >
                     Next: Select audience
                     <span aria-hidden>→</span>
@@ -1148,75 +1802,163 @@ function Broadcast() {
           {/* Step 3: Variable Mapping */}
           {step === 3 && (
             <div className="motion-enter motion-delay-1 rounded-2xl border border-gray-100/90 bg-white p-6 md:p-8 shadow-lg shadow-gray-200/50 ring-1 ring-gray-100/80 motion-hover-lift hover:shadow-xl">
-              <h3 className="text-xl md:text-2xl font-bold text-gray-900 mb-4 tracking-tight">Map Template Variables</h3>
-              
-              {selectedTemplate && (
-                <div className="mb-6 p-4 md:p-5 bg-gradient-to-br from-sky-50/80 to-slate-50/60 border border-sky-100/80 rounded-xl ring-1 ring-sky-100/50">
-                  <p className="text-sm font-semibold mb-2 text-gray-900">Template: {selectedTemplate.name}</p>
-                  <p className="text-sm text-gray-600 leading-relaxed">{selectedTemplate.content}</p>
-                </div>
-              )}
+              <h3 className="text-xl md:text-2xl font-bold text-gray-900 mb-1 tracking-tight">Map Template Variables</h3>
+              <p className="text-sm text-gray-500 mb-6">Map variables and preview your message before sending</p>
 
-              {templateVariables.length > 0 ? (
-                <div>
-                  <p className="text-sm text-gray-600 mb-4">
-                    Map each template variable to a column/field from your audience data
-                  </p>
-                  
-                  <div className="space-y-4">
-                    {templateVariables.map(v => (
-                      <div key={v.placeholder} className="flex items-center gap-4">
-                        <div className="w-32 text-sm font-medium">{v.placeholder}</div>
-                        <div className="flex-1">
-                          {audienceType === 'csv' && csvColumns.length > 0 ? (
-                            <select
-                              value={variableMapping[v.placeholder] || ''}
-                              onChange={(e) => handleVariableMappingChange(v.placeholder, e.target.value)}
-                              className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/80 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all cursor-pointer text-sm shadow-sm"
-                            >
-                              <option value="">Select column...</option>
-                              {csvColumns.filter(col => col !== 'phone').map(col => (
-                                <option key={col} value={col}>{col}</option>
-                              ))}
-                            </select>
-                          ) : (
-                            <select
-                              value={variableMapping[v.placeholder] || ''}
-                              onChange={(e) => handleVariableMappingChange(v.placeholder, e.target.value)}
-                              className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/80 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all cursor-pointer text-sm shadow-sm"
-                            >
-                              <option value="">Select field...</option>
-                              <option value="name">Name</option>
-                              <option value="email">Email</option>
-                              <option value="var1">Variable 1</option>
-                              <option value="var2">Variable 2</option>
-                              <option value="var3">Variable 3</option>
-                            </select>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+              <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 lg:gap-8 items-start">
+                <div className="space-y-5 min-w-0">
+                  {selectedTemplate && (
+                    <div className="rounded-xl border border-sky-100 bg-sky-50/40 px-4 py-3">
+                      <p className="text-sm font-semibold text-gray-900">Template: {selectedTemplate.name}</p>
+                    </div>
+                  )}
 
-                  {validationResult && (
-                    <div className={`mt-4 p-4 rounded-lg ${
-                      validationResult.validation.isValid
-                        ? 'bg-green-50 border border-green-200'
-                        : 'bg-yellow-50 border border-yellow-200'
-                    }`}>
-                      <p className={`text-sm font-medium ${
-                        validationResult.validation.isValid ? 'text-green-800' : 'text-yellow-800'
-                      }`}>
-                        {validationResult.validation.message}
+                  {templateVariables.length > 0 ? (
+                    <div>
+                      <p className="text-sm text-gray-600 mb-4">
+                        Map each template variable to a column/field from your audience data
                       </p>
+                      <div className="space-y-4">
+                        {templateVariables.map(v => (
+                          <div key={v.placeholder} className="flex items-center gap-4">
+                            <div className="w-32 text-sm font-medium">{v.placeholder}</div>
+                            <div className="flex-1">
+                              {audienceType === 'csv' && csvColumns.length > 0 ? (
+                                <select
+                                  value={variableMapping[v.placeholder] || ''}
+                                  onChange={(e) => handleVariableMappingChange(v.placeholder, e.target.value)}
+                                  className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/80 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all cursor-pointer text-sm shadow-sm"
+                                >
+                                  <option value="">Select column...</option>
+                                  {csvColumns.filter(col => col !== 'phone').map(col => (
+                                    <option key={col} value={col}>{col}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <select
+                                  value={variableMapping[v.placeholder] || ''}
+                                  onChange={(e) => handleVariableMappingChange(v.placeholder, e.target.value)}
+                                  className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/80 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all cursor-pointer text-sm shadow-sm"
+                                >
+                                  <option value="">Select field...</option>
+                                  <option value="name">Name</option>
+                                  <option value="email">Email</option>
+                                  <option value="var1">Variable 1</option>
+                                  <option value="var2">Variable 2</option>
+                                  <option value="var3">Variable 3</option>
+                                </select>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {validationResult && (
+                        <div className={`mt-4 p-4 rounded-lg ${
+                          validationResult.validation.isValid
+                            ? 'bg-green-50 border border-green-200'
+                            : 'bg-yellow-50 border border-yellow-200'
+                        }`}>
+                          <p className={`text-sm font-medium ${
+                            validationResult.validation.isValid ? 'text-green-800' : 'text-yellow-800'
+                          }`}>
+                            {validationResult.validation.message}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-gray-100 bg-gray-50/50 px-4 py-3 text-sm text-gray-500">
+                      This template has no variables to map
+                    </div>
+                  )}
+
+                  {selectedTemplate && templateIsImage(selectedTemplate) && (
+                    <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-4 space-y-3 shadow-sm">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">Header image *</p>
+                        <p className="text-xs text-gray-600 mt-0.5">
+                          Upload the image to send with this broadcast. Size &lt; 5MB · .png or .jpeg
+                        </p>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-600 mb-1.5">Image URL (optional)</label>
+                        <input
+                          type="url"
+                          value={mediaUrl}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setMediaUrl(val);
+                            setHeaderMediaFile(null);
+                            if (val.trim()) {
+                              setMediaPreviewUrl(val.trim());
+                            } else if (!mediaFileInputRef.current?.files?.length) {
+                              setMediaPreviewUrl('');
+                            }
+                          }}
+                          placeholder="https://example.com/image.png"
+                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none bg-white"
+                        />
+                      </div>
+                      <input
+                        ref={mediaFileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/jpg,image/webp"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          if (file.size > 5 * 1024 * 1024) {
+                            setError('Image must be smaller than 5MB');
+                            return;
+                          }
+                          const url = URL.createObjectURL(file);
+                          setHeaderMediaFile(file);
+                          setMediaPreviewUrl(url);
+                          setMediaUrl('');
+                          setError('');
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => mediaFileInputRef.current?.click()}
+                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-violet-700 px-4 py-3 text-sm font-semibold text-white shadow-md hover:from-violet-700 hover:to-violet-800 transition-all"
+                      >
+                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
+                          />
+                        </svg>
+                        Upload image
+                      </button>
+                      {headerMediaFile ? (
+                        <p className="text-xs font-medium text-violet-800">
+                          Selected: {headerMediaFile.name}
+                        </p>
+                      ) : null}
                     </div>
                   )}
                 </div>
-              ) : (
-                <div className="text-center py-8 text-gray-500">
-                  This template has no variables to map
+
+                <div className="lg:sticky lg:top-4">
+                  {selectedTemplate ? (
+                    <BroadcastWhatsAppPreview
+                      template={selectedTemplate}
+                      mediaPreviewUrl={effectiveMediaPreview}
+                      templateVariables={templateVariables}
+                      variableMapping={variableMapping}
+                      sampleRow={previewSampleRow}
+                    />
+                  ) : (
+                    <div className="h-64 flex items-center justify-center border-2 border-dashed border-sky-200 rounded-2xl bg-sky-50/20 text-gray-500 text-sm">
+                      Select a template to preview
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
 
               <div className="mt-6 flex justify-between gap-3 flex-wrap">
                 <button
@@ -1229,7 +1971,13 @@ function Broadcast() {
                 <button
                   type="button"
                   onClick={() => setStep(4)}
-                  disabled={templateVariables.length > 0 && !validationResult?.validation.isValid}
+                  disabled={
+                    (templateVariables.length > 0 && !validationResult?.validation.isValid) ||
+                    (selectedTemplate &&
+                      templateIsImage(selectedTemplate) &&
+                      !headerMediaFile &&
+                      !mediaUrl.trim())
+                  }
                   className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold shadow-md shadow-sky-600/25 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98] disabled:active:scale-100"
                 >
                   Next: Review & Send
@@ -1243,57 +1991,148 @@ function Broadcast() {
             <div className="motion-enter motion-delay-1 rounded-2xl border border-gray-100/90 bg-white p-6 md:p-8 shadow-lg shadow-gray-200/50 ring-1 ring-gray-100/80 motion-hover-lift hover:shadow-xl">
               <h3 className="text-xl md:text-2xl font-bold text-gray-900 mb-4 tracking-tight">Review & Send</h3>
               
-              <div className="space-y-6">
-                {/* Campaign Name */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Campaign Name *</label>
-                  <input
-                    type="text"
-                    value={campaignName}
-                    onChange={(e) => setCampaignName(e.target.value)}
-                    placeholder="e.g., New Year Offer 2026"
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm"
-                  />
+              <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 lg:gap-8 items-start">
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Campaign Name *</label>
+                    <input
+                      type="text"
+                      value={campaignName}
+                      onChange={(e) => setCampaignName(e.target.value)}
+                      placeholder="e.g., New Year Offer 2026"
+                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Schedule Date & Time</label>
+                    <input
+                      type="datetime-local"
+                      value={scheduleTime}
+                      min={new Date().toISOString().slice(0, 16)}
+                      onChange={(e) => setScheduleTime(e.target.value)}
+                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Leave empty to send immediately, or pick a future date and time to schedule</p>
+                  </div>
+
+                  <div className="p-4 md:p-5 bg-gradient-to-br from-slate-50/90 to-sky-50/40 border border-gray-100/90 rounded-xl ring-1 ring-gray-100/80">
+                    <h4 className="font-bold text-gray-900 mb-3">Campaign Summary</h4>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Template:</span>
+                        <span className="font-medium">{selectedTemplate?.name}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Language:</span>
+                        <span className="font-medium">{templateLanguage}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Audience Type:</span>
+                        <span className="font-medium capitalize">{audienceType}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Total Recipients:</span>
+                        <span className="font-medium">{audienceCount}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Send Time:</span>
+                        <span className="font-medium">
+                          {scheduleTime
+                            ? new Date(scheduleTime).toLocaleString()
+                            : 'Immediately'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Template Category:</span>
+                        <span className="font-medium">{getBillingCategoryLabel(templateBillingCategory)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Rate per message:</span>
+                        <span className="font-medium">
+                          {templateBillingCategory === 'service'
+                            ? 'Free'
+                            : `₹ ${formatInr(templateRatePerMessage)}`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-sky-100 bg-gradient-to-br from-sky-50/80 to-white p-4 ring-1 ring-sky-100/80">
+                    <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
+                      Message pricing (as per template category)
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {CONVERSATION_METRICS.map((metric) => {
+                        const isActive = metric.key === templateBillingCategory;
+                        return (
+                          <div
+                            key={metric.key}
+                            className={`rounded-xl px-3 py-2.5 text-center ring-1 transition ${
+                              isActive
+                                ? 'bg-emerald-50 ring-emerald-300 shadow-sm'
+                                : 'bg-white ring-slate-100'
+                            }`}
+                          >
+                            <p
+                              className={`text-[10px] font-bold uppercase tracking-wide ${
+                                isActive ? 'text-emerald-700' : 'text-slate-400'
+                              }`}
+                            >
+                              {metric.label}
+                            </p>
+                            <p className={`mt-1 text-xs font-medium ${isActive ? 'text-emerald-900' : 'text-slate-700'}`}>
+                              {metric.text}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-3 text-[11px] text-slate-500">
+                      Selected template uses{' '}
+                      <span className="font-semibold text-slate-700">
+                        {getBillingCategoryLabel(templateBillingCategory)}
+                      </span>{' '}
+                      pricing — {audienceCount} recipient{audienceCount === 1 ? '' : 's'} × ₹{' '}
+                      {formatInr(templateRatePerMessage)} = ₹ {formatInr(estimatedCampaignCost)}
+                    </p>
+                  </div>
                 </div>
 
-                {/* Schedule */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Schedule (Optional)</label>
-                  <input
-                    type="datetime-local"
-                    value={scheduleTime}
-                    onChange={(e) => setScheduleTime(e.target.value)}
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Leave empty to send immediately</p>
+                <div className="lg:sticky lg:top-4">
+                  {selectedTemplate ? (
+                    <BroadcastWhatsAppPreview
+                      template={selectedTemplate}
+                      mediaPreviewUrl={effectiveMediaPreview}
+                      templateVariables={templateVariables}
+                      variableMapping={variableMapping}
+                      sampleRow={previewSampleRow}
+                    />
+                  ) : null}
                 </div>
+              </div>
 
-                {/* Summary */}
-                <div className="p-4 md:p-5 bg-gradient-to-br from-slate-50/90 to-sky-50/40 border border-gray-100/90 rounded-xl ring-1 ring-gray-100/80">
-                  <h4 className="font-bold text-gray-900 mb-3">Campaign Summary</h4>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Template:</span>
-                      <span className="font-medium">{selectedTemplate?.name}</span>
+              <div className="mt-6 flex flex-col gap-4 border-t border-sky-100 bg-gradient-to-r from-sky-50/80 to-slate-50/80 -mx-6 md:-mx-8 px-6 md:px-8 py-4 rounded-b-2xl">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="font-semibold text-gray-800">Estimated Campaign Cost</span>
+                  <div className="flex flex-wrap gap-3">
+                    <div className="min-w-[140px] rounded-xl border border-sky-100 bg-white px-4 py-2.5 text-center shadow-sm ring-1 ring-sky-50">
+                      <p className="text-xs text-gray-500">Estimated Cost</p>
+                      <p className="font-bold text-gray-900">₹ {formatInr(estimatedCampaignCost)}</p>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Language:</span>
-                      <span className="font-medium">{templateLanguage}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Audience Type:</span>
-                      <span className="font-medium capitalize">{audienceType}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Total Recipients:</span>
-                      <span className="font-medium">{prepareAudienceData().length}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Send Time:</span>
-                      <span className="font-medium">{scheduleTime || 'Immediately'}</span>
+                    <div className="min-w-[140px] rounded-xl border border-sky-100 bg-white px-4 py-2.5 text-center shadow-sm ring-1 ring-sky-50">
+                      <p className="text-xs text-gray-500">Available cost</p>
+                      <p className={`font-bold ${wccSufficient ? 'text-gray-900' : 'text-red-600'}`}>
+                        ₹ {wccCredits != null ? formatInr(wccCredits) : '—'}
+                      </p>
                     </div>
                   </div>
                 </div>
+                {!DISABLE_WCC_RECHARGE_CHECK && !wccSufficient ? (
+                  <p className="text-sm font-semibold text-red-600">
+                    Insufficient balance. Please recharge before sending this broadcast.
+                  </p>
+                ) : null}
               </div>
 
               <div className="mt-6 flex justify-between gap-3 flex-wrap">
@@ -1307,10 +2146,14 @@ function Broadcast() {
                 <button
                   type="button"
                   onClick={handleCreateBroadcast}
-                  disabled={saving || !campaignName.trim()}
+                  disabled={saving || !campaignName.trim() || (!DISABLE_WCC_RECHARGE_CHECK && !wccSufficient)}
                   className="px-6 py-2.5 bg-green-600 text-white rounded-xl font-semibold shadow-md shadow-green-600/25 hover:bg-green-700 hover:shadow-lg transition-all duration-200 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 disabled:shadow-none"
                 >
-                  {saving ? 'Creating...' : scheduleTime ? 'Schedule Broadcast' : 'Send Broadcast'}
+                  {saving
+                    ? 'Creating...'
+                    : scheduleTime && new Date(scheduleTime).getTime() > Date.now()
+                      ? 'Schedule Broadcast'
+                      : 'Send Broadcast'}
                 </button>
               </div>
             </div>
@@ -1318,6 +2161,7 @@ function Broadcast() {
           </div>
         </main>
       </div>
+
     </div>
   );
 }

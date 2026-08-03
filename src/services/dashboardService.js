@@ -1,4 +1,5 @@
-const API_URL = 'https://wabizx.techwhizzc.com/api';
+// const API_URL = 'https://wabizx.techwhizzc.com/api';
+const API_URL = 'https://api.waabizx.com/api';
 
 // Get token from localStorage
 const getToken = () => {
@@ -88,7 +89,9 @@ export const getConversationQuota = async (accountId) => {
   console.log('[Dashboard API][WCC] Browser received quota (drives WCC “X left” in panel)', {
     accountId,
     projectIdHeader: getSelectedProjectId(),
+    projectId: data.projectId ?? null,
     wccCredits: data.wccCredits ?? 0,
+    planInfo: data.planInfo ?? null,
     used24h: data.used,
     remainingDailyCap: data.remaining,
     limit: data.limit,
@@ -102,7 +105,20 @@ export const getConversationQuota = async (accountId) => {
     messagesSentToday: data.messagesSentToday ?? 0,
     templatesSentToday: data.templatesSentToday ?? 0,
     accountName: data.accountName ?? null,
+    projectId: data.projectId ?? null,
     wccCredits: data.wccCredits ?? 0,
+    wccRemainingCredits: data.wccRemainingCredits ?? data.wccCredits ?? 0,
+    remainingEstimatedMessages: data.remainingEstimatedMessages ?? 0,
+    creditUnitCost: data.creditUnitCost ?? 1,
+    planInfo: data.planInfo ?? null,
+    wabaTier: data.wabaTier ?? null,
+    wabaTierLabel: data.wabaTierLabel ?? null,
+    wabaThroughputLevel: data.wabaThroughputLevel ?? null,
+    wabaQualityRating: data.wabaQualityRating ?? null,
+    tierDailyLimit: data.tierDailyLimit ?? data.limit ?? 0,
+    tierRemaining: data.tierRemaining ?? data.remaining ?? 0,
+    tierSource: data.tierSource ?? 'local',
+    tierFetchedAt: data.tierFetchedAt ?? null,
   };
 };
 

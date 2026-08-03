@@ -234,6 +234,20 @@ function SuperAdminDashboard() {
                 >
                   Demo bookings
                 </button>
+                <button
+                  type="button"
+                  onClick={() => navigate("/super-admin/blogs")}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold transition bg-white text-gray-700 border border-gray-200 hover:bg-amber-50 hover:border-amber-200 hover:text-amber-800"
+                >
+                  Blogs
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate("/super-admin/businesses")}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold transition bg-white text-gray-700 border border-gray-200 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-800"
+                >
+                  Businesses
+                </button>
               </div>
 
               {activeTab === "plans" ? (

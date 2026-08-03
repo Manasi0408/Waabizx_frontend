@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import BrandLogoMark from '../components/BrandLogoMark';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import InfiniteScroll from 'react-infinite-scroll-component';
@@ -11,15 +12,329 @@ import { getPaginatedMessages, sendTemplateMessage } from '../services/messageSe
 import { uploadMedia, sendMediaMessage } from '../services/mediaService';
 import { sendChatbotMessage } from '../services/chatbotService';
 import { getTemplates } from '../services/templateService';
-import { getManagerRequesting, assignChatToAgent, interveneByPhone } from '../api/chatApi';
+import { getManagerRequesting, getUnassignedRequestingChats, assignChatToAgent, interveneByPhone, acceptChat, assignAgentTakeover, closeChat } from '../api/chatApi';
 import axios from '../api/axios';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import ContactTagsBar from '../components/ContactTagsBar';
+import ChatMessageItem from '../components/ChatMessageItem';
+import InsertMessagePreview from '../components/InsertMessagePreview';
+import ResolveDispositionModal from '../components/ResolveDispositionModal';
+import { getDispositionLabel } from '../constants/resolveDispositions';
+import { fetchTags } from '../services/tagService';
+import {
+  buildTemplatePreview,
+  normalizeTemplateKey,
+  extractTemplateHeaderMediaUrl,
+  templateHasImageHeader,
+  templateNeedsHeaderMedia,
+} from '../utils/whatsappTemplatePreview';
+import { mergeChatMessages, messagesMatchForDedupe, messageHasTemplateCard, dedupeChatMessages } from '../utils/mergeChatMessages';
 
-const API_BASE = 'https://wabizx.techwhizzc.com/';
+// const API_BASE = 'https://wabizx.techwhizzc.com/';
+const API_BASE = 'https://api.waabizx.com/';
 const INTERVENED_STORAGE_KEY = 'inboxIntervenedPhones';
+
+const normalizePhoneKey = (phone) => String(phone || '').replace(/\D/g, '');
+
+/** Match conversation ↔ contact phones even if one has country code (91…) and the other does not. */
+function phonesMatchKey(a, b) {
+  const da = normalizePhoneKey(a);
+  const db = normalizePhoneKey(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  const ta = da.length > 10 ? da.slice(-10) : da;
+  const tb = db.length > 10 ? db.slice(-10) : db;
+  return ta.length >= 10 && tb.length >= 10 && ta === tb;
+}
+
+function phoneLookupKeys(phone) {
+  const d = normalizePhoneKey(phone);
+  if (!d) return [];
+  const keys = [d];
+  if (d.length > 10) keys.push(d.slice(-10));
+  return [...new Set(keys)];
+}
+
+function parseInboxTimestamp(value) {
+  if (!value) return 0;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isNaN(t) ? 0 : t;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  // MySQL "YYYY-MM-DD HH:mm:ss" → ISO-ish for reliable Date parsing
+  const normalized = /^\d{4}-\d{2}-\d{2} /.test(raw) ? raw.replace(' ', 'T') : raw;
+  const t = new Date(normalized).getTime();
+  if (!Number.isNaN(t)) return t;
+  const t2 = new Date(raw).getTime();
+  return Number.isNaN(t2) ? 0 : t2;
+}
+
+const INBOX_FILTER_ATTRS = [
+  { value: 'intervened', label: 'Intervened' },
+  { value: 'intervened_by_agent', label: 'Intervened by agent' },
+  { value: 'tags', label: 'Tags' },
+  { value: 'opted_in', label: 'Opted In' },
+];
+
+function newInboxFilterAttrRow() {
+  return {
+    id: `f_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    attribute: '',
+    operator: 'is',
+    value: '',
+    join: 'and',
+  };
+}
+
+function emptyInboxFilterDraft() {
+  return {
+    lastSeenPreset: '',
+    lastSeenFrom: '',
+    lastSeenTo: '',
+    createdPreset: '',
+    createdFrom: '',
+    createdTo: '',
+    attrs: [newInboxFilterAttrRow()],
+  };
+}
+
+function cloneInboxFilterDraft(src) {
+  const base = src || emptyInboxFilterDraft();
+  return {
+    ...base,
+    attrs: (base.attrs || [newInboxFilterAttrRow()]).map((r) => ({ ...r })),
+  };
+}
+
+function toDateInputValue(d) {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function resolveInboxDateRange(preset, fromStr, toStr, presetKind) {
+  const now = new Date();
+  let from = null;
+  let to = null;
+
+  // Prefer preset when set (from/to may be mirror values for display only)
+  if (preset) {
+    to = new Date(now);
+    to.setHours(23, 59, 59, 999);
+    from = new Date(now);
+    if (presetKind === 'lastSeen' && preset === '24h') {
+      from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    } else if (preset === 'today') {
+      from.setHours(0, 0, 0, 0);
+    } else if (preset === 'week') {
+      const day = from.getDay();
+      from.setDate(from.getDate() - day);
+      from.setHours(0, 0, 0, 0);
+    } else if (preset === 'month') {
+      from.setDate(1);
+      from.setHours(0, 0, 0, 0);
+    } else {
+      from = null;
+      to = null;
+    }
+    return { from, to };
+  }
+
+  if (fromStr) {
+    const d = new Date(`${fromStr}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) from = d;
+  }
+  if (toStr) {
+    const d = new Date(`${toStr}T23:59:59.999`);
+    if (!Number.isNaN(d.getTime())) to = d;
+  }
+  return { from, to };
+}
+
+function countInboxAppliedFilters(applied) {
+  if (!applied) return 0;
+  let n = 0;
+  if (applied.lastSeenPreset || applied.lastSeenFrom || applied.lastSeenTo) n += 1;
+  if (applied.createdPreset || applied.createdFrom || applied.createdTo) n += 1;
+  (applied.attrs || []).forEach((row) => {
+    if (row?.attribute && String(row.value ?? '') !== '') n += 1;
+  });
+  return n;
+}
+
+function readAgentPickupAllowed(user) {
+  try {
+    const perms = user?.permissions;
+    if (!perms) return true;
+    const parsed = typeof perms === 'string' ? JSON.parse(perms) : perms;
+    if (!parsed || typeof parsed !== 'object') return true;
+    if ('inbox' in parsed || 'liveChat' in parsed) {
+      return Boolean(parsed.inbox || parsed.liveChat);
+    }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function personalizeSystemText(text, userName) {
+  const raw = String(userName || '').trim();
+  if (!raw || !text) return text;
+  let out = String(text);
+  for (const name of [raw, raw.toUpperCase(), raw.toLowerCase()]) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\bby ${esc}\\b`, 'i'), 'by you');
+    out = out.replace(new RegExp(`\\bto ${esc}\\b`, 'i'), 'to you');
+    out = out.replace(new RegExp(`\\bfrom ${esc}\\b`, 'i'), 'from you');
+  }
+  return out;
+}
+
+function mergeInboxIntoRequesting(apiRows, inboxList) {
+  const byKey = new Map();
+  (apiRows || []).forEach((row) => {
+    const key = normalizePhoneKey(row.phone);
+    if (key) byKey.set(key, row);
+  });
+  (inboxList || []).forEach((c) => {
+    const key = normalizePhoneKey(c.phone);
+    if (!key || byKey.has(key)) return;
+    const status = String(c.chatStatus || '').toLowerCase();
+    if (status === 'intervened' || status === 'closed') return;
+    byKey.set(key, {
+      id: c.conversationId || null,
+      contactId: c.contactId ?? c.id ?? null,
+      phone: c.phone,
+      customer_name: c.name || c.phone,
+      last_message: c.lastMessage || '',
+      last_message_time: c.lastMessageTime,
+      unread_count: c.unreadCount || 0,
+      status: 'requesting',
+    });
+  });
+  return [...byKey.values()].sort((a, b) => {
+    const ta = new Date(a.last_message_time || 0).getTime();
+    const tb = new Date(b.last_message_time || 0).getTime();
+    return tb - ta;
+  });
+}
+
+function mergeInboxIntoActive(apiRows, inboxList) {
+  const byKey = new Map();
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  (apiRows || []).forEach((row) => {
+    const key = normalizePhoneKey(row.phone);
+    if (key) byKey.set(key, row);
+  });
+  (inboxList || []).forEach((c) => {
+    const key = normalizePhoneKey(c.phone);
+    if (!key || byKey.has(key)) return;
+    const ts = new Date(c.lastMessageTime || 0).getTime();
+    if (!ts || ts < cutoff) return;
+    const status = String(c.chatStatus || '').toLowerCase();
+    if (status === 'closed' || status === 'intervened' || status === 'requesting') return;
+    byKey.set(key, {
+      id: c.conversationId || null,
+      contactId: c.contactId ?? c.id ?? null,
+      phone: c.phone,
+      customer_name: c.name || c.phone,
+      last_message: c.lastMessage || '',
+      last_message_time: c.lastMessageTime,
+      unread_count: c.unreadCount || 0,
+      status: status || 'active',
+    });
+  });
+  return [...byKey.values()].sort((a, b) => {
+    const ta = new Date(a.last_message_time || 0).getTime();
+    const tb = new Date(b.last_message_time || 0).getTime();
+    return tb - ta;
+  });
+}
+
+function mergeInboxIntoHistory(apiRows, inboxList) {
+  const byKey = new Map();
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  (apiRows || []).forEach((row) => {
+    const key = normalizePhoneKey(row.phone);
+    if (key) byKey.set(key, row);
+  });
+  (inboxList || []).forEach((c) => {
+    const key = normalizePhoneKey(c.phone);
+    if (!key || byKey.has(key)) return;
+    const ts = new Date(c.lastMessageTime || 0).getTime();
+    if (!ts || ts >= cutoff) return;
+    byKey.set(key, {
+      id: c.conversationId || null,
+      contactId: c.contactId ?? c.id ?? null,
+      phone: c.phone,
+      customer_name: c.name || c.phone,
+      last_message: c.lastMessage || '',
+      last_message_time: c.lastMessageTime,
+      unread_count: 0,
+      status: 'history',
+    });
+  });
+  return [...byKey.values()].sort((a, b) => {
+    const ta = new Date(a.last_message_time || 0).getTime();
+    const tb = new Date(b.last_message_time || 0).getTime();
+    return tb - ta;
+  });
+}
+
+const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+
+function mapMetaMessageToInbox(metaMsg) {
+  const msgType = String(metaMsg.message_type || metaMsg.messageType || 'text').toLowerCase();
+  const rawText = String(metaMsg.text || metaMsg.message_text || '').trim();
+  const isMedia = MEDIA_TYPES.has(msgType);
+  const looksLikeUrl = /^https?:\/\//i.test(rawText);
+  const isTemplate =
+    msgType === 'template' ||
+    Boolean(metaMsg.isTemplateSend) ||
+    /^Template:\s*\S+/i.test(rawText) ||
+    /^\[Template\]\s*\S+/i.test(rawText);
+  const templateName =
+    metaMsg.templateName ||
+    metaMsg.template_name ||
+    (rawText.match(/^Template:\s*(.+)$/i)?.[1]?.trim() ||
+      rawText.match(/^\[Template\]\s*(.+)$/i)?.[1]?.trim() ||
+      null);
+  return {
+    id: `meta_${metaMsg.id}`,
+    content: isMedia && !looksLikeUrl && rawText.startsWith('[') ? '' : rawText,
+    type: metaMsg.direction === 'inbound' ? 'incoming' : 'outgoing',
+    status: metaMsg.status === 'received' ? 'delivered' : metaMsg.status,
+    sentAt: metaMsg.created_at,
+    createdAt: metaMsg.created_at,
+    metaMessageId: metaMsg.id,
+    messageType: msgType,
+    mediaType: isMedia ? msgType : 'text',
+    mediaUrl: isMedia && looksLikeUrl ? rawText : null,
+    source: 'meta_message',
+    isTemplate,
+    isTemplateSend: isTemplate,
+    templateName,
+    reactions: Array.isArray(metaMsg.reactions) ? metaMsg.reactions : [],
+  };
+}
+
+function resolveMediaSrc(mediaUrl) {
+  if (!mediaUrl) return '';
+  const raw = String(mediaUrl).trim();
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const base = API_BASE.replace(/\/$/, '');
+  return raw.startsWith('/') ? `${base}${raw}` : `${base}/${raw}`;
+}
 
 const readSelectedProjectId = () => {
   try {
@@ -32,13 +347,67 @@ const readSelectedProjectId = () => {
   }
 };
 
-function Inbox() {
+function enrichWithContactNames(list, inboxFallback) {
+  const nameByPhone = new Map();
+  (inboxFallback || []).forEach((c) => {
+    const key = normalizePhoneKey(c.phone);
+    const name = String(c.name || '').trim();
+    if (key && name && normalizePhoneKey(name) !== key) {
+      nameByPhone.set(key, name);
+    }
+  });
+  return (list || []).map((row) => {
+    const key = normalizePhoneKey(row.phone);
+    const resolved = nameByPhone.get(key);
+    return resolved ? { ...row, customer_name: resolved } : row;
+  });
+}
+
+function resolveConversationDisplayName(conv, inboxList) {
+  const phone = String(conv?.phone || '').trim();
+  const phoneKey = normalizePhoneKey(phone);
+  const inboxHit = (inboxList || []).find((c) => normalizePhoneKey(c.phone) === phoneKey);
+  const fromInbox = String(inboxHit?.name || '').trim();
+  if (fromInbox && normalizePhoneKey(fromInbox) !== phoneKey) return fromInbox;
+
+  const fromConv = String(conv?.customer_name || '').trim();
+  if (fromConv && normalizePhoneKey(fromConv) !== phoneKey && !/^\d{8,}$/.test(fromConv.replace(/\D/g, ''))) {
+    return fromConv;
+  }
+  return fromInbox || fromConv || phone || 'Unknown';
+}
+
+function formatPhoneDisplay(phone) {
+  const raw = String(phone || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('+')) return raw;
+  const digits = normalizePhoneKey(raw);
+  return digits ? `+${digits}` : raw;
+}
+
+function isSamePhoneValue(a, b) {
+  const da = normalizePhoneKey(a);
+  const db = normalizePhoneKey(b);
+  return Boolean(da && db && da === db);
+}
+
+function getAgentInitials(nameOrEmail) {
+  const raw = String(nameOrEmail || '').trim();
+  if (!raw) return 'A';
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  return raw.slice(0, 2).toUpperCase();
+}
+
+function Inbox({ pageMode = 'inbox' }) {
+  const isHistoryPage = pageMode === 'history';
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notificationDropdownOpen, setNotificationDropdownOpen] = useState(false);
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // Seed from session so /inbox chrome (search + filter) paints immediately on navigate
+  const [user, setUser] = useState(() => readSessionUser());
+  const [loading, setLoading] = useState(() => !readSessionUser());
   const [notifications, setNotifications] = useState([]);
   const [loadingNotifications, setLoadingNotifications] = useState(false);
   const [inboxList, setInboxList] = useState([]);
@@ -57,6 +426,7 @@ function Inbox() {
   const interveneOptionsLoadedRef = useRef(false);
   const [interveneQuickPickerOpen, setInterveneQuickPickerOpen] = useState(false);
   const interveneQuickPickerRef = useRef(null);
+  const [intervenePreviewItem, setIntervenePreviewItem] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [typingContacts, setTypingContacts] = useState({});
   const [onlineContacts, setOnlineContacts] = useState({});
@@ -73,19 +443,67 @@ function Inbox() {
   const [agentsList, setAgentsList] = useState([]);
   const [loadingAgents, setLoadingAgents] = useState(false);
   const [assigningId, setAssigningId] = useState(null);
+  const [assignMenuConvId, setAssignMenuConvId] = useState(null);
+  const assignMenuRef = useRef(null);
   const [interventionAlert, setInterventionAlert] = useState(null);
   const [intervenedPhones, setIntervenedPhones] = useState({});
+  const [inboxTab, setInboxTab] = useState(isHistoryPage ? 'history' : 'requesting');
+  const [sectionByTab, setSectionByTab] = useState(() => ({
+    active: [],
+    requesting: [],
+    intervened: [],
+    history: [],
+  }));
+  const [loadingSectionChats, setLoadingSectionChats] = useState(false);
+  const [intervenedFilterOpen, setIntervenedFilterOpen] = useState(false);
+  // Default "any" so admins see agent-intervened chats (not only agent_id === me)
+  const [intervenedFilter, setIntervenedFilter] = useState('any');
+  const [intervenedAgentSearch, setIntervenedAgentSearch] = useState('');
+  const [listFilterOpen, setListFilterOpen] = useState(false);
+  const [filterDraft, setFilterDraft] = useState(() => emptyInboxFilterDraft());
+  const [filterApplied, setFilterApplied] = useState(null);
+  const [filterTagsList, setFilterTagsList] = useState([]);
+  const [filterContactMeta, setFilterContactMeta] = useState(() => new Map()); // phone -> { optedIn, createdAt }
+  const [filterTagPhoneSets, setFilterTagPhoneSets] = useState(() => new Map()); // tagId -> Set(phones)
+  const [filterContactsLoading, setFilterContactsLoading] = useState(false);
+  const listFilterRef = useRef(null);
+  const [insertOptionSearch, setInsertOptionSearch] = useState('');
+  const transferMenuRef = useRef(null);
+  const [transferMenuOpen, setTransferMenuOpen] = useState(false);
+  const [transferring, setTransferring] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [resolveDispositionOpen, setResolveDispositionOpen] = useState(false);
+  const [selectedDisposition, setSelectedDisposition] = useState(null);
+  const [resolvedConvIds, setResolvedConvIds] = useState(() => new Set());
+  const [templateCatalog, setTemplateCatalog] = useState(() => new Map());
   const notificationRef = useRef(null);
+  const fetchSectionChatsRef = useRef(() => {});
+  const inboxListRef = useRef([]);
+  const sectionFetchSeqRef = useRef(0);
+  const inboxTabRef = useRef(isHistoryPage ? 'history' : 'requesting');
   const messagesEndRef = useRef(null);
   const chatContainerRef = useRef(null);
+  const userScrolledUpRef = useRef(false);
+  const isNearBottomRef = useRef(true);
   const [activeProjectId, setActiveProjectId] = useState(readSelectedProjectId);
   const typingTimeoutRef = useRef(null);
   const fileInputRef = useRef(null);
   const lastOpenChatFromContactsRef = useRef(null);
   const handleContactSelectRef = useRef(null);
 
-  // Fetch user profile
   useEffect(() => {
+    inboxListRef.current = inboxList || [];
+  }, [inboxList]);
+
+  useEffect(() => {
+    inboxTabRef.current = isHistoryPage ? 'history' : inboxTab;
+  }, [inboxTab, isHistoryPage]);
+
+  const sectionConversations = sectionByTab[isHistoryPage ? 'history' : inboxTab] || [];
+
+  // Fetch user profile (UI already visible when session user exists)
+  useEffect(() => {
+    let cancelled = false;
     const fetchProfile = async () => {
       try {
         if (!isAuthenticated()) {
@@ -93,19 +511,392 @@ function Inbox() {
           return;
         }
         const userData = await getProfile();
-        setUser(userData);
+        if (!cancelled) setUser(userData);
       } catch (error) {
         console.error('Error fetching profile:', error);
         logout();
         navigate('/login');
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     fetchProfile();
+    return () => {
+      cancelled = true;
+    };
   }, [navigate]);
 
   const isAdminOrManager = user && ['admin', 'manager'].includes(String(user.role || '').toLowerCase());
+  const isAgentUser = user && String(user.role || '').toLowerCase() === 'agent';
+  const agentCanPickup = isAgentUser ? readAgentPickupAllowed(user) : false;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [localRes, metaRes] = await Promise.all([
+          getTemplates({ page: 1, limit: 500, status: 'approved' }),
+          axios.get('/templates/meta'),
+        ]);
+        const map = new Map();
+        (localRes?.templates || []).forEach((t) => {
+          if (t?.name) map.set(normalizeTemplateKey(t.name), t);
+        });
+        (metaRes?.data?.templates || []).forEach((t) => {
+          if (!t?.name) return;
+          const key = normalizeTemplateKey(t.name);
+          const existing = map.get(key);
+          if (existing) {
+            const localVars =
+              existing.variables && typeof existing.variables === 'object' && !Array.isArray(existing.variables)
+                ? existing.variables
+                : {};
+            const metaVars =
+              t.variables && typeof t.variables === 'object' && !Array.isArray(t.variables)
+                ? t.variables
+                : {};
+            const headerMediaUrl =
+              localVars.headerMediaUrl ||
+              localVars.header_media_url ||
+              existing.headerMediaUrl ||
+              metaVars.headerMediaUrl ||
+              metaVars.header_media_url ||
+              t.headerMediaUrl ||
+              null;
+            map.set(key, {
+              ...existing,
+              ...t,
+              content: existing.content || t.content,
+              variables: {
+                ...metaVars,
+                ...localVars,
+                ...(headerMediaUrl ? { headerMediaUrl, header_media_url: headerMediaUrl } : {}),
+                templateType:
+                  localVars.templateType ||
+                  metaVars.templateType ||
+                  (String(
+                    (t.components || []).find((c) => String(c?.type || '').toUpperCase() === 'HEADER')?.format || ''
+                  ).toUpperCase() === 'IMAGE'
+                    ? 'image'
+                    : undefined),
+              },
+            });
+            return;
+          }
+          map.set(key, t);
+        });
+        if (!cancelled) setTemplateCatalog(map);
+      } catch (_) {
+        if (!cancelled) setTemplateCatalog(new Map());
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const chatFetchWithProject = useCallback(async (path) => {
+    const token = localStorage.getItem('token');
+    const headers = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (activeProjectId) headers['x-project-id'] = activeProjectId;
+    const base = API_BASE.replace(/\/$/, '');
+    const res = await fetch(`${base}${path}`, { headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || data?.message || 'Request failed');
+    }
+    return data;
+  }, [activeProjectId]);
+
+  const filterConversationsByTab = useCallback((rows, tabName) => {
+    const list = Array.isArray(rows) ? rows : [];
+    if (tabName === 'intervened') {
+      return list.filter((c) => String(c?.status || '').toLowerCase() === 'intervened');
+    }
+    if (tabName === 'active') {
+      return list.filter((c) => String(c?.status || '').toLowerCase() === 'active');
+    }
+    if (tabName === 'requesting') {
+      // Requesting tab = waiting queue only (never intervened/closed/active human chats)
+      return list.filter((c) => String(c?.status || '').toLowerCase() === 'requesting');
+    }
+    return list;
+  }, []);
+
+  const fetchSectionChats = useCallback(async (showLoading = true) => {
+    if (!isAuthenticated() || !activeProjectId || !user?.id) {
+      setSectionByTab({ active: [], requesting: [], intervened: [], history: [] });
+      setLoadingSectionChats(false);
+      return;
+    }
+    const role = String(user.role || '').toLowerCase();
+    const isManager = ['admin', 'manager'].includes(role);
+    const isAgent = role === 'agent';
+    const requestedTab = isHistoryPage ? 'history' : inboxTabRef.current;
+    // Only bump seq for user-driven loads. Background polls must not cancel in-flight tab loads.
+    const seq = showLoading ? ++sectionFetchSeqRef.current : sectionFetchSeqRef.current;
+
+    try {
+      if (showLoading && requestedTab === inboxTabRef.current) {
+        setLoadingSectionChats(true);
+      }
+      let data = [];
+      if (requestedTab === 'active') {
+        data = await chatFetchWithProject('/api/chat/active');
+      } else if (requestedTab === 'history') {
+        data = await chatFetchWithProject('/api/chat/history');
+      } else if (requestedTab === 'requesting') {
+        if (isManager) {
+          data = await chatFetchWithProject('/api/manager/requesting');
+        } else if (isAgent) {
+          data = await chatFetchWithProject(`/api/agent/requesting?agentId=${encodeURIComponent(user.id)}`);
+          if (agentCanPickup) {
+            try {
+              const pool = await getUnassignedRequestingChats();
+              const unassigned = (Array.isArray(pool) ? pool : []).filter(
+                (c) => String(c?.status || '').toLowerCase() === 'requesting' && (c.agent_id == null || c.agent_id === '')
+              );
+              const byId = new Map();
+              [...(Array.isArray(data) ? data : []), ...unassigned].forEach((c) => {
+                if (c?.id != null) byId.set(c.id, c);
+              });
+              data = [...byId.values()];
+            } catch (_) {
+              /* keep assigned-only list */
+            }
+          }
+        } else {
+          data = await chatFetchWithProject('/api/chat/requesting');
+        }
+      } else if (requestedTab === 'intervened') {
+        data = await chatFetchWithProject('/api/chat/intervened');
+      } else {
+        data = [];
+      }
+
+      // Stale if user switched tabs (or a newer user-driven fetch started)
+      if (requestedTab !== inboxTabRef.current) return;
+      if (showLoading && seq !== sectionFetchSeqRef.current) return;
+
+      let list = Array.isArray(data) ? data : [];
+      const inboxFallback = inboxListRef.current || [];
+      if (requestedTab === 'requesting') {
+        list = mergeInboxIntoRequesting(list, inboxFallback);
+      } else if (requestedTab === 'active') {
+        list = mergeInboxIntoActive(list, inboxFallback);
+      } else if (requestedTab === 'history') {
+        list = mergeInboxIntoHistory(list, inboxFallback);
+      }
+      // Never merge non-intervened into intervened
+      list = filterConversationsByTab(list, requestedTab);
+      list = enrichWithContactNames(list, inboxFallback);
+
+      if (requestedTab !== inboxTabRef.current) return;
+      if (showLoading && seq !== sectionFetchSeqRef.current) return;
+
+      setSectionByTab((prev) => ({
+        ...prev,
+        [requestedTab]: list,
+      }));
+    } catch (e) {
+      if (requestedTab !== inboxTabRef.current) return;
+      if (showLoading && seq !== sectionFetchSeqRef.current) return;
+      console.error('Error fetching inbox section chats:', e);
+      setSectionByTab((prev) => ({
+        ...prev,
+        [requestedTab]: [],
+      }));
+    } finally {
+      if (
+        showLoading &&
+        seq === sectionFetchSeqRef.current &&
+        requestedTab === inboxTabRef.current
+      ) {
+        setLoadingSectionChats(false);
+      }
+    }
+  }, [activeProjectId, user?.id, user?.role, chatFetchWithProject, isHistoryPage, agentCanPickup, filterConversationsByTab]);
+
+  // Never leave Assign UI open on Active/Intervened
+  useEffect(() => {
+    if (inboxTab !== 'requesting') {
+      setAssignMenuConvId(null);
+      setAssigningId(null);
+    }
+  }, [inboxTab]);
+
+  useEffect(() => {
+    if (!assignMenuConvId) return undefined;
+    const onDoc = (e) => {
+      if (assignMenuRef.current && !assignMenuRef.current.contains(e.target)) {
+        setAssignMenuConvId(null);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [assignMenuConvId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await axios.get('/auth/agents');
+        if (!cancelled) setAgentsList(Array.isArray(res.data?.agents) ? res.data.agents : []);
+      } catch {
+        if (!cancelled) setAgentsList([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, activeProjectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const tags = await fetchTags();
+        if (!cancelled) setFilterTagsList(Array.isArray(tags) ? tags : []);
+      } catch {
+        if (!cancelled) setFilterTagsList([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const applied = filterApplied;
+      if (!applied) {
+        setFilterContactMeta(new Map());
+        setFilterTagPhoneSets(new Map());
+        setFilterContactsLoading(false);
+        return;
+      }
+      const attrs = (applied.attrs || []).filter((r) => r?.attribute && String(r.value ?? '') !== '');
+      const needsContacts =
+        Boolean(applied.createdPreset || applied.createdFrom || applied.createdTo) ||
+        attrs.some((r) => r.attribute === 'opted_in' || r.attribute === 'tags');
+      if (!needsContacts) {
+        setFilterContactMeta(new Map());
+        setFilterTagPhoneSets(new Map());
+        setFilterContactsLoading(false);
+        return;
+      }
+      setFilterContactsLoading(true);
+      try {
+        const meta = new Map();
+        const tagSets = new Map();
+
+        const putMeta = (phone, data) => {
+          phoneLookupKeys(phone).forEach((key) => {
+            meta.set(key, data);
+          });
+        };
+        const putTagPhone = (tagId, phone) => {
+          if (!tagSets.has(tagId)) tagSets.set(tagId, new Set());
+          const set = tagSets.get(tagId);
+          phoneLookupKeys(phone).forEach((key) => set.add(key));
+        };
+
+        const res = await axios.get('/contacts', { params: { page: 1, limit: 10000 } });
+        (res.data?.contacts || []).forEach((c) => {
+          if (!c?.phone) return;
+          putMeta(c.phone, {
+            optedIn: Boolean(c.whatsappOptInAt) && String(c.status || '').toLowerCase() !== 'unsubscribed',
+            createdAt: c.createdAt || c.created_at || null,
+          });
+        });
+        const tagIds = [
+          ...new Set(
+            attrs
+              .filter((r) => r.attribute === 'tags' && r.value)
+              .map((r) => String(r.value))
+          ),
+        ];
+        await Promise.all(
+          tagIds.map(async (tagId) => {
+            try {
+              const tagRes = await axios.get('/contacts', {
+                params: { page: 1, limit: 10000, tagId },
+              });
+              tagSets.set(tagId, new Set());
+              (tagRes.data?.contacts || []).forEach((c) => {
+                if (c?.phone) putTagPhone(tagId, c.phone);
+              });
+            } catch {
+              tagSets.set(tagId, new Set());
+            }
+          })
+        );
+        if (!cancelled) {
+          setFilterContactMeta(meta);
+          setFilterTagPhoneSets(tagSets);
+        }
+      } catch (err) {
+        console.warn('[Inbox] filter contacts load failed', err?.message || err);
+        if (!cancelled) {
+          setFilterContactMeta(new Map());
+          setFilterTagPhoneSets(new Map());
+        }
+      } finally {
+        if (!cancelled) setFilterContactsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [filterApplied, activeProjectId]);
+
+  // Ensure intervened chats are loaded when filters need them (even if user is on another tab)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!filterApplied || !activeProjectId || !isAuthenticated()) return;
+      const attrs = (filterApplied.attrs || []).filter(
+        (r) => r?.attribute && String(r.value ?? '') !== ''
+      );
+      const needsIntervenedList = attrs.some(
+        (r) => r.attribute === 'intervened' || r.attribute === 'intervened_by_agent'
+      );
+      if (!needsIntervenedList) return;
+      try {
+        const data = await chatFetchWithProject('/api/chat/intervened');
+        if (cancelled) return;
+        let list = Array.isArray(data) ? data : [];
+        list = filterConversationsByTab(list, 'intervened');
+        setSectionByTab((prev) => ({
+          ...prev,
+          intervened: list,
+        }));
+      } catch (e) {
+        console.warn('[Inbox] filter intervened prefetch failed', e?.message || e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [filterApplied, activeProjectId, chatFetchWithProject, filterConversationsByTab]);
+
+  useEffect(() => {
+    if (!listFilterOpen) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setListFilterOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [listFilterOpen]);
+
+  useEffect(() => {
+    fetchSectionChatsRef.current = fetchSectionChats;
+  }, [fetchSectionChats]);
 
   const fetchRequesting = useCallback(async () => {
     if (!isAdminOrManager) return;
@@ -125,20 +916,20 @@ function Inbox() {
     setLoadingAgents(true);
     try {
       const res = await axios.get('/auth/agents');
-      setAgentsList(res.data?.agents || []);
+      setAgentsList(Array.isArray(res.data?.agents) ? res.data.agents : []);
     } catch (e) {
       setAgentsList([]);
     } finally {
       setLoadingAgents(false);
     }
-  }, [isAdminOrManager]);
+  }, [isAdminOrManager, activeProjectId]);
 
   useEffect(() => {
     if (isAdminOrManager) {
       fetchRequesting();
       fetchAgentsForAssign();
     }
-  }, [isAdminOrManager, fetchRequesting, fetchAgentsForAssign]);
+  }, [isAdminOrManager, fetchRequesting, fetchAgentsForAssign, activeProjectId]);
 
   const handleAssignToAgent = async (conversationId, agentId) => {
     if (!conversationId || !agentId) return;
@@ -147,6 +938,7 @@ function Inbox() {
       const result = await assignChatToAgent(conversationId, agentId);
       if (result?.success !== false && !result?.error) {
         await fetchRequesting();
+        await fetchSectionChats(false);
       } else {
         alert(result?.message || result?.error || 'Assign failed');
       }
@@ -352,6 +1144,7 @@ function Inbox() {
                     updatedMessage.content = m.content || message.content;
                     updatedMessage.isTemplate = true;
                     if (m.templateName) updatedMessage.templateName = m.templateName;
+                    updatedMessage.templatePreview = m.templatePreview || message.templatePreview || null;
                   }
                   return updatedMessage;
                 }
@@ -376,6 +1169,7 @@ function Inbox() {
                         updatedMessage.content = m.content || message.content;
                         updatedMessage.isTemplate = true;
                         if (m.templateName) updatedMessage.templateName = m.templateName;
+                        updatedMessage.templatePreview = m.templatePreview || message.templatePreview || null;
                       }
                       return updatedMessage;
                     }
@@ -384,7 +1178,16 @@ function Inbox() {
                 
                 // Also update by waMessageId for template messages
                 if (m.isTemplate && message.waMessageId && m.waMessageId === message.waMessageId) {
-                  return { ...m, ...message, content: m.content, isOptimistic: false, source: 'socket' };
+                  return {
+                    ...m,
+                    ...message,
+                    content: m.content || message.content,
+                    isTemplate: true,
+                    templateName: m.templateName || message.templateName,
+                    templatePreview: m.templatePreview || message.templatePreview,
+                    isOptimistic: false,
+                    source: 'socket',
+                  };
                 }
                 
                 return m;
@@ -450,6 +1253,7 @@ function Inbox() {
         
         // Always refresh inbox list when new message arrives
         fetchInboxList(false);
+        fetchSectionChatsRef.current?.(false);
       };
 
       const handleStatusUpdate = (data) => {
@@ -477,6 +1281,7 @@ function Inbox() {
 
       const handleInboxUpdate = () => {
         fetchInboxList(false);
+        fetchSectionChatsRef.current?.(false);
       };
 
       onSocketEvent('new-message', handleNewMessage);
@@ -640,6 +1445,7 @@ function Inbox() {
         }
         return prev; // Return same reference if no change
       });
+      fetchSectionChatsRef.current?.(false);
     } catch (error) {
       console.error('Error fetching inbox list:', error);
       // Only set empty array on error if we don't have data
@@ -742,6 +1548,15 @@ function Inbox() {
     };
   }, [loading, activeProjectId]);
 
+  useEffect(() => {
+    if (loading || !activeProjectId) return undefined;
+    fetchSectionChats(true);
+    // Slower poll reduces race/hang when switching tabs quickly
+    const pollMs = isHistoryPage ? 45000 : 20000;
+    const sectionInterval = setInterval(() => fetchSectionChats(false), pollMs);
+    return () => clearInterval(sectionInterval);
+  }, [inboxTab, loading, activeProjectId, fetchSectionChats, isHistoryPage]);
+
   // Fetch messages for selected contact - integrates data from Message, MetaMessage, and WebhookLogs
   const fetchMessages = async (phone, showLoading = true) => {
     if (!phone) {
@@ -773,147 +1588,195 @@ function Inbox() {
       }
       let allMessages = [];
       let contactData = null;
-      
-      // 1. Get messages from Message table (existing inbox messages)
-      // Handle case where contact might not exist yet
-      try {
-        const data = await getContactMessages(phone);
-        allMessages = data.messages || [];
-        contactData = data.contact;
-        if (data.contact) {
-          setSelectedContact(data.contact);
+
+      const sectionHit = (sectionConversations || []).find(
+        (c) => normalizePhoneKey(c.phone) === normalizePhoneKey(phone)
+      );
+      let conversationId =
+        selectedContact?.conversationId != null && Number(selectedContact.conversationId) > 0
+          ? Number(selectedContact.conversationId)
+          : sectionHit?.conversationId != null && Number(sectionHit.conversationId) > 0
+            ? Number(sectionHit.conversationId)
+            : sectionHit?.id != null && Number(sectionHit.id) > 0
+              ? Number(sectionHit.id)
+              : null;
+
+      const applyContactFromApi = (contact, convIdOverride = null) => {
+        if (!contact) return;
+        contactData = contact;
+        setSelectedContact((prev) => ({
+          ...(prev || {}),
+          ...contact,
+          id: contact.id ?? prev?.id,
+          contactId: contact.id ?? prev?.contactId,
+          phone: contact.phone || prev?.phone,
+          inboxTab: prev?.inboxTab ?? inboxTab,
+          agentName: prev?.agentName,
+          conversationId:
+            convIdOverride != null && Number(convIdOverride) > 0
+              ? Number(convIdOverride)
+              : prev?.conversationId != null && Number(prev.conversationId) > 0
+                ? Number(prev.conversationId)
+                : conversationId,
+        }));
+      };
+
+      let chatMessages = [];
+      let systemMessages = [];
+
+      if (conversationId) {
+        try {
+          const chatRows = await chatFetchWithProject(`/api/chat/messages/${conversationId}`);
+          const rows = Array.isArray(chatRows) ? chatRows : [];
+          chatMessages = rows.filter((m) => {
+            const sender = String(m.sender || '').toLowerCase();
+            const type = String(m.type || '').toLowerCase();
+            return sender !== 'system' && type !== 'system' && m.source !== 'system';
+          });
+          systemMessages = rows
+            .filter((m) => {
+              const sender = String(m.sender || '').toLowerCase();
+              const type = String(m.type || '').toLowerCase();
+              return sender === 'system' || type === 'system' || m.source === 'system';
+            })
+            .map((m) => ({
+              id: `chat_system_${m.id || Date.now()}`,
+              content: m.message || m.content,
+              type: 'system',
+              source: 'system',
+              sender: 'system',
+              sentAt: m.created_at || m.sentAt || m.createdAt,
+              createdAt: m.created_at || m.createdAt || m.sentAt,
+              phone,
+            }));
+        } catch (chatErr) {
+          if (/not found/i.test(String(chatErr?.message || ''))) {
+            conversationId = null;
+            setSelectedContact((prev) =>
+              prev && normalizePhoneKey(prev.phone) === normalizePhoneKey(phone)
+                ? { ...prev, conversationId: null }
+                : prev
+            );
+          }
+          console.log('Chat messages not loaded:', chatErr.message);
         }
+      }
+
+      let inboxMessages = [];
+      try {
+        const inboxData = await getContactMessages(phone);
+        inboxMessages = inboxData.messages || [];
+        applyContactFromApi(inboxData.contact, conversationId);
       } catch (error) {
-        // Contact might not exist yet - that's okay, we'll still fetch meta messages
-        console.log('Contact not found in Message table, will fetch from meta_messages:', error.message);
-        // Set a basic contact object from phone number only if we don't have a selected contact
+        console.log('Inbox messages not loaded from contact API:', error.message);
         if (!selectedContact || selectedContact.phone !== phone) {
           setSelectedContact({
             phone: phone,
             name: phone,
-            id: null
+            id: null,
           });
         }
       }
-      
-      // 2. Get all meta messages (inbound + outbound) for this phone
-      // Fetch all messages (no limit or very high limit)
-      try {
-        console.log('Fetching meta messages for phone:', phone);
-        const metaMessages = await getAllMetaMessages(phone, 10000); // Increased limit to fetch all
-        console.log('Meta messages received:', metaMessages?.length || 0, metaMessages);
-        
-        if (metaMessages && metaMessages.length > 0) {
-          // Convert meta messages to inbox message format
-          const convertedMetaMessages = metaMessages.map(metaMsg => ({
-            id: `meta_${metaMsg.id}`,
-            content: metaMsg.text || metaMsg.message_text || '',
-            type: metaMsg.direction === 'inbound' ? 'incoming' : 'outgoing',
-            status: metaMsg.status === 'received' ? 'delivered' : metaMsg.status,
-            sentAt: metaMsg.created_at,
-            createdAt: metaMsg.created_at,
-            metaMessageId: metaMsg.id,
-            messageType: metaMsg.message_type,
-            source: 'meta_message',
-            reactions: Array.isArray(metaMsg.reactions) ? metaMsg.reactions : []
-          }));
-          
-          // Merge meta messages with existing messages
-          allMessages = [...allMessages, ...convertedMetaMessages];
+
+      allMessages = dedupeChatMessages([...chatMessages, ...inboxMessages, ...systemMessages]);
+
+      if (!allMessages.length) {
+        try {
+          const metaMessages = await getAllMetaMessages(phone, 10000);
+          if (metaMessages && metaMessages.length > 0) {
+            const convertedMetaMessages = metaMessages.map(mapMetaMessageToInbox);
+            allMessages = [...allMessages, ...convertedMetaMessages];
+          }
+        } catch (error) {
+          console.error('Error fetching meta messages:', error);
         }
-      } catch (error) {
-        console.error('Error fetching meta messages:', error);
+
+        if (!allMessages.length) {
+          try {
+            const token = localStorage.getItem('token');
+            const selectedProjectRaw = localStorage.getItem('selectedProject');
+            const selectedProject = selectedProjectRaw ? JSON.parse(selectedProjectRaw) : null;
+            const projectId = selectedProject?.id;
+            const headers = { Authorization: `Bearer ${token}` };
+            if (projectId != null && String(projectId).trim() !== '') {
+              headers['x-project-id'] = String(projectId);
+            }
+            const fallbackUrl = `${API_BASE}messages/inbound?limit=500&phone=${encodeURIComponent(phone)}`;
+            const fallbackRes = await fetch(fallbackUrl, { method: 'GET', headers });
+            const fallbackText = await fallbackRes.text();
+            if (fallbackRes.ok && !fallbackText.trim().startsWith('<')) {
+              const fallbackData = JSON.parse(fallbackText);
+              const fallbackRows = fallbackData?.messages || fallbackData?.data || [];
+              if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
+                allMessages = fallbackRows.map((m) => ({
+                  id: `inbound_${m.id}`,
+                  content: m.text || '',
+                  type: 'incoming',
+                  status: m.status === 'received' ? 'delivered' : (m.status || 'delivered'),
+                  sentAt: m.received_at,
+                  createdAt: m.received_at,
+                  source: 'inbound_fallback',
+                  phone,
+                }));
+              }
+            }
+          } catch (fallbackError) {
+            console.error('Error fetching inbound fallback messages:', fallbackError);
+          }
+        }
+
+        try {
+          const webhookLogs = await getWebhookLogs(1000, 'message_received', phone);
+          if (webhookLogs && webhookLogs.length > 0) {
+            const convertedWebhookMessages = webhookLogs
+              .filter((log) => {
+                try {
+                  const payload = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
+                  return payload.event === 'message_received' && payload.from === phone;
+                } catch (e) {
+                  return false;
+                }
+              })
+              .map((log) => {
+                try {
+                  const payload = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
+                  return {
+                    id: `webhook_${log.id}`,
+                    content: payload?.message?.text || '',
+                    type: 'incoming',
+                    status: 'delivered',
+                    sentAt: log.received_at || log.created_at,
+                    createdAt: log.received_at || log.created_at,
+                    webhookLogId: log.id,
+                    eventType: log.event_type,
+                    source: 'webhook_log',
+                    rawPayload: payload,
+                  };
+                } catch (e) {
+                  return null;
+                }
+              })
+              .filter((msg) => msg !== null);
+            allMessages = [...allMessages, ...convertedWebhookMessages];
+          }
+        } catch (error) {
+          console.error('Error fetching webhook logs:', error);
+        }
       }
 
-      // Fallback: if merged sources are still empty, use inbound API for this phone
-      // so right panel still shows conversation for phone-only entries.
-      if (!allMessages || allMessages.length === 0) {
-        try {
-          const token = localStorage.getItem('token');
-          const selectedProjectRaw = localStorage.getItem('selectedProject');
-          const selectedProject = selectedProjectRaw ? JSON.parse(selectedProjectRaw) : null;
-          const projectId = selectedProject?.id;
-          const headers = { Authorization: `Bearer ${token}` };
-          if (projectId != null && String(projectId).trim() !== '') {
-            headers['x-project-id'] = String(projectId);
-          }
-          const fallbackUrl = `${API_BASE}messages/inbound?limit=500&phone=${encodeURIComponent(phone)}`;
-          const fallbackRes = await fetch(fallbackUrl, { method: 'GET', headers });
-          const fallbackText = await fallbackRes.text();
-          if (fallbackRes.ok && !fallbackText.trim().startsWith('<')) {
-            const fallbackData = JSON.parse(fallbackText);
-            const fallbackRows = fallbackData?.messages || fallbackData?.data || [];
-            if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
-              allMessages = fallbackRows.map((m) => ({
-                id: `inbound_${m.id}`,
-                content: m.text || '',
-                type: 'incoming',
-                status: m.status === 'received' ? 'delivered' : (m.status || 'delivered'),
-                sentAt: m.received_at,
-                createdAt: m.received_at,
-                source: 'inbound_fallback',
-                phone
-              }));
-            }
-          }
-        } catch (fallbackError) {
-          console.error('Error fetching inbound fallback messages:', fallbackError);
-        }
-      }
-      
-      // 3. Get webhook logs for this phone (for debugging/display)
-      // Fetch all webhook logs (increased limit)
-      try {
-        console.log('Fetching webhook logs for phone:', phone);
-        const webhookLogs = await getWebhookLogs(1000, 'message_received', phone); // Increased limit to fetch all
-        console.log('Webhook logs received:', webhookLogs?.length || 0, webhookLogs);
-        
-        if (webhookLogs && webhookLogs.length > 0) {
-          // Convert webhook logs to message format (only for message_received events)
-          const convertedWebhookMessages = webhookLogs
-            .filter(log => {
-              try {
-                const payload = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
-                return payload.event === 'message_received' && payload.from === phone;
-              } catch (e) {
-                return false;
-              }
-            })
-            .map(log => {
-              try {
-                const payload = typeof log.payload === 'string' ? JSON.parse(log.payload) : log.payload;
-                return {
-                  id: `webhook_${log.id}`,
-                  content: payload?.message?.text || '',
-                  type: 'incoming',
-                  status: 'delivered',
-                  sentAt: log.received_at || log.created_at,
-                  createdAt: log.received_at || log.created_at,
-                  webhookLogId: log.id,
-                  eventType: log.event_type,
-                  source: 'webhook_log',
-                  rawPayload: payload
-                };
-              } catch (e) {
-                return null;
-              }
-            })
-            .filter(msg => msg !== null);
-          
-          // Merge webhook messages with existing messages
-          allMessages = [...allMessages, ...convertedWebhookMessages];
-        }
-      } catch (error) {
-        console.error('Error fetching webhook logs:', error);
-      }
-      
       // 4. Merge with existing optimistic messages (preserve messages that haven't been confirmed by server yet)
       setMessages(prev => {
         // Get optimistic messages (messages that are not yet confirmed by server)
         // Only keep optimistic messages for the current contact
         const optimisticMessages = prev.filter(m => 
-          (m.isOptimistic || m.source === 'optimistic') && 
-          (m.phone === phone || !m.phone) // Keep optimistic messages for current contact or messages without phone
+          (m.isOptimistic || m.source === 'optimistic' || m.source === 'api' || m.source === 'inbox_message') && 
+          (m.phone === phone || !m.phone) &&
+          (
+            m.isOptimistic ||
+            m.source === 'optimistic' ||
+            m.source === 'api' ||
+            (m.isTemplate && (m.templatePreview || m.templateName))
+          )
         );
         
         // Create a copy of allMessages to avoid mutating the outer variable
@@ -938,8 +1801,18 @@ function Inbox() {
             ...msg,
             content: messageContent,
             isTemplate: !!(msg.isTemplate || msg.isTemplateSend),
+            templateName: msg.templateName || null,
+            templatePreview: msg.templatePreview || null,
             sentAt: msg.sentAt || resolvedTimestamp,
-            createdAt: msg.createdAt || resolvedTimestamp
+            createdAt: msg.createdAt || resolvedTimestamp,
+            mediaType:
+              msg.mediaType ||
+              (MEDIA_TYPES.has(String(msg.messageType || '').toLowerCase())
+                ? String(msg.messageType).toLowerCase()
+                : msg.type && MEDIA_TYPES.has(String(msg.type).toLowerCase()) && msg.type !== 'incoming' && msg.type !== 'outgoing'
+                  ? String(msg.type).toLowerCase()
+                  : undefined),
+            mediaUrl: msg.mediaUrl || null,
           };
         });
         
@@ -948,12 +1821,17 @@ function Inbox() {
         
         // Helper function to determine message priority (lower = higher priority)
         const getMessagePriority = (msg) => {
-          if (msg.waMessageId) return 1; // WhatsApp message ID is most reliable
-          if (!msg.source || msg.source === 'message' || msg.source === 'socket') return 2; // Message table
-          if (msg.source === 'inbox_message') return 3; // InboxMessage table
-          if (msg.source === 'meta_message') return 4; // Meta messages
-          if (msg.source === 'webhook_log') return 5; // Webhook logs
-          return 6; // Other sources
+          if (msg.waMessageId) return 1;
+          // Inbox rows with template snapshot beat plain duplicates from messages table
+          if (msg.source === 'inbox_message' && (msg.isTemplateSend || msg.templatePreview || msg.isTemplate)) {
+            return 2;
+          }
+          if (!msg.source || msg.source === 'message' || msg.source === 'socket') return 3;
+          if (msg.source === 'inbox_message') return 4;
+          if (msg.source === 'meta_message') return 5;
+          if (msg.source === 'webhook_log') return 6;
+          if (msg.source === 'live_chat') return 9;
+          return 7;
         };
         
         // Normalize content for comparison
@@ -1017,21 +1895,9 @@ function Inbox() {
               (newPriority === existingPriority && newLen > existingLen);
 
             if (preferNew) {
-              console.log('🔄 Replacing duplicate (higher priority):', {
-                oldId: existingMsg.id,
-                newId: msg.id,
-                oldSource: existingMsg.source,
-                newSource: msg.source,
-                content: msgContent.substring(0, 30)
-              });
-              messageMap.set(dedupKey, msg);
+              messageMap.set(dedupKey, mergeChatMessages(msg, existingMsg));
             } else {
-              console.log('🔄 Duplicate filtered out (lower priority):', {
-                id: msg.id,
-                type: msgType,
-                content: msgContent.substring(0, 30),
-                source: msg.source
-              });
+              messageMap.set(dedupKey, mergeChatMessages(existingMsg, msg));
             }
             continue;
           }
@@ -1048,7 +1914,10 @@ function Inbox() {
             const existingPhone = normalizePhone(existingMsg.phone || selectedContact?.phone || '');
             
             // Check if same type, same content, same contact, and within 30 seconds
-            if (existingMsg.type === msgType && 
+            // Never dedupe on empty/very short content — prevents template metadata leaking.
+            if (
+              msgContent.length >= 2 &&
+              existingMsg.type === msgType &&
                 existingContent === msgContent &&
                 (existingContactId === msgContactId || existingPhone === msgPhone || 
                  (existingPhone && msgPhone && existingPhone === msgPhone)) &&
@@ -1058,19 +1927,10 @@ function Inbox() {
               const newPriority = getMessagePriority(msg);
               
               if (newPriority < existingPriority) {
-                // Replace with higher priority message
                 messageMap.delete(key);
-                messageMap.set(dedupKey, msg);
-                console.log('🔄 Replacing duplicate by content (higher priority):', {
-                  oldId: existingMsg.id,
-                  newId: msg.id,
-                  content: msgContent.substring(0, 30)
-                });
+                messageMap.set(dedupKey, mergeChatMessages(msg, existingMsg));
               } else {
-                console.log('🔄 Duplicate by content filtered out:', {
-                  id: msg.id,
-                  content: msgContent.substring(0, 30)
-                });
+                messageMap.set(key, mergeChatMessages(existingMsg, msg));
               }
               break;
             }
@@ -1088,12 +1948,16 @@ function Inbox() {
         // message/message+inbox_message+webhook triplicates in UI.
         const sourcePriority = (msg) => {
           if (msg.waMessageId) return 1;
-          if (!msg.source || msg.source === 'message' || msg.source === 'socket') return 2;
-          if (msg.source === 'inbox_message') return 3;
-          if (msg.source === 'meta_message') return 4;
-          if (msg.source === 'webhook_log') return 5;
-          if (msg.source === 'optimistic' || msg.isOptimistic) return 6;
-          return 7;
+          if (msg.source === 'inbox_message' && (msg.isTemplateSend || msg.templatePreview || msg.isTemplate)) {
+            return 2;
+          }
+          if (!msg.source || msg.source === 'message' || msg.source === 'socket') return 3;
+          if (msg.source === 'inbox_message') return 4;
+          if (msg.source === 'meta_message') return 5;
+          if (msg.source === 'webhook_log') return 6;
+          if (msg.source === 'optimistic' || msg.isOptimistic) return 7;
+          if (msg.source === 'live_chat') return 9;
+          return 8;
         };
 
         const finalMessages = [];
@@ -1105,6 +1969,8 @@ function Inbox() {
           const msgPhone = normalizePhone(msg.phone || selectedContact?.phone || '');
 
           const duplicateIdx = finalMessages.findIndex((existing) => {
+            if (messagesMatchForDedupe(existing, msg)) return true;
+
             // Exact WA ID match is always duplicate.
             if (existing.waMessageId && msg.waMessageId && existing.waMessageId === msg.waMessageId) {
               return true;
@@ -1117,6 +1983,7 @@ function Inbox() {
             const exPhone = normalizePhone(existing.phone || selectedContact?.phone || '');
 
             if (exType !== msgType) return false;
+            if (!msgContent || msgContent.length < 2) return false;
             if (exContent !== msgContent) return false;
 
             const sameContact =
@@ -1132,9 +1999,14 @@ function Inbox() {
             finalMessages.push(msg);
           } else {
             const existing = finalMessages[duplicateIdx];
-            if (sourcePriority(msg) < sourcePriority(existing)) {
-              finalMessages[duplicateIdx] = msg;
-            }
+            const preferMsg =
+              messageHasTemplateCard(msg) && !messageHasTemplateCard(existing)
+                ? msg
+                : sourcePriority(msg) < sourcePriority(existing)
+                  ? msg
+                  : existing;
+            const other = preferMsg === msg ? existing : msg;
+            finalMessages[duplicateIdx] = mergeChatMessages(preferMsg, other);
           }
         }
 
@@ -1183,16 +2055,29 @@ function Inbox() {
     }
   };
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll only when user is already near the bottom (manual scroll up stays put)
   useEffect(() => {
+    if (userScrolledUpRef.current && !isNearBottomRef.current) return;
     if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      messagesEndRef.current.scrollIntoView({ behavior: 'auto' });
     }
   }, [messages]);
+
+  const handleChatScroll = () => {
+    const el = chatContainerRef.current;
+    if (!el) return;
+    const threshold = 100;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distanceFromBottom < threshold;
+    isNearBottomRef.current = nearBottom;
+    userScrolledUpRef.current = !nearBottom;
+  };
 
   // Refresh messages when contact is selected and join/leave socket rooms
   useEffect(() => {
     if (selectedContact?.phone) {
+      userScrolledUpRef.current = false;
+      isNearBottomRef.current = true;
       console.log('Contact selected, fetching messages for:', selectedContact.phone);
       
       // Reset loading state when switching contacts
@@ -1424,10 +2309,22 @@ function Inbox() {
           c?.phone === selectedPhone ? { ...c, unreadCount: 0 } : c
         )
       );
+      setSectionByTab((prev) => {
+        const tabKey = isHistoryPage ? 'history' : inboxTab;
+        const nextList = (prev[tabKey] || []).map((c) =>
+          c?.phone === selectedPhone ? { ...c, unread_count: 0 } : c
+        );
+        return { ...prev, [tabKey]: nextList };
+      });
     }
     setSelectedContact({
       ...contact,
-      id: contact?.id ?? contact?.contactId ?? null
+      id: contact?.contactId ?? contact?.id ?? null,
+      contactId: contact?.contactId ?? contact?.id ?? null,
+      conversationId:
+        contact?.conversationId != null && Number(contact.conversationId) > 0
+          ? Number(contact.conversationId)
+          : null,
     });
     setMessages([]);
     setCurrentPage(1);
@@ -1438,6 +2335,233 @@ function Inbox() {
   };
 
   handleContactSelectRef.current = handleContactSelect;
+
+  const conversationToContact = (conv) => {
+    const phoneKey = normalizePhoneKey(conv.phone);
+    const inboxHit = (inboxList || []).find((c) => normalizePhoneKey(c.phone) === phoneKey);
+    const resolvedContactId = conv.contactId ?? inboxHit?.contactId ?? inboxHit?.id ?? null;
+    const resolvedConversationId =
+      conv.conversationId != null && Number(conv.conversationId) > 0
+        ? Number(conv.conversationId)
+        : conv.id != null && Number(conv.id) > 0
+          ? Number(conv.id)
+          : inboxHit?.conversationId != null && Number(inboxHit.conversationId) > 0
+            ? Number(inboxHit.conversationId)
+            : null;
+    return {
+      id: resolvedContactId,
+      contactId: resolvedContactId,
+      conversationId: resolvedConversationId,
+      phone: conv.phone,
+      name: resolveConversationDisplayName(conv, inboxList),
+      status: conv.status || 'active',
+      chatStatus: conv.status || null,
+      agentName: conv.agent_name || null,
+      agentId: conv.agent_id ?? null,
+      inboxTab,
+      lastMessage: conv.last_message || '',
+      lastMessageTime: conv.last_message_time || null,
+      unreadCount: Number(conv.unread_count) || 0,
+      whatsappOptInAt: null,
+    };
+  };
+
+  const handleSectionChatSelect = (conv) => {
+    handleContactSelect(conversationToContact(conv));
+  };
+
+  const handleAcceptSectionChat = async (e, conv) => {
+    e.stopPropagation();
+    if (!conv?.id) return;
+    if (isAgentUser && !agentCanPickup) {
+      const assignedToMe = Number(conv.agent_id) === Number(user?.id);
+      if (!assignedToMe) {
+        alert('You do not have permission to pick up unassigned chats.');
+        return;
+      }
+    }
+    try {
+      await acceptChat(conv.id);
+      setInboxTab('active');
+      await fetchSectionChats(true);
+      handleSectionChatSelect(conv);
+    } catch (err) {
+      alert(err?.message || 'Failed to accept chat');
+    }
+  };
+
+  const appendSystemMessageLocal = (systemMessage) => {
+    if (!systemMessage) return;
+    const text = systemMessage.content || systemMessage.message || '';
+    if (!String(text).trim()) return;
+    const row = {
+      id: systemMessage.id ? `chat_system_${systemMessage.id}` : `chat_system_${Date.now()}`,
+      content: text,
+      message: text,
+      type: 'system',
+      source: 'system',
+      sender: 'system',
+      sentAt: systemMessage.sentAt || systemMessage.createdAt || new Date().toISOString(),
+      createdAt: systemMessage.createdAt || systemMessage.sentAt || new Date().toISOString(),
+    };
+    setMessages((prev) => dedupeChatMessages([...(prev || []), row]));
+  };
+
+  const handleTransferToAgent = async (agent) => {
+    const convId =
+      selectedContact?.conversationId != null && Number(selectedContact.conversationId) > 0
+        ? Number(selectedContact.conversationId)
+        : selectedContact?.id != null && Number(selectedContact.id) > 0
+          ? Number(selectedContact.id)
+          : null;
+    const phone = selectedContact?.phone;
+    if (!convId || !agent?.id || !phone || transferring) return;
+
+    const fromName = String(
+      selectedContact?.agentName ||
+        (Number(selectedContact?.agentId) === Number(user?.id)
+          ? user?.name || user?.email
+          : selectedContact?.agentId
+            ? `Agent ${selectedContact.agentId}`
+            : 'AGENT')
+    )
+      .trim()
+      .toUpperCase();
+    const toName = String(agent?.name || agent?.email || `Agent ${agent.id}`)
+      .trim()
+      .toUpperCase();
+    const byName = String(user?.name || user?.email || 'you').trim().toUpperCase();
+
+    setTransferring(true);
+    setTransferMenuOpen(false);
+    try {
+      const result = await assignAgentTakeover(convId, agent.id);
+      if (result && result.success === false) {
+        alert(result?.message || result?.error || 'Failed to transfer chat');
+        return;
+      }
+
+      const banner =
+        result?.systemMessage ||
+        {
+          content:
+            fromName && fromName !== toName
+              ? `Chat transferred from ${fromName} to ${toName} by ${byName}`
+              : `Chat transferred to ${toName} by ${byName}`,
+        };
+      appendSystemMessageLocal(banner);
+
+      setSelectedContact((prev) =>
+        prev
+          ? {
+              ...prev,
+              conversationId: convId,
+              agentId: agent.id,
+              agentName: agent.name || agent.email,
+              chatStatus: 'intervened',
+            }
+          : prev
+      );
+
+      await fetchSectionChats(false);
+      // Soft reload messages, then ensure transfer banner is still present
+      setTimeout(async () => {
+        try {
+          await fetchMessages(phone, false);
+        } catch (_) {}
+        const needle = String(banner.content || banner.message || '').trim();
+        if (!needle) return;
+        setMessages((prev) => {
+          const has = (prev || []).some((m) => {
+            const t = String(m.content || m.message || '').trim();
+            return (
+              (m.type === 'system' || m.sender === 'system' || m.source === 'system') &&
+              t === needle
+            );
+          });
+          if (has) return prev;
+          return dedupeChatMessages([
+            ...(prev || []),
+            {
+              id: banner.id ? `chat_system_${banner.id}` : `chat_system_${Date.now()}`,
+              content: needle,
+              message: needle,
+              type: 'system',
+              source: 'system',
+              sender: 'system',
+              sentAt: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+        });
+      }, 600);
+    } catch (err) {
+      alert(err?.message || 'Failed to transfer chat');
+    } finally {
+      setTransferring(false);
+    }
+  };
+
+  const handleResolveIntervenedChat = () => {
+    const convId = selectedContact?.conversationId;
+    const phone = selectedContact?.phone;
+    if (!convId || !phone || resolving) return;
+    setSelectedDisposition(null);
+    setResolveDispositionOpen(true);
+  };
+
+  const confirmResolveIntervenedChat = async () => {
+    const convId = selectedContact?.conversationId;
+    const phone = selectedContact?.phone;
+    if (!convId || !phone || resolving || !selectedDisposition) return;
+    setResolving(true);
+    setTransferMenuOpen(false);
+    try {
+      const result = await closeChat(convId, selectedDisposition);
+      if (result?.systemMessage) {
+        appendSystemMessageLocal(result.systemMessage);
+      } else {
+        const dispositionLabel =
+          result?.dispositionLabel || getDispositionLabel(selectedDisposition);
+        appendSystemMessageLocal({
+          content: `Chat resolved by ${String(user?.name || user?.email || 'you').toUpperCase()} · Disposition: ${dispositionLabel}`,
+        });
+      }
+      // Brief pause so resolve banner is visible in-thread (AiSensy-style)
+      await new Promise((r) => setTimeout(r, 900));
+      setResolvedConvIds((prev) => new Set([...prev, convId]));
+      setSectionByTab((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(next)) {
+          next[key] = (next[key] || []).filter((c) => c.id !== convId);
+        }
+        return next;
+      });
+      setResolveDispositionOpen(false);
+      setSelectedDisposition(null);
+      setSelectedContact(null);
+      await fetchSectionChats(false);
+    } catch (err) {
+      alert(err?.message || 'Failed to resolve chat');
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  useEffect(() => {
+    setTransferMenuOpen(false);
+  }, [inboxTab, selectedContact?.conversationId]);
+
+  useEffect(() => {
+    if (!transferMenuOpen) return;
+    const onDocClick = (e) => {
+      if (transferMenuRef.current && !transferMenuRef.current.contains(e.target)) {
+        setTransferMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [transferMenuOpen]);
 
   useEffect(() => {
     if (loading) return;
@@ -1532,6 +2656,23 @@ function Inbox() {
     });
   };
 
+  const resolveTemplateHeaderMediaUrl = (template) => extractTemplateHeaderMediaUrl(template);
+
+  const buildTemplateParamsFromTemplate = (template, contact) => {
+    const bodyText = String(template?.content || '');
+    const explicitParams = Array.isArray(template?.variables)
+      ? template.variables.filter((v) => String(v || '').trim() !== '')
+      : [];
+    const matches = [...bodyText.matchAll(/\{\{\s*(\d+)\s*\}\}/g)];
+    const indices = [...new Set(matches.map((m) => Number(m[1])).filter((n) => Number.isFinite(n) && n > 0))].sort(
+      (a, b) => a - b
+    );
+    if (indices.length === 0) {
+      return explicitParams;
+    }
+    return indices.map((idx, arrPos) => String(explicitParams[arrPos] || getTemplateParamValue(idx, contact)));
+  };
+
   const getTemplateParamValue = (idx, contact) => {
     const phone = String(contact?.phone || '').trim();
     const normalizedPhone = phone.replace(/^\+/, '');
@@ -1559,10 +2700,111 @@ function Inbox() {
     return indices.map((idx, arrPos) => String(explicitParams[arrPos] || getTemplateParamValue(idx, contact)));
   };
 
-  const sendInterveneQuickItem = async (item) => {
+  const selectInterveneItemForPreview = (item) => {
+    const raw = typeof item === 'string' ? item : String(item?.insertValue || '');
+    const resolvedText = resolveTemplatePlaceholders(raw, selectedContact) || raw || String(item?.label || '');
+    if (!resolvedText && item?.mode !== 'template') return;
+
+    let templatePreview = null;
+    let resolvedHeaderMediaUrl = null;
+    if (item && typeof item === 'object' && item.mode === 'template') {
+      const templateName = String(item.templateName || '').trim();
+      const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
+      resolvedHeaderMediaUrl =
+        resolveTemplateHeaderMediaUrl(catalogHit) ||
+        resolveTemplateHeaderMediaUrl(item) ||
+        item.headerMediaUrl ||
+        null;
+      const isImageTemplate =
+        Boolean(resolvedHeaderMediaUrl) ||
+        templateHasImageHeader(catalogHit) ||
+        templateHasImageHeader(item);
+      const needsHeaderMedia =
+        templateNeedsHeaderMedia(catalogHit) ||
+        templateNeedsHeaderMedia(item) ||
+        isImageTemplate;
+      const imageVars = needsHeaderMedia
+        ? {
+            ...(resolvedHeaderMediaUrl
+              ? { headerMediaUrl: resolvedHeaderMediaUrl, header_media_url: resolvedHeaderMediaUrl }
+              : {}),
+            templateType:
+              String(catalogHit?.variables?.templateType || item?.variables?.templateType || 'image')
+                .toLowerCase() || 'image',
+          }
+        : {};
+      const previewSource = catalogHit
+        ? {
+            ...catalogHit,
+            variables: {
+              ...(catalogHit.variables &&
+              typeof catalogHit.variables === 'object' &&
+              !Array.isArray(catalogHit.variables)
+                ? catalogHit.variables
+                : {}),
+              ...imageVars,
+            },
+          }
+        : {
+            name: templateName,
+            content: resolvedText,
+            variables: {
+              ...(item.variables && typeof item.variables === 'object' && !Array.isArray(item.variables)
+                ? item.variables
+                : {}),
+              ...imageVars,
+            },
+            components: Array.isArray(item.components) ? item.components : undefined,
+          };
+      templatePreview = buildTemplatePreview(previewSource, {
+        content: resolvedText,
+        templateName,
+        isTemplate: true,
+        mediaUrl: resolvedHeaderMediaUrl,
+        headerImageUrl: resolvedHeaderMediaUrl,
+      });
+      if (templatePreview && needsHeaderMedia) {
+        const fmt =
+          String(templatePreview.headerFormat || '').toUpperCase() ||
+          (imageVars.templateType === 'video'
+            ? 'VIDEO'
+            : imageVars.templateType === 'document'
+              ? 'DOCUMENT'
+              : 'IMAGE');
+        templatePreview = {
+          ...templatePreview,
+          headerFormat: fmt,
+          headerImageUrl: templatePreview.headerImageUrl || resolvedHeaderMediaUrl || null,
+          header:
+            templatePreview.header ||
+            (resolvedHeaderMediaUrl
+              ? { type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase(), url: resolvedHeaderMediaUrl }
+              : { type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase() }),
+        };
+      }
+    }
+
+    setIntervenePreviewItem({
+      ...(typeof item === 'object' && item ? item : { insertValue: raw }),
+      resolvedText: resolvedText || String(item?.templateName || 'Template'),
+      headerMediaUrl: resolvedHeaderMediaUrl || item?.headerMediaUrl || null,
+      templatePreview,
+    });
+  };
+
+  const cancelIntervenePreview = () => {
+    setIntervenePreviewItem(null);
+  };
+
+  const closeIntervenePicker = () => {
     setInterveneQuickPickerOpen(false);
-    setSelectedInterveneCannedId("");
-    setSelectedInterveneTemplateId("");
+    setIntervenePreviewItem(null);
+    setInsertOptionSearch('');
+  };
+
+  const confirmInterveneSend = async () => {
+    const item = intervenePreviewItem;
+    if (!item) return;
     try {
       // Template option: send as real approved template (not plain text insert).
       if (item && typeof item === 'object' && item.mode === 'template') {
@@ -1573,16 +2815,82 @@ function Inbox() {
           throw new Error('Template name is missing');
         }
         const nowIso = new Date().toISOString();
+        const resolvedBody = String(item.resolvedText || resolveTemplatePlaceholders(String(item?.insertValue || ''), selectedContact));
+        const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
+        const headerMediaUrl =
+          item.headerMediaUrl ||
+          resolveTemplateHeaderMediaUrl(item) ||
+          resolveTemplateHeaderMediaUrl(catalogHit) ||
+          null;
+        const needsHeaderMedia =
+          templateNeedsHeaderMedia(catalogHit) ||
+          templateNeedsHeaderMedia(item) ||
+          templateHasImageHeader(catalogHit) ||
+          templateHasImageHeader(item) ||
+          String(item.templatePreview?.headerFormat || '').toUpperCase() === 'IMAGE';
+        if (needsHeaderMedia && !headerMediaUrl) {
+          throw new Error('Upload a header image before sending this template.');
+        }
+
+        setInterveneQuickPickerOpen(false);
+        setIntervenePreviewItem(null);
+        setSelectedInterveneCannedId("");
+        setSelectedInterveneTemplateId("");
+
+        const isImageTemplate = needsHeaderMedia;
+        const imageVars = isImageTemplate
+          ? {
+              ...(headerMediaUrl ? { headerMediaUrl, header_media_url: headerMediaUrl } : {}),
+              templateType: 'image',
+            }
+          : {};
+        const previewSource = catalogHit
+          ? {
+              ...catalogHit,
+              variables: {
+                ...(catalogHit.variables &&
+                typeof catalogHit.variables === 'object' &&
+                !Array.isArray(catalogHit.variables)
+                  ? catalogHit.variables
+                  : {}),
+                ...imageVars,
+              },
+            }
+          : item;
+        let templatePreview = previewSource
+          ? buildTemplatePreview(previewSource, {
+              content: resolvedBody,
+              templateName,
+              isTemplate: true,
+              mediaUrl: headerMediaUrl,
+              headerImageUrl: headerMediaUrl,
+            })
+          : null;
+        if (templatePreview && isImageTemplate) {
+          templatePreview = {
+            ...templatePreview,
+            headerFormat: templatePreview.headerFormat || 'IMAGE',
+            headerImageUrl: templatePreview.headerImageUrl || headerMediaUrl || null,
+            header:
+              templatePreview.header ||
+              (headerMediaUrl ? { type: 'image', url: headerMediaUrl } : null),
+          };
+        }
         const optimisticTemplateMessage = {
           id: `template_quick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          content: resolveTemplatePlaceholders(String(item?.insertValue || ''), selectedContact),
+          content: resolvedBody,
           type: 'outgoing',
+          messageType: 'template',
           status: 'sent',
           sentAt: nowIso,
           createdAt: nowIso,
-          source: 'optimistic',
+          source: 'inbox_message',
           isTemplate: true,
+          isTemplateSend: true,
           templateName,
+          templatePreview,
+          templateSnapshot: templatePreview,
+          mediaUrl: headerMediaUrl || null,
           phone,
           contactId: selectedContact?.id || null
         };
@@ -1598,7 +2906,8 @@ function Inbox() {
           phone,
           templateName,
           item.templateLanguage || 'en_US',
-          buildTemplateParams(item, selectedContact)
+          buildTemplateParams(item, selectedContact),
+          headerMediaUrl
         );
         fetchInboxList(false);
         setTimeout(() => {
@@ -1609,12 +2918,24 @@ function Inbox() {
         return;
       }
 
+      setInterveneQuickPickerOpen(false);
+      setIntervenePreviewItem(null);
+      setSelectedInterveneCannedId("");
+      setSelectedInterveneTemplateId("");
+
       const insertValue = typeof item === 'string' ? item : String(item?.insertValue || '');
-      const resolvedText = resolveTemplatePlaceholders(insertValue, selectedContact);
+      const resolvedText = String(item?.resolvedText || resolveTemplatePlaceholders(insertValue, selectedContact));
       await handleSendMessage(null, resolvedText);
     } catch (e) {
-      // handleSendMessage already alerts/optimistic-updates; keep UI stable
+      if (String(e?.message || '').includes('Upload a header')) {
+        alert(e.message);
+        return;
+      }
       setInterveneQuickPickerOpen(false);
+      setIntervenePreviewItem(null);
+      setMessages((prev) =>
+        prev.filter((m) => !(m.source === 'optimistic' && m.isTemplate && m.phone === selectedContact?.phone))
+      );
       if (e?.message) {
         alert(`Failed to send: ${e.message}`);
       }
@@ -1663,14 +2984,29 @@ function Inbox() {
           templateName: String(t?.name || ''),
           templateLanguage: String(t?.language || 'en_US'),
           templateParams: Array.isArray(t?.variables) ? t.variables : [],
+          headerMediaUrl: extractTemplateHeaderMediaUrl(t),
+          variables:
+            t?.variables && typeof t.variables === 'object' && !Array.isArray(t.variables)
+              ? t.variables
+              : null,
+          components: Array.isArray(t?.components)
+            ? t.components
+            : Array.isArray(t?.variables?.components)
+              ? t.variables.components
+              : undefined,
         }));
 
       const metaTemplates = Array.isArray(metaRes?.data?.templates) ? metaRes.data.templates : [];
+      const localByName = new Map(
+        localApprovedTemplates.map((t) => [normalizeTemplateKey(t?.name), t])
+      );
       const metaOptions = metaTemplates
         .filter((t) => String(t?.metaStatus || t?.status || "").toUpperCase() === "APPROVED")
         .map((t) => {
           const body = t?.components?.find((c) => String(c?.type || "").toUpperCase() === "BODY");
           const bodyText = body?.text || t?.name || "";
+          const localMatch = localByName.get(normalizeTemplateKey(t?.name));
+          const catalogHit = templateCatalog.get(normalizeTemplateKey(t?.name));
           return {
             id: `meta_${t.id}`,
             label: String(t?.name || "Meta Template"),
@@ -1679,6 +3015,21 @@ function Inbox() {
             templateName: String(t?.name || ''),
             templateLanguage: String(t?.language || t?.language_code || 'en_US'),
             templateParams: [],
+            headerMediaUrl:
+              extractTemplateHeaderMediaUrl(localMatch) ||
+              extractTemplateHeaderMediaUrl(catalogHit) ||
+              extractTemplateHeaderMediaUrl(t) ||
+              null,
+            variables:
+              (localMatch?.variables &&
+              typeof localMatch.variables === 'object' &&
+              !Array.isArray(localMatch.variables)
+                ? localMatch.variables
+                : null) ||
+              (t?.variables && typeof t.variables === 'object' && !Array.isArray(t.variables)
+                ? t.variables
+                : null),
+            components: Array.isArray(t?.components) ? t.components : undefined,
           };
         });
 
@@ -1709,7 +3060,7 @@ function Inbox() {
       const el = interveneQuickPickerRef.current;
       if (!el) return;
       if (!el.contains(e.target)) {
-        setInterveneQuickPickerOpen(false);
+        closeIntervenePicker();
       }
     };
     document.addEventListener('mousedown', onDocMouseDown);
@@ -1737,49 +3088,54 @@ function Inbox() {
       // Send template via API to user's phone
       const templateName = template.name || template.templateName;
       const templateLanguage = template.language || 'en_US';
-      
-      // Ensure templateParams is always an array
-      let templateParams = [];
-      if (template.variables) {
-        if (Array.isArray(template.variables)) {
-          templateParams = template.variables;
-        } else if (typeof template.variables === 'string') {
-          try {
-            templateParams = JSON.parse(template.variables);
-            if (!Array.isArray(templateParams)) {
-              templateParams = [];
-            }
-          } catch (e) {
-            templateParams = [];
-          }
-        } else if (typeof template.variables === 'object') {
-          // Convert object to array of values
-          templateParams = Object.values(template.variables);
-        }
-      }
-      
-      const response = await sendTemplateMessage(phone, templateName, templateLanguage, templateParams);
-      
+      const templateParams = buildTemplateParamsFromTemplate(template, selectedContact);
+      const headerMediaUrl = resolveTemplateHeaderMediaUrl(template);
+
+      const response = await sendTemplateMessage(
+        phone,
+        templateName,
+        templateLanguage,
+        templateParams,
+        headerMediaUrl
+      );
+
       // Get template content for display
       const templateContent = resolveTemplatePlaceholders(
         template.content || `Template: ${templateName}`,
         selectedContact
       );
+      const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName)) || template;
+      const templatePreview =
+        response?.templatePreview ||
+        response?.templateSnapshot ||
+        buildTemplatePreview(catalogHit, {
+          content: templateContent,
+          templateName,
+          isTemplate: true,
+          mediaUrl: headerMediaUrl,
+        });
       
-      // Add template message to chat immediately (optimistic update)
       const templateMessage = {
-        id: response.messageId || `template_${Date.now()}`,
-        content: templateContent,
+        id: response.messageId ? `inbox_${response.messageId}` : `template_${Date.now()}`,
+        content: templatePreview?.body || templateContent,
         type: 'outgoing',
+        messageType: 'template',
         status: 'sent',
         sentAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
-        source: 'api',
+        source: 'inbox_message',
         phone: phone,
         contactId: selectedContact.id,
         waMessageId: response.waMessageId || null,
         isTemplate: true,
-        templateName: templateName
+        isTemplateSend: true,
+        templateName: templateName,
+        templatePreview,
+        templateSnapshot: templatePreview,
+        header: templatePreview?.header || (templatePreview?.headerImageUrl ? { type: 'image', url: templatePreview.headerImageUrl } : null),
+        footer: templatePreview?.footer,
+        buttons: templatePreview?.buttons,
+        mediaUrl: templatePreview?.headerImageUrl || templatePreview?.header?.url || null,
       };
 
       setMessages(prev => {
@@ -2009,12 +3365,22 @@ function Inbox() {
 
   // Load more messages (pagination)
   const loadMoreMessages = async () => {
-    if (!selectedContact?.id || loadingMessages || !hasMoreMessages) return;
+    const phone = selectedContact?.phone;
+    const contactId = selectedContact?.contactId || selectedContact?.id;
+    const conversationId = selectedContact?.conversationId;
+    const hasRealContactId =
+      contactId &&
+      (!conversationId || Number(contactId) !== Number(conversationId));
+
+    if (!hasRealContactId || !phone || loadingMessages || !hasMoreMessages) {
+      if (!hasRealContactId) setHasMoreMessages(false);
+      return;
+    }
 
     try {
       setLoadingMessages(true);
       const nextPage = currentPage + 1;
-      const result = await getPaginatedMessages(selectedContact.id, nextPage, 50);
+      const result = await getPaginatedMessages(contactId, nextPage, 50, phone);
       
       if (result.messages && result.messages.length > 0) {
         setMessages(prev => [...result.messages, ...prev]);
@@ -2057,17 +3423,297 @@ function Inbox() {
     }
   };
 
-  const filteredInboxList = inboxList.filter(contact => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      contact.name?.toLowerCase().includes(query) ||
-      contact.phone?.toLowerCase().includes(query) ||
-      contact.email?.toLowerCase().includes(query)
-    );
-  });
+  const filteredSectionList = (() => {
+    let list = sectionConversations.filter((conv) => {
+      if (!searchQuery) return true;
+      const query = searchQuery.toLowerCase();
+      const phone = String(conv.phone || '').toLowerCase();
+      const name = String(conv.customer_name || '').toLowerCase();
+      const agentFromList = (agentsList || []).find((a) => Number(a?.id) === Number(conv?.agent_id));
+      const agentName = String(
+        conv.agent_name || agentFromList?.name || agentFromList?.email || ''
+      ).toLowerCase();
+      return phone.includes(query) || name.includes(query) || agentName.includes(query);
+    });
 
-  if (loading) {
+    const appliedAttrRows = (filterApplied?.attrs || []).filter(
+      (r) => r?.attribute && String(r.value ?? '') !== ''
+    );
+    const filteringIntervenedYes = appliedAttrRows.some((r) => {
+      if (r.attribute !== 'intervened') return false;
+      const wantsYes = r.value === 'yes';
+      return r.operator === 'is_not' ? !wantsYes : wantsYes;
+    });
+    const filteringByAgent = appliedAttrRows.some((r) => r.attribute === 'intervened_by_agent');
+
+    // When filtering for intervened chats / agent, include intervened list even if
+    // the current tab is Active/Requesting (otherwise matches look "missing").
+    if (!isHistoryPage && (filteringIntervenedYes || filteringByAgent)) {
+      const intervenedRows = sectionByTab.intervened || [];
+      const byId = new Map();
+      [...list, ...intervenedRows].forEach((c) => {
+        const key = c?.id != null ? `id:${c.id}` : `p:${normalizePhoneKey(c?.phone)}`;
+        if (key !== 'p:' && !byId.has(key)) byId.set(key, c);
+      });
+      list = [...byId.values()];
+    } else if (!isHistoryPage && inboxTab === 'intervened') {
+      list = list.filter((c) => String(c?.status || '').toLowerCase() === 'intervened');
+      if (user?.id) {
+        const uid = Number(user.id);
+        if (intervenedFilter === 'me') {
+          list = list.filter((c) => Number(c.agent_id) === uid);
+        } else if (intervenedFilter === 'other') {
+          list = list.filter((c) => c.agent_id != null && Number(c.agent_id) !== uid);
+        } else if (intervenedFilter.startsWith('agent:')) {
+          const aid = Number(intervenedFilter.split(':')[1]);
+          list = list.filter((c) => Number(c.agent_id) === aid);
+        }
+      }
+    } else if (!isHistoryPage && inboxTab === 'active') {
+      list = list.filter((c) => String(c?.status || '').toLowerCase() === 'active');
+    } else if (!isHistoryPage && inboxTab === 'requesting') {
+      list = list.filter((c) => String(c?.status || '').toLowerCase() === 'requesting');
+    }
+
+    // AiSensy-style filters (applied only after Apply)
+    if (filterApplied) {
+      const getContactMeta = (phone) => {
+        for (const key of phoneLookupKeys(phone)) {
+          if (filterContactMeta.has(key)) return filterContactMeta.get(key);
+        }
+        return null;
+      };
+      const phoneInTagSet = (phone, tagId) => {
+        const set = filterTagPhoneSets.get(String(tagId));
+        if (!set || set.size === 0) return false;
+        return phoneLookupKeys(phone).some((key) => set.has(key));
+      };
+
+      const lastSeenRange = resolveInboxDateRange(
+        filterApplied.lastSeenPreset,
+        filterApplied.lastSeenFrom,
+        filterApplied.lastSeenTo,
+        'lastSeen'
+      );
+      if (lastSeenRange.from || lastSeenRange.to) {
+        list = list.filter((c) => {
+          const ts = parseInboxTimestamp(c.last_message_time || c.lastMessageTime);
+          // Keep chats that are already in this tab when timestamp is missing
+          // (backend active/requesting lists are already time-scoped).
+          if (!ts) return true;
+          if (lastSeenRange.from && ts < lastSeenRange.from.getTime()) return false;
+          if (lastSeenRange.to && ts > lastSeenRange.to.getTime()) return false;
+          return true;
+        });
+      }
+
+      const createdRange = resolveInboxDateRange(
+        filterApplied.createdPreset,
+        filterApplied.createdFrom,
+        filterApplied.createdTo,
+        'created'
+      );
+      const needsCreatedMeta = Boolean(createdRange.from || createdRange.to);
+      const attrRows = (filterApplied.attrs || []).filter(
+        (r) => r?.attribute && String(r.value ?? '') !== ''
+      );
+      const needsContactAttrs = attrRows.some(
+        (r) => r.attribute === 'opted_in' || r.attribute === 'tags'
+      );
+
+      // Wait for contact enrichment before applying contact-based filters
+      // (avoids briefly / permanently showing an empty list).
+      if ((needsCreatedMeta || needsContactAttrs) && filterContactsLoading) {
+        // keep current list until meta is ready
+      } else {
+        if (needsCreatedMeta) {
+          list = list.filter((c) => {
+            const meta = getContactMeta(c.phone);
+            const ts = parseInboxTimestamp(meta?.createdAt);
+            if (!ts) return false;
+            if (createdRange.from && ts < createdRange.from.getTime()) return false;
+            if (createdRange.to && ts > createdRange.to.getTime()) return false;
+            return true;
+          });
+        }
+
+        if (attrRows.length) {
+          list = list.filter((c) => {
+            const meta = getContactMeta(c.phone);
+            const rowMatches = attrRows.map((row) => {
+              const opIs = row.operator !== 'is_not';
+              let hit = false;
+              if (row.attribute === 'intervened') {
+                const isIntervened = String(c?.status || '').toLowerCase() === 'intervened';
+                hit = row.value === 'yes' ? isIntervened : !isIntervened;
+              } else if (row.attribute === 'intervened_by_agent') {
+                hit =
+                  c.agent_id != null &&
+                  String(c.agent_id) !== '' &&
+                  Number(c.agent_id) === Number(row.value);
+              } else if (row.attribute === 'opted_in') {
+                // If contact meta is missing, fall back to inbox list / selected fields
+                let opted = meta?.optedIn;
+                if (opted == null) {
+                  const inboxHit = (inboxList || []).find((x) => phonesMatchKey(x.phone, c.phone));
+                  opted = Boolean(
+                    inboxHit?.whatsappOptInAt || c.whatsappOptInAt || c.opted_in || c.optedIn
+                  );
+                }
+                hit = row.value === 'yes' ? Boolean(opted) : !opted;
+              } else if (row.attribute === 'tags') {
+                hit = phoneInTagSet(c.phone, row.value);
+              }
+              return opIs ? hit : !hit;
+            });
+            let result = rowMatches[0];
+            for (let i = 1; i < rowMatches.length; i += 1) {
+              const join = attrRows[i - 1]?.join === 'or' ? 'or' : 'and';
+              result = join === 'or' ? result || rowMatches[i] : result && rowMatches[i];
+            }
+            return result;
+          });
+        }
+      }
+    }
+
+    list = list.filter((c) => !resolvedConvIds.has(c.id));
+    return list;
+  })();
+
+  const listFilterActiveCount = countInboxAppliedFilters(filterApplied);
+
+  const openListFilterPanel = () => {
+    setFilterDraft(cloneInboxFilterDraft(filterApplied || emptyInboxFilterDraft()));
+    setListFilterOpen(true);
+  };
+
+  const updateFilterDraft = (patch) => {
+    setFilterDraft((prev) => ({ ...prev, ...patch }));
+  };
+
+  const updateFilterAttrRow = (id, patch) => {
+    setFilterDraft((prev) => ({
+      ...prev,
+      attrs: (prev.attrs || []).map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    }));
+  };
+
+  const addFilterAttrRow = () => {
+    setFilterDraft((prev) => ({
+      ...prev,
+      attrs: [...(prev.attrs || []), newInboxFilterAttrRow()],
+    }));
+  };
+
+  const removeFilterAttrRow = (id) => {
+    setFilterDraft((prev) => {
+      const next = (prev.attrs || []).filter((r) => r.id !== id);
+      return { ...prev, attrs: next.length ? next : [newInboxFilterAttrRow()] };
+    });
+  };
+
+  const applyListFilters = () => {
+    const draft = cloneInboxFilterDraft(filterDraft);
+    const hasSomething =
+      draft.lastSeenPreset ||
+      draft.lastSeenFrom ||
+      draft.lastSeenTo ||
+      draft.createdPreset ||
+      draft.createdFrom ||
+      draft.createdTo ||
+      (draft.attrs || []).some((r) => r.attribute && String(r.value ?? '') !== '');
+    setFilterApplied(hasSomething ? draft : null);
+    setListFilterOpen(false);
+  };
+
+  const clearListFilters = () => {
+    const empty = emptyInboxFilterDraft();
+    setFilterDraft(empty);
+    setFilterApplied(null);
+  };
+
+  const setLastSeenPreset = (preset) => {
+    const range = resolveInboxDateRange(preset, '', '', 'lastSeen');
+    updateFilterDraft({
+      lastSeenPreset: preset,
+      lastSeenFrom: toDateInputValue(range.from),
+      lastSeenTo: toDateInputValue(range.to),
+    });
+  };
+
+  const setCreatedPreset = (preset) => {
+    const range = resolveInboxDateRange(preset, '', '', 'created');
+    updateFilterDraft({
+      createdPreset: preset,
+      createdFrom: toDateInputValue(range.from),
+      createdTo: toDateInputValue(range.to),
+    });
+  };
+
+  const intervenedFilterOptions = (() => {
+    const uid = Number(user?.id);
+    const all = (sectionConversations || []).filter(
+      (c) => String(c?.status || '').toLowerCase() === 'intervened'
+    );
+    const countFor = (predicate) => all.filter(predicate).length;
+    const agentSearch = intervenedAgentSearch.trim().toLowerCase();
+    const agents = (agentsList || []).filter((a) => {
+      if (!agentSearch) return true;
+      const label = `${a?.name || ''} ${a?.email || ''}`.toLowerCase();
+      return label.includes(agentSearch);
+    });
+    return {
+      me: countFor((c) => Number(c.agent_id) === uid),
+      any: all.length,
+      other: countFor((c) => c.agent_id != null && Number(c.agent_id) !== uid),
+      agents,
+    };
+  })();
+
+  const intervenedFilterTitle = (() => {
+    if (intervenedFilter === 'me') return 'Intervened By Me';
+    if (intervenedFilter === 'any') return 'Intervened By Any';
+    if (intervenedFilter === 'other') return 'Intervened By Other';
+    if (intervenedFilter.startsWith('agent:')) {
+      const aid = Number(intervenedFilter.split(':')[1]);
+      const agent = (agentsList || []).find((a) => Number(a.id) === aid);
+      const name = agent?.name || agent?.email || 'Agent';
+      return `Intervened By ${name}`;
+    }
+    return 'Intervened';
+  })();
+
+  const sectionTabCount = filteredSectionList.length;
+
+  const isHistoryTab = isHistoryPage;
+  const isIntervenedTab = !isHistoryPage && inboxTab === 'intervened';
+  const selectedPhone = selectedContact?.phone;
+  const contactStatusLower = String(selectedContact?.chatStatus || '').toLowerCase();
+  const isIntervenedChat =
+    isIntervenedTab ||
+    (selectedPhone && intervenedPhones[selectedPhone]) ||
+    contactStatusLower === 'intervened';
+  const canHumanReply =
+    !isHistoryTab &&
+    Boolean(selectedContact?.conversationId || selectedContact?.phone) &&
+    (isIntervenedChat || contactStatusLower === 'active' || inboxTab === 'active');
+  const showAdminIntervenedActions =
+    isAdminOrManager &&
+    Boolean(selectedContact?.conversationId) &&
+    !isHistoryTab &&
+    (isIntervenedTab ||
+      contactStatusLower === 'intervened' ||
+      contactStatusLower === 'active' ||
+      inboxTab === 'active');
+  const showInterveneBar =
+    !isHistoryTab &&
+    !isIntervenedTab &&
+    selectedContact?.phone &&
+    !canHumanReply &&
+    messages.some((m) => m.type === 'incoming');
+
+  if (loading && !user) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-sky-50/90 via-white to-sky-100/50 flex items-center justify-center">
         <div className="text-center motion-enter">
@@ -2127,7 +3773,9 @@ function Inbox() {
           </Link>
 
           <span className="text-gray-300 hidden sm:block shrink-0">|</span>
-          <h2 className="text-base sm:text-lg font-semibold text-sky-700 tracking-tight truncate">Inbox</h2>
+          <h2 className="text-base sm:text-lg font-semibold text-sky-700 tracking-tight truncate">
+            {isHistoryPage ? 'History' : 'Inbox'}
+          </h2>
           <AdminHeaderProjectSwitch />
         </div>
 
@@ -2303,138 +3951,646 @@ function Inbox() {
               selectedContact ? 'hidden lg:flex' : 'flex'
             }`}
           >
-            {/* Requesting (admin/manager): unassigned conversations — assign to agent */}
-            {/* {isAdminOrManager && (
-              <div className="border-b border-gray-200 bg-amber-50/80">
-                <div className="px-3 py-2">
-                  <span className="text-sm font-semibold text-gray-800">Requesting</span>
+            {/* Search Bar + Filter button — always visible on /inbox */}
+            <div className="relative z-20 shrink-0 p-4 border-b border-sky-100/70 bg-gradient-to-b from-white to-sky-50/40 overflow-visible">
+              <div className="flex flex-nowrap items-center gap-2">
+                <div className="relative min-w-0 flex-1">
+                  <input
+                    type="text"
+                    placeholder={
+                      inboxTab === 'intervened'
+                        ? 'Search contact, phone, or agent name...'
+                        : 'Search conversations...'
+                    }
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/80 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
+                  />
+                  <svg className="absolute left-3 top-2.5 w-5 h-5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
                 </div>
-                <div className="max-h-48 overflow-y-auto px-3 pb-3">
-                  {loadingRequesting ? (
-                    <p className="text-xs text-gray-500 py-2">Loading...</p>
-                  ) : requestingList.length === 0 ? (
-                    <p className="text-xs text-gray-500 py-2">No requesting conversations</p>
-                  ) : (
-                    <ul className="space-y-2">
-                      {requestingList.map((conv) => (
-                        <li
-                          key={conv.id}
-                          className="bg-white border border-gray-200 rounded-lg p-2 text-left shadow-sm"
-                        >
-                          <div className="text-xs font-medium text-gray-800 truncate">
-                            {conv.phone || conv.customer_name || `#${conv.id}`}
-                          </div>
-                          <div className="text-xs text-gray-600 truncate mt-0.5">
-                            {conv.last_message || '—'}
-                          </div>
-                          <div className="mt-2 flex items-center gap-2">
-                            <select
-                              className="flex-1 min-w-0 text-xs border border-gray-300 rounded py-1 px-2 bg-white"
-                              value=""
-                              onChange={(e) => {
-                                const agentId = e.target.value;
-                                if (agentId) handleAssignToAgent(conv.id, Number(agentId));
-                              }}
-                              disabled={!!assigningId}
-                            >
-                              <option value="">Assign to agent...</option>
-                              {agentsList.map((a) => (
-                                <option key={a.id} value={a.id}>
-                                  {a.name || a.email}
-                                </option>
-                              ))}
-                            </select>
-                            {assigningId === conv.id && (
-                              <span className="text-xs text-gray-400">Assigning...</span>
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </div>
-            )} */}
-            {/* Search Bar */}
-            <div className="p-4 border-b border-sky-100/70 bg-gradient-to-b from-white to-sky-50/40">
-              <div className="relative">
-                <input
-                  type="text"
-                  placeholder="Search conversations..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/80 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                />
-                <svg className="absolute left-3 top-2.5 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
+                <button
+                  type="button"
+                  onClick={openListFilterPanel}
+                  className={`relative z-20 flex-none shrink-0 inline-flex h-10 w-10 min-w-[2.5rem] min-h-[2.5rem] items-center justify-center rounded-xl border-2 transition ${
+                    listFilterOpen || listFilterActiveCount > 0
+                      ? 'border-teal-500 bg-teal-50 text-teal-700'
+                      : 'border-gray-200 bg-white text-gray-600 hover:border-teal-300 hover:text-teal-700'
+                  }`}
+                  aria-label="Filter conversations"
+                  title="Filters"
+                >
+                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+                  </svg>
+                  {listFilterActiveCount > 0 ? (
+                    <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-teal-600 ring-2 ring-white" />
+                  ) : null}
+                </button>
               </div>
             </div>
 
-            {/* Chat List */}
-            <div className="flex-1 overflow-y-auto bg-gradient-to-b from-white via-sky-50/20 to-sky-100/20">
-              {loadingInbox ? (
+            {listFilterOpen
+              ? createPortal(
+                  <div
+                    className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Filters"
+                  >
+                    <button
+                      type="button"
+                      className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]"
+                      aria-label="Close filters"
+                      onClick={() => setListFilterOpen(false)}
+                    />
+                    <div
+                      ref={listFilterRef}
+                      className="relative z-[1] flex w-full max-w-xl max-h-[min(88vh,40rem)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-[0_24px_64px_rgba(15,23,42,0.22)]"
+                    >
+                      <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-5 py-3.5">
+                        <div>
+                          <h3 className="text-base font-semibold text-gray-900">Filters</h3>
+                          <p className="text-xs text-gray-500 mt-0.5">Refine conversations by date and attributes</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setListFilterOpen(false)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                          aria-label="Close"
+                        >
+                          Close
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+                        <section>
+                          <div className="mb-2 flex items-center gap-2">
+                            <h4 className="text-[13px] font-semibold text-gray-800">Last Seen</h4>
+                            {(filterDraft.lastSeenPreset || filterDraft.lastSeenFrom || filterDraft.lastSeenTo) ? (
+                              <button
+                                type="button"
+                                onClick={() => updateFilterDraft({ lastSeenPreset: '', lastSeenFrom: '', lastSeenTo: '' })}
+                                className="inline-flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                title="Clear Last Seen"
+                              >
+                                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <div className="flex flex-wrap gap-1.5">
+                              {[
+                                { id: '24h', label: 'In 24hr' },
+                                { id: 'week', label: 'This Week' },
+                                { id: 'month', label: 'This Month' },
+                              ].map((p) => (
+                                <button
+                                  key={p.id}
+                                  type="button"
+                                  onClick={() => setLastSeenPreset(p.id)}
+                                  className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+                                    filterDraft.lastSeenPreset === p.id
+                                      ? 'bg-gray-800 text-white'
+                                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                  }`}
+                                >
+                                  {p.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="flex min-w-0 flex-1 items-center gap-2">
+                              <input
+                                type="date"
+                                value={filterDraft.lastSeenFrom}
+                                onChange={(e) =>
+                                  updateFilterDraft({ lastSeenFrom: e.target.value, lastSeenPreset: '' })
+                                }
+                                className="w-full rounded-md border border-gray-200 bg-[#f3f4f6] px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-teal-500 focus:bg-white focus:ring-1 focus:ring-teal-500/30"
+                              />
+                              <input
+                                type="date"
+                                value={filterDraft.lastSeenTo}
+                                onChange={(e) =>
+                                  updateFilterDraft({ lastSeenTo: e.target.value, lastSeenPreset: '' })
+                                }
+                                className="w-full rounded-md border border-gray-200 bg-[#f3f4f6] px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-teal-500 focus:bg-white focus:ring-1 focus:ring-teal-500/30"
+                              />
+                            </div>
+                          </div>
+                        </section>
+
+                        <section>
+                          <div className="mb-2 flex items-center gap-2">
+                            <h4 className="text-[13px] font-semibold text-gray-800">Created At</h4>
+                            {(filterDraft.createdPreset || filterDraft.createdFrom || filterDraft.createdTo) ? (
+                              <button
+                                type="button"
+                                onClick={() => updateFilterDraft({ createdPreset: '', createdFrom: '', createdTo: '' })}
+                                className="inline-flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                title="Clear Created At"
+                              >
+                                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <div className="flex flex-wrap gap-1.5">
+                              {[
+                                { id: 'today', label: 'Today' },
+                                { id: 'week', label: 'This Week' },
+                                { id: 'month', label: 'This Month' },
+                              ].map((p) => (
+                                <button
+                                  key={p.id}
+                                  type="button"
+                                  onClick={() => setCreatedPreset(p.id)}
+                                  className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+                                    filterDraft.createdPreset === p.id
+                                      ? 'bg-gray-800 text-white'
+                                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                  }`}
+                                >
+                                  {p.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="flex min-w-0 flex-1 items-center gap-2">
+                              <input
+                                type="date"
+                                value={filterDraft.createdFrom}
+                                onChange={(e) =>
+                                  updateFilterDraft({ createdFrom: e.target.value, createdPreset: '' })
+                                }
+                                className="w-full rounded-md border border-gray-200 bg-[#f3f4f6] px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-teal-500 focus:bg-white focus:ring-1 focus:ring-teal-500/30"
+                              />
+                              <input
+                                type="date"
+                                value={filterDraft.createdTo}
+                                onChange={(e) =>
+                                  updateFilterDraft({ createdTo: e.target.value, createdPreset: '' })
+                                }
+                                className="w-full rounded-md border border-gray-200 bg-[#f3f4f6] px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-teal-500 focus:bg-white focus:ring-1 focus:ring-teal-500/30"
+                              />
+                            </div>
+                          </div>
+                        </section>
+
+                        <section>
+                          <h4 className="mb-2.5 text-[13px] font-semibold text-gray-800">Attributes</h4>
+                          <div className="space-y-2.5">
+                            {(filterDraft.attrs || []).map((row, idx) => {
+                              const isLast = idx === (filterDraft.attrs || []).length - 1;
+                              const fieldCls =
+                                'h-9 rounded-md border border-gray-200 bg-[#f3f4f6] px-2.5 text-xs text-gray-800 outline-none focus:border-teal-500 focus:bg-white focus:ring-1 focus:ring-teal-500/30';
+                              return (
+                                <div key={row.id} className="flex flex-wrap items-center gap-2">
+                                  <select
+                                    value={row.attribute}
+                                    onChange={(e) =>
+                                      updateFilterAttrRow(row.id, { attribute: e.target.value, value: '' })
+                                    }
+                                    className={`${fieldCls} min-w-[9rem] flex-[1.4]`}
+                                  >
+                                    <option value="">Select Attribute</option>
+                                    {INBOX_FILTER_ATTRS.map((a) => (
+                                      <option key={a.value} value={a.value}>
+                                        {a.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <select
+                                    value={row.operator}
+                                    onChange={(e) => updateFilterAttrRow(row.id, { operator: e.target.value })}
+                                    className={`${fieldCls} w-[5rem] shrink-0`}
+                                  >
+                                    <option value="is">is</option>
+                                    <option value="is_not">is not</option>
+                                  </select>
+                                  {row.attribute === 'intervened' || row.attribute === 'opted_in' ? (
+                                    <select
+                                      value={row.value}
+                                      onChange={(e) => updateFilterAttrRow(row.id, { value: e.target.value })}
+                                      className={`${fieldCls} min-w-[6rem] flex-1`}
+                                    >
+                                      <option value="">Select</option>
+                                      <option value="yes">Yes</option>
+                                      <option value="no">No</option>
+                                    </select>
+                                  ) : row.attribute === 'intervened_by_agent' ? (
+                                    <select
+                                      value={row.value}
+                                      onChange={(e) => updateFilterAttrRow(row.id, { value: e.target.value })}
+                                      className={`${fieldCls} min-w-[7rem] flex-1`}
+                                    >
+                                      <option value="">Select agent</option>
+                                      {(agentsList || []).map((agent) => (
+                                        <option key={agent.id} value={String(agent.id)}>
+                                          {agent.name || agent.email || `Agent ${agent.id}`}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : row.attribute === 'tags' ? (
+                                    <select
+                                      value={row.value}
+                                      onChange={(e) => updateFilterAttrRow(row.id, { value: e.target.value })}
+                                      className={`${fieldCls} min-w-[7rem] flex-1`}
+                                    >
+                                      <option value="">Select tag</option>
+                                      {(filterTagsList || []).map((tag) => (
+                                        <option key={tag.id} value={String(tag.id)}>
+                                          {tag.name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : (
+                                    <input
+                                      disabled
+                                      placeholder="Value"
+                                      className={`${fieldCls} min-w-[6rem] flex-1 text-gray-400`}
+                                    />
+                                  )}
+                                  {!isLast ? (
+                                    <select
+                                      value={row.join || 'and'}
+                                      onChange={(e) => updateFilterAttrRow(row.id, { join: e.target.value })}
+                                      className={`${fieldCls} w-16 shrink-0 font-medium`}
+                                    >
+                                      <option value="and">and</option>
+                                      <option value="or">or</option>
+                                    </select>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={addFilterAttrRow}
+                                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                                      title="Add filter"
+                                    >
+                                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                      </svg>
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => removeFilterAttrRow(row.id)}
+                                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                    title="Remove"
+                                  >
+                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      </div>
+
+                      <div className="flex items-center gap-4 border-t border-gray-100 bg-white px-5 py-3.5">
+                        <button
+                          type="button"
+                          onClick={applyListFilters}
+                          className="rounded-lg bg-[#0f766e] px-6 py-2 text-sm font-semibold text-white shadow-sm hover:bg-[#0d9488]"
+                        >
+                          Apply
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearListFilters}
+                          className="text-sm font-medium text-gray-500 hover:text-gray-800"
+                        >
+                          Clear All
+                        </button>
+                        {filterContactsLoading ? (
+                          <span className="ml-auto text-[11px] text-gray-400">Loading…</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>,
+                  document.body
+                )
+              : null}
+
+            {/* Active / Requesting / Intervened tabs (Inbox only) */}
+            {!isHistoryPage && (
+            <div className="flex p-1.5 gap-1 flex-shrink-0 bg-gradient-to-b from-gray-100/90 to-gray-50/80 border-b border-gray-200/60 overflow-x-auto [scrollbar-width:none]">
+              {[
+                { id: 'active', label: 'Active' },
+                { id: 'requesting', label: 'Requesting' },
+                { id: 'intervened', label: 'Intervened' },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    if (tab.id === inboxTab) return;
+                    sectionFetchSeqRef.current += 1; // invalidate in-flight fetch
+                    inboxTabRef.current = tab.id;
+                    setAssignMenuConvId(null);
+                    setAssigningId(null);
+                    setIntervenedFilterOpen(false);
+                    setLoadingSectionChats(!(sectionByTab[tab.id] || []).length);
+                    setInboxTab(tab.id);
+                  }}
+                  className={`flex-1 min-w-[4.5rem] py-2.5 text-[10px] sm:text-xs font-bold uppercase tracking-wide transition-all duration-200 rounded-lg whitespace-nowrap px-2 ${
+                    inboxTab === tab.id
+                      ? 'bg-gradient-to-r from-sky-600 to-blue-700 text-white shadow-md shadow-sky-600/25 ring-1 ring-sky-400/30'
+                      : 'text-sky-900/80 hover:bg-white/70'
+                  }`}
+                >
+                  {tab.label}{inboxTab === tab.id ? ` (${sectionTabCount})` : ''}
+                </button>
+              ))}
+            </div>
+            )}
+
+            {/* Intervened agent filter — dropdown overlay (list stays visible underneath) */}
+            {!isHistoryPage && inboxTab === 'intervened' && (
+              <div className="border-b border-gray-200/80 bg-white shrink-0 relative z-30">
+                <button
+                  type="button"
+                  onClick={() => setIntervenedFilterOpen((v) => !v)}
+                  className="w-full flex items-center justify-between px-3 py-2.5 text-left text-sm font-semibold text-gray-800 bg-gray-100/90 hover:bg-gray-100"
+                >
+                  <span className="truncate">
+                    {intervenedFilterTitle} ({sectionTabCount})
+                  </span>
+                  <svg
+                    className={`w-4 h-4 shrink-0 transition-transform ${intervenedFilterOpen ? 'rotate-180' : ''}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {intervenedFilterOpen ? (
+                  <div className="absolute left-0 right-0 top-full max-h-72 overflow-y-auto bg-white border-b border-gray-200 shadow-xl z-40">
+                    <div className="p-2 border-b border-gray-100 sticky top-0 bg-white z-10">
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={intervenedAgentSearch}
+                          onChange={(e) => setIntervenedAgentSearch(e.target.value)}
+                          placeholder="Search agent by name"
+                          className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-sky-400/40 focus:border-sky-400 outline-none"
+                        />
+                        <svg className="absolute left-2.5 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                      </div>
+                    </div>
+                    {[
+                      { id: 'me', short: 'ME', label: 'Intervened By Me', count: intervenedFilterOptions.me, ring: 'text-red-600' },
+                      { id: 'any', short: 'AY', label: 'Intervened By Any', count: intervenedFilterOptions.any, ring: 'text-red-600' },
+                      { id: 'other', short: 'OT', label: 'Intervened By Other', count: intervenedFilterOptions.other, ring: 'text-red-600' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setIntervenedFilter(opt.id);
+                          setIntervenedFilterOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-sky-50/80 border-b border-gray-50 ${
+                          intervenedFilter === opt.id ? 'bg-sky-50' : ''
+                        }`}
+                      >
+                        <span className={`w-9 h-9 rounded-full bg-white border-2 border-gray-200 flex items-center justify-center text-[10px] font-bold ${opt.ring}`}>
+                          {opt.short}
+                        </span>
+                        <span className="flex-1 truncate text-gray-800">{opt.label}</span>
+                        <span className="text-xs text-gray-500 shrink-0">({opt.count})</span>
+                      </button>
+                    ))}
+                    {intervenedFilterOptions.agents.map((agent) => {
+                      const aid = agent.id;
+                      const filterId = `agent:${aid}`;
+                      const name = agent.name || agent.email || `Agent ${aid}`;
+                      return (
+                        <button
+                          key={filterId}
+                          type="button"
+                          onClick={() => {
+                            setIntervenedFilter(filterId);
+                            setIntervenedFilterOpen(false);
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-sky-50/80 border-b border-gray-50 ${
+                            intervenedFilter === filterId ? 'bg-sky-50' : ''
+                          }`}
+                        >
+                          <span className="w-9 h-9 rounded-full bg-emerald-50 border-2 border-emerald-200 flex items-center justify-center text-xs font-bold text-emerald-700">
+                            {getAgentInitials(name)}
+                          </span>
+                          <span className="flex-1 truncate text-gray-800">Intervened By {name}</span>
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden />
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            {isHistoryPage && (
+              <div className="px-3 py-2 border-b border-gray-200/80 bg-slate-50 text-xs text-slate-600 shrink-0">
+                Chats older than 24 hours — read only
+              </div>
+            )}
+
+            {/* Chat list only (never mix Assign UI into Intervened) */}
+            <div className="flex-1 overflow-y-auto bg-gradient-to-b from-white via-sky-50/20 to-sky-100/20 min-h-0">
+              {loadingSectionChats ? (
                 <div className="p-8 text-center motion-enter">
                   <div className="animate-spin rounded-full h-8 w-8 border-2 border-sky-200 border-t-sky-600 mx-auto" />
-                  <p className="mt-2 text-sm text-gray-500">Loading conversations...</p>
+                  <p className="mt-2 text-sm text-gray-500">
+                    {isHistoryPage ? 'Loading history...' : `Loading ${inboxTab} chats...`}
+                  </p>
                 </div>
-              ) : filteredInboxList.length === 0 ? (
+              ) : filteredSectionList.length === 0 ? (
                 <div className="p-8 text-center motion-enter">
                   <svg className="w-16 h-16 text-sky-200 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                   </svg>
-                  <p className="text-gray-600 mb-2">No conversations found</p>
-                  <p className="text-sm text-gray-500">Start a conversation by sending a message</p>
+                  <p className="text-gray-600 mb-2">
+                    {isHistoryPage
+                      ? 'No history conversations'
+                      : `No ${inboxTab} conversations`}
+                  </p>
+                  <p className="text-sm text-gray-500">
+                    {isHistoryPage
+                      ? 'Chats with no activity in the last 24 hours appear here'
+                      : inboxTab === 'requesting'
+                      ? 'New customer messages appear here until an agent takes over'
+                      : inboxTab === 'intervened'
+                        ? 'Chats where an agent or admin has intervened'
+                        : 'All chats with activity in the last 24 hours'}
+                  </p>
                 </div>
               ) : (
-                <div className="motion-stagger-children px-2 py-2 space-y-2">
-                  {filteredInboxList.map((contact) => (
-                    <button
-                      type="button"
-                      key={contact.contactId || `contact_${contact.phone}`}
-                      onClick={() => handleContactSelect(contact)}
-                      className={`w-full p-4 text-left rounded-2xl transition-all duration-200 hover:bg-sky-50/85 hover:shadow-sm active:scale-[0.99] ${
-                        selectedContact?.phone === contact.phone
-                          ? 'bg-gradient-to-r from-sky-50 to-white border border-sky-200/80 shadow-[0_8px_22px_-16px_rgba(2,132,199,0.6)]'
-                          : 'border border-transparent hover:border-sky-100/80'
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-sky-500 via-sky-600 to-blue-700 flex items-center justify-center flex-shrink-0 shadow-md shadow-sky-500/25 ring-2 ring-white">
-                          <span className="text-white font-semibold text-lg">
-                            {contact.name?.charAt(0).toUpperCase() || contact.phone.charAt(0)}
-                          </span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between mb-1">
-                            <p className="text-sm font-semibold text-gray-900 truncate">
-                              {contact.name || contact.phone}
-                            </p>
-                            {contact.lastMessageTime && (
-                              <p className="text-xs text-gray-500 flex-shrink-0 ml-2">
-                                {formatTime(contact.lastMessageTime)}
+                <div className={inboxTab === 'requesting' ? 'space-y-0' : 'motion-stagger-children'}>
+                  {filteredSectionList.map((conv, index) => {
+                    const displayName = resolveConversationDisplayName(conv, inboxList);
+                    const phoneLabel = formatPhoneDisplay(conv.phone);
+                    const nameIsPhone = isSamePhoneValue(displayName, conv.phone);
+                    const titleName = nameIsPhone ? (phoneLabel || displayName) : displayName;
+                    const avatarLetter = String(titleName || '')
+                      .replace(/^\++/, '')
+                      .trim()
+                      .charAt(0)
+                      .toUpperCase() || '?';
+                    const convIdNum = Number(conv?.id);
+                    const hasConvId = Number.isInteger(convIdNum) && convIdNum > 0;
+                    const isAssigningThis =
+                      hasConvId &&
+                      assigningId != null &&
+                      Number(assigningId) === convIdNum;
+                    const isAssignMenuOpen =
+                      hasConvId &&
+                      assignMenuConvId != null &&
+                      Number(assignMenuConvId) === convIdNum;
+                    const rowKey = hasConvId
+                      ? `inbox-${inboxTab}-id-${convIdNum}`
+                      : `inbox-${inboxTab}-row-${normalizePhoneKey(conv.phone) || 'x'}-${index}`;
+                    const isSelected =
+                      selectedContact?.phone === conv.phone ||
+                      selectedContact?.conversationId === conv.id ||
+                      selectedContact?.id === conv.id;
+                    return (
+                      <div
+                        key={rowKey}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => handleSectionChatSelect(conv)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleSectionChatSelect(conv);
+                          }
+                        }}
+                        className={`relative w-full flex flex-col gap-2 p-3 text-left border-b border-gray-100/90 cursor-pointer transition-all duration-200 ${
+                          isAssignMenuOpen ? 'z-30' : 'z-0'
+                        } ${
+                          isSelected
+                            ? 'bg-gradient-to-r from-sky-50 to-white border-l-4 border-l-sky-600 shadow-inner'
+                            : 'hover:bg-sky-50/60'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-sky-500 via-sky-600 to-blue-700 flex items-center justify-center flex-shrink-0 shadow-md shadow-sky-500/25 ring-2 ring-white">
+                            <span className="text-white font-semibold text-lg leading-none">
+                              {avatarLetter}
+                            </span>
+                          </div>
+                          <div className="flex-1 min-w-0 overflow-hidden">
+                            <div className="flex items-start justify-between gap-2 mb-1">
+                              <p className="text-sm font-semibold text-gray-900 truncate leading-snug">
+                                {titleName}
                               </p>
-                            )}
-                          </div>
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-sm text-gray-600 truncate flex-1 min-w-0">
-                              {contact.lastMessage || 'No messages'}
-                            </p>
-                            {contact.whatsappOptInAt && (
-                              <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium text-green-700 bg-green-100 rounded" title={`Opted in ${formatTime(contact.whatsappOptInAt)}`}>
-                                Opted in
-                              </span>
-                            )}
-                            {contact.unreadCount > 0 && (
-                              <span className="ml-2 px-2 py-0.5 bg-sky-600 text-white text-xs font-semibold rounded-full flex-shrink-0 shadow-sm shadow-sky-600/30">
-                                {contact.unreadCount > 9 ? '9+' : contact.unreadCount}
-                              </span>
-                            )}
+                              {conv.last_message_time ? (
+                                <p className="text-xs text-gray-500 flex-shrink-0 leading-snug whitespace-nowrap">
+                                  {formatTime(conv.last_message_time)}
+                                </p>
+                              ) : null}
+                            </div>
+                            {!nameIsPhone && phoneLabel ? (
+                              <p className="text-xs text-sky-600 font-medium truncate mb-0.5 leading-snug">
+                                {phoneLabel}
+                              </p>
+                            ) : null}
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-sm text-gray-600 truncate flex-1 min-w-0 leading-snug">
+                                {conv.last_message || 'No messages'}
+                              </p>
+                              {Number(conv.unread_count) > 0 && (
+                                <span className="ml-2 px-2 py-0.5 bg-sky-600 text-white text-xs font-semibold rounded-full flex-shrink-0 shadow-sm shadow-sky-600/30">
+                                  {Number(conv.unread_count) > 9 ? '9+' : conv.unread_count}
+                                </span>
+                              )}
+                            </div>
+                            {inboxTab === 'intervened' && conv.agent_name ? (
+                              <p className="text-[11px] font-semibold text-violet-700 mt-1 truncate">
+                                Intervened by {conv.agent_name}
+                              </p>
+                            ) : null}
                           </div>
                         </div>
+                        {inboxTab === 'requesting' &&
+                          String(conv.status || '').toLowerCase() === 'requesting' &&
+                          isAgentUser &&
+                          (agentCanPickup || Number(conv.agent_id) === Number(user?.id)) ? (
+                          <button
+                            type="button"
+                            onClick={(e) => handleAcceptSectionChat(e, conv)}
+                            className="w-full py-2 px-2 text-xs font-bold rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 text-white shadow-md shadow-sky-600/20 hover:from-sky-500 hover:to-blue-500 transition"
+                          >
+                            Accept chat
+                          </button>
+                          ) : null}
+                        {inboxTab === 'requesting' &&
+                          String(conv.status || '').toLowerCase() === 'requesting' &&
+                          isAdminOrManager ? (
+                          <div className="relative" ref={isAssignMenuOpen ? assignMenuRef : null}>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!hasConvId || isAssigningThis) return;
+                                setAssignMenuConvId((prev) =>
+                                  prev != null && Number(prev) === convIdNum ? null : convIdNum
+                                );
+                              }}
+                              disabled={!hasConvId || isAssigningThis}
+                              className="w-full py-2 px-2 text-xs font-bold rounded-xl bg-white border border-sky-200 text-sky-800 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                            >
+                              {isAssigningThis
+                                ? 'Assigning…'
+                                : !hasConvId
+                                  ? 'Assign unavailable'
+                                  : conv.agent_id
+                                    ? 'Reassign agent'
+                                    : 'Assign to agent'}
+                            </button>
+                            {isAssignMenuOpen ? (
+                              <div className="absolute left-0 right-0 top-full mt-1 z-40 max-h-48 overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl py-1">
+                                {agentsList.length === 0 ? (
+                                  <div className="px-3 py-2 text-xs text-gray-500">No agents available</div>
+                                ) : (
+                                  agentsList.map((agent) => {
+                                    const label = agent?.name || agent?.email || `Agent ${agent?.id}`;
+                                    return (
+                                      <button
+                                        key={agent.id ?? label}
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setAssignMenuConvId(null);
+                                          handleAssignToAgent(convIdNum, agent.id);
+                                        }}
+                                        className="w-full text-left px-3 py-2 text-sm text-gray-800 hover:bg-sky-50 transition"
+                                      >
+                                        {label}
+                                      </button>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
+                          ) : null}
                       </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2474,8 +4630,14 @@ function Inbox() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <p className="text-sm font-semibold text-gray-900">
-                          {selectedContact.name || selectedContact.phone}
+                        <p className="text-sm font-semibold text-gray-900 truncate">
+                          {(() => {
+                            const phoneLabel = formatPhoneDisplay(selectedContact.phone);
+                            const rawName = String(selectedContact.name || '').trim();
+                            const nameIsPhone = !rawName || isSamePhoneValue(rawName, selectedContact.phone);
+                            if (nameIsPhone) return phoneLabel || selectedContact.phone || 'Unknown';
+                            return phoneLabel ? `${rawName} (${phoneLabel})` : rawName;
+                          })()}
                         </p>
                         {onlineContacts[selectedContact.id]?.isOnline ? (
                           <span className="text-xs text-green-600">Online</span>
@@ -2485,7 +4647,15 @@ function Inbox() {
                           </span>
                         ) : null}
                       </div>
-                      <p className="text-xs text-gray-500">{selectedContact.phone}</p>
+                      <ContactTagsBar
+                        contactId={selectedContact.contactId || selectedContact.id}
+                        phone={selectedContact.phone}
+                        onContactResolved={(id) => {
+                          setSelectedContact((prev) =>
+                            prev ? { ...prev, id, contactId: id } : prev
+                          );
+                        }}
+                      />
                       {selectedContact.whatsappOptInAt && (
                         <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 text-xs font-medium text-green-700 bg-green-100 rounded-full" title={`Consent via START/YES on ${formatTime(selectedContact.whatsappOptInAt)}`}>
                           <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
@@ -2494,6 +4664,63 @@ function Inbox() {
                       )}
                     </div>
                   </div>
+                  {showAdminIntervenedActions && (
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      <div className="relative" ref={transferMenuRef}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTransferMenuOpen((v) => {
+                              const next = !v;
+                              if (next) fetchAgentsForAssign();
+                              return next;
+                            });
+                          }}
+                          disabled={transferring || resolving}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-gray-800 bg-white border-2 border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                        >
+                          Transfer To
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {transferMenuOpen && (
+                          <div className="absolute right-0 top-full mt-1 w-56 max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-xl z-[1000] py-1">
+                            {loadingAgents ? (
+                              <div className="px-3 py-2 text-xs text-gray-500">Loading agents…</div>
+                            ) : agentsList.length === 0 ? (
+                              <div className="px-3 py-2 text-xs text-gray-500">
+                                No agents available. Add agents for this project, then reopen Transfer To.
+                              </div>
+                            ) : (
+                              agentsList.map((agent) => {
+                                const label = agent?.name || agent?.email || `Agent ${agent?.id}`;
+                                return (
+                                  <button
+                                    key={agent.id ?? label}
+                                    type="button"
+                                    onClick={() => handleTransferToAgent(agent)}
+                                    disabled={transferring || Number(agent.id) === Number(selectedContact?.agentId)}
+                                    className="w-full text-left px-3 py-2.5 text-sm text-gray-800 hover:bg-sky-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleResolveIntervenedChat}
+                        disabled={resolving || transferring || resolveDispositionOpen}
+                        className="px-4 py-2 text-sm font-semibold text-gray-800 bg-white border-2 border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                      >
+                        {resolving ? 'Resolving…' : 'Resolve'}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Typing indicator */}
@@ -2508,7 +4735,8 @@ function Inbox() {
                 {/* Messages Area */}
                 <div
                   ref={chatContainerRef}
-                  className="flex-1 overflow-y-auto p-4 md:p-6 space-y-0 bg-[radial-gradient(ellipse_at_top,rgba(186,230,253,0.26),transparent_48%),radial-gradient(ellipse_at_bottom,rgba(191,219,254,0.2),transparent_55%)]"
+                  onScroll={handleChatScroll}
+                  className="flex-1 overflow-y-auto p-4 md:p-6 space-y-0 bg-[#e5ddd5]"
                 >
                   {messages.length === 0 ? (
                     <div className="flex items-center justify-center h-full min-h-[200px]">
@@ -2531,127 +4759,41 @@ function Inbox() {
                     >
                       {messages.map((message, index) => {
                         const messageKey = message.id || `msg_${message.source || 'unknown'}_${index}_${message.sentAt || message.createdAt || Date.now()}`;
-                        return (
-                          <div
-                            key={messageKey}
-                            className={`flex ${message.type === 'outgoing' ? 'justify-end' : 'justify-start'} mb-3`}
-                          >
-                            <div
-                              className={`max-w-xs lg:max-w-md px-4 py-2.5 rounded-2xl relative shadow-sm transition-shadow duration-200 ${
-                                message.type === 'outgoing'
-                                  ? 'bg-gradient-to-br from-sky-600 to-blue-700 text-white shadow-[0_10px_22px_-14px_rgba(2,132,199,0.9)]'
-                                  : 'bg-white/96 text-gray-900 border border-sky-100/90 backdrop-blur-sm shadow-[0_10px_22px_-16px_rgba(148,163,184,0.55)]'
-                              }`}
-                            >
-                              {/* Reply indicator */}
-                              {message.replyToId && (
-                                <div className={`text-xs mb-2 pb-2 border-b ${
-                                  message.type === 'outgoing' ? 'border-sky-400/80 text-sky-100' : 'border-gray-300 text-gray-500'
-                                }`}>
-                                  Replying to message
-                                </div>
-                              )}
-
-                              {/* Forwarded indicator */}
-                              {message.forwardedFrom && (
-                                <div className={`text-xs mb-2 pb-2 border-b ${
-                                  message.type === 'outgoing' ? 'border-sky-400/80 text-sky-100' : 'border-gray-300 text-gray-500'
-                                }`}>
-                                  Forwarded
-                                </div>
-                              )}
-
-                              {/* Media display */}
-                              {message.mediaType && message.mediaType !== 'text' && message.mediaUrl && (
-                                <div className="mb-2">
-                                  {message.mediaType === 'image' && (
-                                    <img 
-                                      src={`https://wabizx.techwhizzc.com/${message.mediaUrl}`} 
-                                      alt="Message media" 
-                                      className="max-w-full rounded-lg cursor-pointer"
-                                      onClick={() => window.open(`https://wabizx.techwhizzc.com/${message.mediaUrl}`, '_blank')}
-                                    />
-                                  )}
-                                  {message.mediaType === 'video' && (
-                                    <video 
-                                      src={`https://wabizx.techwhizzc.com/${message.mediaUrl}`} 
-                                      controls 
-                                      className="max-w-full rounded-lg"
-                                    />
-                                  )}
-                                  {message.mediaType === 'audio' && (
-                                    <audio 
-                                      src={`https://wabizx.techwhizzc.com/${message.mediaUrl}`} 
-                                      controls 
-                                      className="w-full"
-                                    />
-                                  )}
-                                  {message.mediaType === 'document' && (
-                                    <a 
-                                      href={`https://wabizx.techwhizzc.com/${message.mediaUrl}`} 
-                                      download
-                                      className="flex items-center gap-2 p-2 bg-gray-100 rounded"
-                                    >
-                                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                      </svg>
-                                      <span className="text-sm">{message.mediaFilename || 'Document'}</span>
-                                    </a>
-                                  )}
-                                </div>
-                              )}
-
-                              <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
-                              
-                              {/* Bot Buttons */}
-                              {message.buttons && message.buttons.length > 0 && message.type === 'incoming' && (
-                                <div className="mt-3 flex flex-wrap gap-2">
-                                  {message.buttons.map((button) => (
-                                    <button
-                                      key={button.id}
-                                      onClick={() => handleBotButtonClick(button.value, message)}
-                                      disabled={sending}
-                                      className="px-4 py-2 bg-sky-50 hover:bg-sky-100 text-sky-800 text-xs font-semibold rounded-xl border border-sky-200/80 shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-md"
-                                    >
-                                      {button.text}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                              
-                              {/* Reactions */}
-                              {message.reactions && message.reactions.length > 0 && (
-                                <div className="flex flex-wrap gap-1 mt-2">
-                                  {message.reactions.map((reaction, idx) => (
-                                    <span 
-                                      key={idx}
-                                      className="px-2 py-1 bg-gray-200 rounded-full text-xs"
-                                      title={`${reaction.emoji} by user ${reaction.userId}`}
-                                    >
-                                      {reaction.emoji}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-
-                              <div className={`flex items-center gap-1 mt-1 ${
-                                message.type === 'outgoing' ? 'justify-end text-sky-100' : 'justify-start text-gray-500'
-                              }`}>
-                                <p className="text-xs">{formatMessageTime(getMessageTimestamp(message))}</p>
-                                {message.type === 'outgoing' && (
-                                  <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                    {message.status === 'read' ? (
-                                      <path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" />
-                                    ) : message.status === 'delivered' ? (
-                                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                                    ) : (
-                                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                                    )}
-                                  </svg>
+                        if (
+                          message.type === 'system' ||
+                          message.source === 'system' ||
+                          message.sender === 'system'
+                        ) {
+                          return (
+                            <div key={messageKey} className="flex justify-center mb-3">
+                              <span className="text-xs font-medium text-gray-600 px-4 py-2 rounded-lg bg-gray-100 border border-gray-200/90 text-center max-w-md shadow-sm">
+                                {personalizeSystemText(
+                                  message.content || message.message,
+                                  user?.name || user?.email
                                 )}
-                              </div>
+                              </span>
                             </div>
-                          </div>
+                          );
+                        }
+                        return (
+                          <ChatMessageItem
+                            key={messageKey}
+                            message={message}
+                            source={message.source || 'inbox'}
+                            templateCatalog={templateCatalog}
+                            apiBase={API_BASE}
+                            formatTime={() => formatMessageTime(getMessageTimestamp(message))}
+                            status={message.status}
+                            onButtonClick={
+                              message.buttons?.length > 0 &&
+                              message.type === 'incoming' &&
+                              !message.isTemplate &&
+                              !message.isTemplateSend
+                                ? (button) =>
+                                    handleBotButtonClick(button.value || button.text, message)
+                                : undefined
+                            }
+                          />
                         );
                       })}
                     </InfiniteScroll>
@@ -2659,13 +4801,15 @@ function Inbox() {
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* In-chat Intervene bar when there is a customer message and not yet intervened */}
-                {selectedContact?.phone &&
-                  !(
-                    intervenedPhones[selectedContact.phone] ||
-                    String(selectedContact?.chatStatus || '').toLowerCase() === 'intervened'
-                  ) &&
-                  messages.some((m) => m.type === 'incoming') && (
+                {/* History: read-only */}
+                {isHistoryTab && selectedContact?.phone && (
+                  <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 text-center text-sm text-slate-600">
+                    This chat is in History (older than 24 hours). You can read messages only.
+                  </div>
+                )}
+
+                {/* In-chat Intervene bar — requesting / bot only (Active already allows reply) */}
+                {showInterveneBar && (
                   <div className="bg-gradient-to-r from-amber-50/95 via-amber-50/80 to-orange-50/60 border-t border-amber-200/80 px-6 py-3 flex items-center justify-center gap-3 flex-wrap shadow-inner motion-enter">
                     <span className="text-sm text-amber-900/90 font-medium">New customer message — take over the conversation</span>
                     <button
@@ -2690,6 +4834,7 @@ function Inbox() {
                               return next;
                             });
                             fetchInboxList(false);
+                            fetchSectionChatsRef.current?.(false);
                           } else {
                             alert(result?.message || 'Failed to intervene');
                           }
@@ -2704,17 +4849,23 @@ function Inbox() {
                   </div>
                 )}
 
-                {/* Message Input: when intervened show Send; otherwise Intervene (admin) when chat has customer message or is selected */}
+                {/* Message Input — Active + Intervened (AiSensy: reply after Accept) */}
+                {!isHistoryTab && (
                 <div className="bg-white/95 backdrop-blur-md border-t border-sky-100/80 px-6 py-4 flex justify-center items-center flex-wrap gap-2 shadow-[0_-8px_28px_-12px_rgba(14,165,233,0.18)]">
                   {selectedContact?.phone && (
-                    (intervenedPhones[selectedContact.phone] ||
-                      String(selectedContact?.chatStatus || '').toLowerCase() === 'intervened') ? (
+                    canHumanReply ? (
                       <form onSubmit={handleSendMessage} className="flex flex-col gap-2 flex-1 min-w-[220px] max-w-2xl">
                         <div className="relative w-full">
                           <div className="flex items-center justify-end mb-2">
                             <button
                               type="button"
-                              onClick={() => setInterveneQuickPickerOpen((v) => !v)}
+                              onClick={() => {
+                                if (interveneQuickPickerOpen) closeIntervenePicker();
+                                else {
+                                  setIntervenePreviewItem(null);
+                                  setInterveneQuickPickerOpen(true);
+                                }
+                              }}
                               disabled={loadingInterveneOptions || sending}
                               className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border-2 border-gray-200/90 rounded-xl text-xs font-semibold text-gray-800 hover:bg-sky-50/80 hover:border-sky-200/70 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm"
                               title="Insert canned message or approved template"
@@ -2727,13 +4878,15 @@ function Inbox() {
                           {interveneQuickPickerOpen && (
                             <div
                               ref={interveneQuickPickerRef}
-                              className="motion-pop absolute right-0 bottom-full mb-2 w-[420px] max-w-[92vw] bg-white rounded-2xl border border-sky-100/90 shadow-2xl shadow-sky-900/15 z-50 overflow-hidden ring-1 ring-black/5"
+                              className="motion-pop absolute right-0 bottom-full mb-2 w-[min(440px,94vw)] max-h-[min(78vh,640px)] bg-white rounded-2xl border border-sky-100/90 shadow-2xl shadow-sky-900/15 z-50 overflow-hidden ring-1 ring-black/5 flex flex-col"
                             >
-                              <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-sky-50/40 border-b border-gray-100 flex items-center justify-between gap-2">
-                                <div className="text-sm font-bold text-gray-900 tracking-tight">Quick Insert</div>
+                              <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-sky-50/40 border-b border-gray-100 flex items-center justify-between gap-2 shrink-0">
+                                <div className="text-sm font-bold text-gray-900 tracking-tight">
+                                  {intervenePreviewItem ? 'Preview message' : 'Quick Insert'}
+                                </div>
                                 <button
                                   type="button"
-                                  onClick={() => setInterveneQuickPickerOpen(false)}
+                                  onClick={closeIntervenePicker}
                                   className="w-8 h-8 rounded-xl hover:bg-white text-gray-500 hover:text-gray-900 transition border border-transparent hover:border-gray-200"
                                   aria-label="Close"
                                 >
@@ -2741,7 +4894,69 @@ function Inbox() {
                                 </button>
                               </div>
 
-                              <div className="max-h-[380px] overflow-y-auto">
+                              {intervenePreviewItem ? (
+                                <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
+                                  <InsertMessagePreview
+                                    title={intervenePreviewItem.label || intervenePreviewItem.templateName || 'Message'}
+                                    bodyText={intervenePreviewItem.resolvedText}
+                                    preview={intervenePreviewItem.templatePreview}
+                                    apiBase={API_BASE}
+                                    hint="Review the message, then click Send to deliver it."
+                                    allowHeaderUpload={intervenePreviewItem.mode === 'template'}
+                                    templateName={intervenePreviewItem.templateName || ''}
+                                    onHeaderMediaChange={(url) => {
+                                      setIntervenePreviewItem((prev) => {
+                                        if (!prev) return prev;
+                                        const fmt =
+                                          String(prev.templatePreview?.headerFormat || 'IMAGE').toUpperCase() ||
+                                          'IMAGE';
+                                        return {
+                                          ...prev,
+                                          headerMediaUrl: url,
+                                          templatePreview: {
+                                            ...(prev.templatePreview || {}),
+                                            headerFormat: fmt,
+                                            headerImageUrl: url,
+                                            header: {
+                                              type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase(),
+                                              url,
+                                            },
+                                          },
+                                        };
+                                      });
+                                    }}
+                                  />
+                                  <div className="flex items-center gap-2 px-4 py-3 border-t border-gray-100 bg-white shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={cancelIntervenePreview}
+                                      disabled={sending}
+                                      className="flex-1 px-4 py-2.5 rounded-xl border-2 border-gray-200 bg-white text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                                    >
+                                      Back
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={confirmInterveneSend}
+                                      disabled={sending}
+                                      className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-sky-600 to-blue-700 text-white text-sm font-semibold shadow-md disabled:opacity-50"
+                                    >
+                                      {sending ? 'Sending…' : 'Send'}
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                              <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-gray-100 shrink-0">
+                                  <input
+                                    type="text"
+                                    value={insertOptionSearch}
+                                    onChange={(e) => setInsertOptionSearch(e.target.value)}
+                                    placeholder="Search canned or template by name"
+                                    className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-sky-400/40 focus:border-sky-400 outline-none"
+                                  />
+                                </div>
+                              <div className="flex-1 min-h-0 overflow-y-auto max-h-[min(55vh,440px)]">
                                 {loadingInterveneOptions ? (
                                   <div className="px-4 py-6 flex items-center gap-2 text-sm text-gray-500">
                                     <div className="h-5 w-5 rounded-full border-2 border-sky-200 border-t-sky-600 animate-spin" />
@@ -2757,62 +4972,87 @@ function Inbox() {
 
                                     <div className="px-4 py-3">
                                       <div className="text-xs font-bold text-sky-700 uppercase tracking-wide mb-2">Canned Messages</div>
-                                      {interveneCannedOptions.length === 0 ? (
-                                        <div className="text-xs text-gray-500">No canned messages.</div>
-                                      ) : (
+                                      {(() => {
+                                        const q = insertOptionSearch.trim().toLowerCase();
+                                        const canned = interveneCannedOptions.filter((opt) => {
+                                          if (!q) return true;
+                                          return (
+                                            String(opt.label || '').toLowerCase().includes(q) ||
+                                            String(opt.insertValue || '').toLowerCase().includes(q)
+                                          );
+                                        });
+                                        if (canned.length === 0) {
+                                          return <div className="text-xs text-gray-500">No canned messages.</div>;
+                                        }
+                                        return (
                                         <div className="space-y-1.5">
-                                          {interveneCannedOptions.map((opt) => {
+                                          {canned.map((opt) => {
                                             const preview = String(opt.insertValue || "").trim();
                                             const previewText =
-                                              preview.length > 48 ? `${preview.slice(0, 48)}...` : preview;
+                                              preview.length > 72 ? `${preview.slice(0, 72)}...` : preview;
                                             return (
                                               <button
                                                 key={opt.id}
                                                 type="button"
-                                                onClick={() => sendInterveneQuickItem(opt)}
+                                                onClick={() => selectInterveneItemForPreview(opt)}
                                                 disabled={sending}
                                                 className="w-full text-left px-3 py-2.5 rounded-xl hover:bg-sky-50/80 border-2 border-gray-100 hover:border-sky-200/80 disabled:opacity-50 disabled:cursor-not-allowed transition"
                                               >
                                                 <div className="text-sm font-semibold text-gray-900 truncate">{opt.label}</div>
-                                                <div className="text-xs text-gray-500 truncate mt-0.5">{previewText || "—"}</div>
+                                                <div className="text-xs text-gray-500 mt-0.5 whitespace-pre-wrap break-words line-clamp-3">{previewText || "—"}</div>
                                               </button>
                                             );
                                           })}
                                         </div>
-                                      )}
+                                        );
+                                      })()}
                                     </div>
 
                                     <div className="border-t border-gray-100" />
 
                                     <div className="px-4 py-3">
                                       <div className="text-xs font-bold text-sky-700 uppercase tracking-wide mb-2">Approved Templates</div>
-                                      {interveneTemplateOptions.length === 0 ? (
-                                        <div className="text-xs text-gray-500">No approved templates.</div>
-                                      ) : (
+                                      {(() => {
+                                        const q = insertOptionSearch.trim().toLowerCase();
+                                        const templates = interveneTemplateOptions.filter((opt) => {
+                                          if (!q) return true;
+                                          return (
+                                            String(opt.label || '').toLowerCase().includes(q) ||
+                                            String(opt.templateName || '').toLowerCase().includes(q) ||
+                                            String(opt.insertValue || '').toLowerCase().includes(q)
+                                          );
+                                        });
+                                        if (templates.length === 0) {
+                                          return <div className="text-xs text-gray-500">No approved templates.</div>;
+                                        }
+                                        return (
                                         <div className="space-y-1.5">
-                                          {interveneTemplateOptions.map((opt) => {
+                                          {templates.map((opt) => {
                                             const preview = String(opt.insertValue || "").trim();
                                             const previewText =
-                                              preview.length > 48 ? `${preview.slice(0, 48)}...` : preview;
+                                              preview.length > 72 ? `${preview.slice(0, 72)}...` : preview;
                                             return (
                                               <button
                                                 key={opt.id}
                                                 type="button"
-                                                onClick={() => sendInterveneQuickItem(opt)}
+                                                onClick={() => selectInterveneItemForPreview(opt)}
                                                 disabled={sending}
                                                 className="w-full text-left px-3 py-2.5 rounded-xl hover:bg-sky-50/80 border-2 border-gray-100 hover:border-sky-200/80 disabled:opacity-50 disabled:cursor-not-allowed transition"
                                               >
                                                 <div className="text-sm font-semibold text-gray-900 truncate">{opt.label}</div>
-                                                <div className="text-xs text-gray-500 truncate mt-0.5">{previewText || "—"}</div>
+                                                <div className="text-xs text-gray-500 mt-0.5 whitespace-pre-wrap break-words line-clamp-3">{previewText || "—"}</div>
                                               </button>
                                             );
                                           })}
                                         </div>
-                                      )}
+                                        );
+                                      })()}
                                     </div>
                                   </>
                                 )}
                               </div>
+                              </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -2872,6 +5112,7 @@ function Inbox() {
                     )
                   )}
                 </div>
+                )}
               </>
             ) : (
               <div className="flex-1 flex items-center justify-center bg-gradient-to-b from-sky-50/40 via-transparent to-sky-100/20">
@@ -2971,6 +5212,19 @@ function Inbox() {
           </div>
         </div>
       )}
+
+      <ResolveDispositionModal
+        open={resolveDispositionOpen}
+        selected={selectedDisposition}
+        onSelect={setSelectedDisposition}
+        onConfirm={confirmResolveIntervenedChat}
+        confirming={resolving}
+        onCancel={() => {
+          if (resolving) return;
+          setResolveDispositionOpen(false);
+          setSelectedDisposition(null);
+        }}
+      />
     </div>
   );
 }

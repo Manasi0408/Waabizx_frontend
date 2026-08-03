@@ -1,4 +1,5 @@
-const API_URL = 'https://wabizx.techwhizzc.com/api';
+// const API_URL = 'https://wabizx.techwhizzc.com/api';
+const API_URL = 'https://api.waabizx.com/api';
 
 // Get token from localStorage
 const getToken = () => {

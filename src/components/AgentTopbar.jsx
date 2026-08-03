@@ -98,12 +98,15 @@ function AgentTopbar({ onMenuClick }) {
           </div>
 
           <div className="flex items-center gap-2 border-l border-gray-200/80 pl-2 md:pl-3">
-            <div
-              className="w-9 h-9 rounded-full bg-gradient-to-br from-sky-500 via-sky-600 to-blue-700 flex items-center justify-center shadow-md shadow-sky-500/30 ring-2 ring-sky-100"
-              title={displayAgentName}
+            <button
+              type="button"
+              onClick={() => navigate("/settings")}
+              className="w-9 h-9 rounded-full bg-gradient-to-br from-sky-500 via-sky-600 to-blue-700 flex items-center justify-center shadow-md shadow-sky-500/30 ring-2 ring-sky-100 hover:ring-sky-300 hover:scale-[1.03] transition-all focus:outline-none"
+              title="Your Profile"
+              aria-label="Open profile"
             >
               <span className="text-white font-semibold text-xs">{userInitial}</span>
-            </div>
+            </button>
             <button
               type="button"
               onClick={handleLogout}

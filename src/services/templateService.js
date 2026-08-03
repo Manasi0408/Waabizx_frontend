@@ -1,4 +1,5 @@
-const API_URL = 'https://wabizx.techwhizzc.com/api';
+// const API_URL = 'https://wabizx.techwhizzc.com/api';
+const API_URL = 'https://api.waabizx.com/api';
 
 // Get token from localStorage
 const getToken = () => {
@@ -127,10 +128,7 @@ export const getTemplateById = async (templateId) => {
 
     const response = await fetch(`${API_URL}/templates/${templateId}`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      }
+      headers: authHeaders(),
     });
 
     const data = await response.json();
@@ -220,10 +218,7 @@ export const createMetaTemplate = async (templateData) => {
 
     const response = await fetch(`${API_URL}/templates/create`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: authHeaders(),
       body: JSON.stringify(templateData)
     });
 
@@ -243,6 +238,38 @@ export const createMetaTemplate = async (templateData) => {
     }
 
     throw new Error(normalizeErrorMessage(data, 'Failed to submit template to Meta'));
+  } catch (error) {
+    throw error;
+  }
+};
+
+// Get one template from Meta API (includes components / header format)
+export const getMetaTemplateDetails = async (templateId) => {
+  try {
+    const token = getToken();
+    if (!token) {
+      throw new Error('No token found');
+    }
+    if (!templateId) {
+      throw new Error('Template ID is required');
+    }
+
+    const response = await fetch(`${API_URL}/templates/meta/${encodeURIComponent(templateId)}`, {
+      method: 'GET',
+      headers: authHeaders(),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(normalizeErrorMessage(data, 'Failed to fetch template details from Meta'));
+    }
+
+    if (data.success) {
+      return data.template;
+    }
+
+    throw new Error(data.message || 'Failed to fetch template details from Meta');
   } catch (error) {
     throw error;
   }

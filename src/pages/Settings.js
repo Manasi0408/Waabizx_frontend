@@ -1,13 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import BrandLogoMark from '../components/BrandLogoMark';
 import { useNavigate, Link } from 'react-router-dom';
-import { getProfile, isAuthenticated, logout, updateProfile, readSessionUser } from '../services/authService';
+import { getProfile, isAuthenticated, logout, updateProfile, readSessionUser, requestChangePassword, changePasswordWithOtp } from '../services/authService';
 import { getSettings } from '../services/settingsService';
 import { getNotifications, markAsRead, markAllAsRead } from '../services/notificationService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import PasswordInput from '../components/PasswordInput';
+import AgentSidebar from '../components/AgentSidebar';
+import AgentTopbar from '../components/AgentTopbar';
 
 function Settings() {
   const navigate = useNavigate();
@@ -33,6 +36,15 @@ function Settings() {
   const [avatarPreview, setAvatarPreview] = useState('');
   const [avatarDirty, setAvatarDirty] = useState(false);
   const photoInputRef = useRef(null);
+  const [settingsSection, setSettingsSection] = useState('profile');
+  const [pwdStep, setPwdStep] = useState('request');
+  const [pwdOtp, setPwdOtp] = useState('');
+  const [pwdNew, setPwdNew] = useState('');
+  const [pwdConfirm, setPwdConfirm] = useState('');
+  const [pwdLoading, setPwdLoading] = useState(false);
+  const [pwdError, setPwdError] = useState('');
+  const [pwdInfo, setPwdInfo] = useState('');
+  const [pwdSuccess, setPwdSuccess] = useState('');
 
   const [settings, setSettings] = useState({
     whatsappNumber: '',
@@ -290,6 +302,75 @@ function Settings() {
     }
   };
 
+  const resetChangePasswordForm = () => {
+    setPwdStep('request');
+    setPwdOtp('');
+    setPwdNew('');
+    setPwdConfirm('');
+    setPwdError('');
+    setPwdInfo('');
+    setPwdSuccess('');
+    setPwdLoading(false);
+  };
+
+  const handleOpenChangePassword = () => {
+    setSettingsSection('password');
+    resetChangePasswordForm();
+  };
+
+  const handleChangePasswordRequest = async (e) => {
+    e?.preventDefault?.();
+    setPwdError('');
+    setPwdInfo('');
+    setPwdSuccess('');
+    setPwdOtp('');
+    setPwdLoading(true);
+    try {
+      const response = await requestChangePassword();
+      if (response?.success) {
+        setPwdInfo(
+          response?.message ||
+            `If an account exists for ${user?.email || 'your email'}, you will receive an OTP shortly.`
+        );
+        setPwdStep('reset');
+      } else {
+        setPwdError(response?.message || 'Failed to send OTP');
+      }
+    } catch (err) {
+      setPwdError(err.message || 'Failed to send OTP');
+    } finally {
+      setPwdLoading(false);
+    }
+  };
+
+  const handleChangePasswordReset = async (e) => {
+    e?.preventDefault?.();
+    setPwdError('');
+    setPwdSuccess('');
+    if (pwdNew !== pwdConfirm) {
+      setPwdError('Passwords do not match');
+      return;
+    }
+    setPwdLoading(true);
+    try {
+      const response = await changePasswordWithOtp(pwdOtp, pwdNew);
+      if (response?.success) {
+        setPwdSuccess(response?.message || 'Password changed successfully');
+        setPwdStep('request');
+        setPwdOtp('');
+        setPwdNew('');
+        setPwdConfirm('');
+        setPwdInfo('');
+      } else {
+        setPwdError(response?.message || 'Password change failed');
+      }
+    } catch (err) {
+      setPwdError(err.message || 'Password change failed');
+    } finally {
+      setPwdLoading(false);
+    }
+  };
+
   const unreadCount = notifications.filter((n) => !n.is_read).length;
 
   const formatTime = (dateString) => {
@@ -320,9 +401,19 @@ function Settings() {
   const headerAvatar = user?.avatar || readSessionUser()?.avatar || '';
   const sessionRole = String(localStorage.getItem('role') || user?.role || '').toLowerCase().trim();
   const isSuperAdmin = sessionRole === 'super_admin' || sessionRole === 'superadmin';
+  const isAgent = sessionRole === 'agent';
+  const canChangePassword = isSuperAdmin || sessionRole === 'admin';
+  const activeSettingsSection =
+    settingsSection === 'password' && canChangePassword ? 'password' : 'profile';
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50 overflow-hidden">
+    <div className={`h-screen flex bg-gray-50 overflow-hidden ${isAgent ? 'flex-row' : 'flex-col'}`}>
+      {isAgent ? <AgentSidebar open={sidebarOpen || true} /> : null}
+
+      <div className={`flex flex-col min-w-0 min-h-0 ${isAgent ? 'flex-1' : 'flex-1'}`}>
+      {isAgent ? (
+        <AgentTopbar onMenuClick={() => setSidebarOpen((o) => !o)} />
+      ) : (
       <header className="motion-header-enter shrink-0 z-10 bg-white/90 backdrop-blur-md border-b border-gray-200/80 px-4 md:px-8 py-3.5 md:py-4 flex justify-between items-center shadow-sm shadow-gray-200/50">
         <div className="flex items-center gap-4 min-w-0">
           {!isSuperAdmin && (
@@ -500,9 +591,10 @@ function Settings() {
           </button>
         </HeaderRightActions>
       </header>
+      )}
 
       <div className="flex flex-1 min-h-0">
-        {!isSuperAdmin && (
+        {!isAgent && !isSuperAdmin && (
           <AppShellSidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)}>
             <MainSidebarNav onNavigate={() => setSidebarOpen(false)} />
           </AppShellSidebar>
@@ -521,7 +613,45 @@ function Settings() {
                 </div>
               )}
 
-              <div className="motion-enter motion-hover-lift bg-white/95 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-200/40 border border-gray-100/90 ring-1 ring-gray-100/80 p-6 md:p-8">
+              <div className="motion-enter flex flex-col md:flex-row gap-6 md:gap-8 items-start">
+                <aside className="w-full md:w-56 shrink-0 bg-white/95 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-200/40 border border-gray-100/90 ring-1 ring-gray-100/80 p-4">
+                  <h3 className="text-base font-bold text-gray-900 mb-3 px-2">Your Account</h3>
+                  <nav className="space-y-1">
+                    <button
+                      type="button"
+                      onClick={() => setSettingsSection('profile')}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition ${
+                        activeSettingsSection === 'profile'
+                          ? 'bg-gray-100 text-gray-900'
+                          : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <svg className="w-5 h-5 shrink-0 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                      </svg>
+                      Your Profile
+                    </button>
+                    {canChangePassword ? (
+                    <button
+                      type="button"
+                      onClick={handleOpenChangePassword}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition ${
+                        activeSettingsSection === 'password'
+                          ? 'bg-gray-100 text-gray-900'
+                          : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <svg className="w-5 h-5 shrink-0 text-gray-800" fill="currentColor" viewBox="0 0 24 24" aria-hidden>
+                        <path d="M12 1a5 5 0 00-5 5v3H6a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2v-8a2 2 0 00-2-2h-1V6a5 5 0 00-5-5zm-3 8V6a3 3 0 116 0v3H9zm3 5a1.5 1.5 0 110 3 1.5 1.5 0 010-3z" />
+                      </svg>
+                      Change Password
+                    </button>
+                    ) : null}
+                  </nav>
+                </aside>
+
+                {activeSettingsSection === 'profile' ? (
+              <div className="motion-enter motion-hover-lift flex-1 min-w-0 bg-white/95 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-200/40 border border-gray-100/90 ring-1 ring-gray-100/80 p-6 md:p-8">
                 <h2 className="text-2xl font-bold bg-gradient-to-r from-gray-800 to-gray-600 bg-clip-text text-transparent mb-6">
                   Your Profile
                 </h2>
@@ -706,9 +836,119 @@ function Settings() {
                   </div>
                 </div>
               </div>
+                ) : (
+              <div className="motion-enter motion-hover-lift flex-1 min-w-0 bg-white/95 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-200/40 border border-gray-100/90 ring-1 ring-gray-100/80 p-6 md:p-8">
+                <h2 className="text-2xl font-bold bg-gradient-to-r from-gray-800 to-gray-600 bg-clip-text text-transparent mb-2">
+                  Change Password
+                </h2>
+                <p className="text-sm text-gray-500 mb-6">
+                  Same process as Forgot Password: we send an OTP to{' '}
+                  <span className="font-semibold text-gray-700">{user?.email || 'your email'}</span>, then you set a new password.
+                </p>
+
+                {pwdError && (
+                  <div className="mb-4 bg-red-50 border border-red-200/90 text-red-700 px-4 py-3 rounded-xl text-sm shadow-sm ring-1 ring-red-100/50" role="alert">
+                    {pwdError}
+                  </div>
+                )}
+                {pwdInfo && pwdStep === 'reset' && (
+                  <div className="mb-4 bg-emerald-50 border border-emerald-200/90 text-emerald-800 px-4 py-3 rounded-xl text-sm shadow-sm ring-1 ring-emerald-100/50" role="status">
+                    {pwdInfo}
+                  </div>
+                )}
+                {pwdSuccess && (
+                  <div className="mb-4 bg-emerald-50 border border-emerald-200/90 text-emerald-800 px-4 py-3 rounded-xl text-sm shadow-sm ring-1 ring-emerald-100/50" role="status">
+                    {pwdSuccess}
+                  </div>
+                )}
+
+                {pwdStep === 'request' ? (
+                  <form onSubmit={handleChangePasswordRequest} className="max-w-md space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Email</label>
+                      <input
+                        type="email"
+                        value={user?.email || ''}
+                        disabled
+                        className="w-full px-4 py-2.5 bg-gray-50/80 border-2 border-gray-100 rounded-xl text-sm text-gray-600"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={pwdLoading || !user?.email}
+                      className="w-full min-h-[44px] rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 py-3 text-sm font-bold text-white shadow-lg shadow-sky-600/25 hover:from-sky-500 hover:to-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      {pwdLoading ? 'Sending…' : 'Send OTP'}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleChangePasswordReset} className="max-w-md space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">OTP</label>
+                      <input
+                        type="text"
+                        value={pwdOtp}
+                        onChange={(e) => setPwdOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        required
+                        inputMode="numeric"
+                        className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-400/30 outline-none"
+                        placeholder="Enter OTP"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">New password</label>
+                      <PasswordInput
+                        value={pwdNew}
+                        onChange={(e) => setPwdNew(e.target.value)}
+                        required
+                        autoComplete="new-password"
+                        className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-400/30 outline-none"
+                        placeholder="At least 4 characters"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Confirm password</label>
+                      <PasswordInput
+                        value={pwdConfirm}
+                        onChange={(e) => setPwdConfirm(e.target.value)}
+                        required
+                        autoComplete="new-password"
+                        className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-sky-500 focus:ring-2 focus:ring-sky-400/30 outline-none"
+                        placeholder="Repeat password"
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPwdStep('request');
+                          setPwdOtp('');
+                          setPwdNew('');
+                          setPwdConfirm('');
+                          setPwdError('');
+                          setPwdInfo('');
+                        }}
+                        className="px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+                      >
+                        Back
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={pwdLoading}
+                        className="flex-1 min-h-[44px] rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 py-3 text-sm font-bold text-white shadow-lg shadow-sky-600/25 hover:from-sky-500 hover:to-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                      >
+                        {pwdLoading ? 'Updating…' : 'Change password'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+                )}
+              </div>
             </div>
           </div>
         </main>
+      </div>
       </div>
     </div>
   );

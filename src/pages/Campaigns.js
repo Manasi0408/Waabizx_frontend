@@ -6,7 +6,6 @@ import { getNotifications, markAsRead, markAllAsRead } from '../services/notific
 import {
   getCampaigns,
   createCampaign,
-  updateCampaign,
   deleteCampaign,
   startCampaign,
   pauseCampaign,
@@ -19,6 +18,12 @@ import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
 import { uploadCSV } from '../services/broadcastService';
+import {
+  estimateCampaignMessageCost,
+  formatInr,
+  getBillingCategoryLabel,
+  getMessageRateForBillingCategory,
+} from '../utils/planPricing';
 // Campaign creation now uses parse-only CSV upload (no heavy contact loading)
 
 function Campaigns() {
@@ -34,7 +39,6 @@ function Campaigns() {
   const [pagination, setPagination] = useState({ total: 0, page: 1, pages: 1, limit: 10 });
   const [filters, setFilters] = useState({ status: '', type: '', page: 1 });
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [showAudienceModal, setShowAudienceModal] = useState(false);
@@ -243,31 +247,6 @@ function Campaigns() {
     }
   };
 
-  const handleEditCampaign = async (e) => {
-    e.preventDefault();
-    setError('');
-    setSuccess('');
-    setSaving(true);
-
-    try {
-      await updateCampaign(selectedCampaign.id, {
-        name: formData.name,
-        template_name: formData.template_name,
-        template_language: formData.template_language,
-        schedule_time: formData.schedule_time || null
-      });
-      setSuccess('Campaign updated successfully!');
-      setShowEditModal(false);
-      setSelectedCampaign(null);
-      fetchCampaigns();
-      setTimeout(() => setSuccess(''), 3000);
-    } catch (error) {
-      setError(error.message || 'Failed to update campaign');
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleDeleteCampaign = async () => {
     try {
       await deleteCampaign(selectedCampaign.id);
@@ -319,6 +298,20 @@ function Campaigns() {
       const details = await getCampaignById(campaign.id);
       // Backend returns { id, name, status, stats: { total, sent, delivered, read, failed } }
       // Map it to include all fields for display
+      const sentCount = details.stats?.sent || details.sent || campaign.sent || 0;
+      const billingCategory =
+        details.template_billing_category ||
+        campaign.template_billing_category ||
+        'marketing';
+      const ratePerMessage =
+        details.rate_per_message != null
+          ? Number(details.rate_per_message)
+          : getMessageRateForBillingCategory(billingCategory);
+      const totalCreditUsage =
+        details.totalCreditUsage ??
+        campaign.totalCreditUsage ??
+        estimateCampaignMessageCost(sentCount, billingCategory);
+
       const campaignData = {
         ...details,
         id: details.id || campaign.id,
@@ -326,10 +319,14 @@ function Campaigns() {
         status: details.status || campaign.status,
         template_name: details.template_name || campaign.template_name,
         template_language: details.template_language || campaign.template_language,
+        template_billing_category: billingCategory,
+        template_category_label:
+          details.template_category_label || getBillingCategoryLabel(billingCategory),
+        rate_per_message: ratePerMessage,
         createdAt: details.createdAt || campaign.createdAt,
         updatedAt: details.updatedAt || campaign.updatedAt,
         total: details.stats?.total || details.total || campaign.total || 0,
-        sent: details.stats?.sent || details.sent || campaign.sent || 0,
+        sent: sentCount,
         delivered: details.stats?.delivered || details.delivered || campaign.delivered || 0,
         read: details.stats?.read || details.read || campaign.read || 0,
         failed: details.stats?.failed || details.failed || campaign.failed || 0,
@@ -338,10 +335,7 @@ function Campaigns() {
           campaign.totalRecipients ??
           campaign.total ??
           0,
-        totalCreditUsage:
-          details.totalCreditUsage ??
-          campaign.totalCreditUsage ??
-          0,
+        totalCreditUsage,
         stats: details.stats || {
           total: details.total || campaign.total || 0,
           sent: details.sent || campaign.sent || 0,
@@ -818,32 +812,6 @@ function Campaigns() {
                             )}
                             <button
                               type="button"
-                              onClick={() => {
-                                setSelectedCampaign(campaign);
-                                setFormData((prev) => ({
-                                  ...prev,
-                                  name: campaign.name || '',
-                                  template_name: campaign.template_name || '',
-                                  template_language: campaign.template_language || 'en_US',
-                                  schedule_time: campaign.schedule_time || null,
-                                }));
-                                setShowEditModal(true);
-                                setError('');
-                              }}
-                              className="p-2 text-gray-600 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-all duration-200 active:scale-95"
-                              title="Edit Campaign"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth={2}
-                                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                                />
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
                               onClick={() => handleViewDetails(campaign)}
                               className="p-2 text-gray-600 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-all duration-200 active:scale-95"
                               title="View Details"
@@ -1156,121 +1124,6 @@ function Campaigns() {
         </div>
       )}
 
-      {/* Edit Campaign Modal */}
-      {showEditModal && selectedCampaign && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-2xl w-full max-h-[90vh] overflow-y-auto ring-1 ring-black/5">
-            <div className="p-5 md:p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 via-sky-50/50 to-sky-50/30">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-xl md:text-2xl font-bold text-gray-900 tracking-tight">Edit Campaign</h3>
-                  <p className="text-sm text-gray-600 mt-1">Update name, template, and schedule</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowEditModal(false);
-                    setSelectedCampaign(null);
-                    setFormData({
-                      name: '',
-                      template_name: '',
-                      template_language: 'en_US',
-                      schedule_time: null,
-                      audience: [{ phone: '', var1: '', var2: '', var3: '', var4: '', var5: '' }]
-                    });
-                    setError('');
-                  }}
-                  className="shrink-0 text-gray-400 hover:text-gray-700 rounded-xl p-2 transition-all duration-200 hover:bg-white/90 active:scale-95 ring-1 ring-transparent hover:ring-gray-200/80"
-                  aria-label="Close"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <form onSubmit={handleEditCampaign} className="p-5 md:p-6 space-y-5 bg-gradient-to-b from-white to-sky-50/20">
-              <div className="rounded-2xl border border-gray-100/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-gray-100/70 space-y-4">
-                <p className="text-xs font-semibold uppercase tracking-wider text-sky-700/90">Campaign details</p>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-800 mb-2">Campaign Name *</label>
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    required
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                  />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template Name *</label>
-                    <input
-                      type="text"
-                      value={formData.template_name}
-                      onChange={(e) => setFormData({ ...formData, template_name: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                      placeholder="e.g., order_confirmation"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template Language *</label>
-                    <select
-                      value={formData.template_language}
-                      onChange={(e) => setFormData({ ...formData, template_language: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer"
-                    >
-                      <option value="en_US">English (US)</option>
-                      <option value="en_GB">English (UK)</option>
-                      <option value="hi_IN">Hindi</option>
-                      <option value="mr_IN">Marathi</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-800 mb-2">Schedule (Optional)</label>
-                  <input
-                    type="datetime-local"
-                    value={formData.schedule_time || ''}
-                    onChange={(e) => setFormData({ ...formData, schedule_time: e.target.value || null })}
-                    className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                  />
-                </div>
-              </div>
-              <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-200/80">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowEditModal(false);
-                    setSelectedCampaign(null);
-                    setFormData({
-                      name: '',
-                      template_name: '',
-                      template_language: 'en_US',
-                      schedule_time: null,
-                      audience: [{ phone: '', var1: '', var2: '', var3: '', var4: '', var5: '' }]
-                    });
-                    setError('');
-                  }}
-                  className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
-                >
-                  {saving ? 'Updating...' : 'Update Campaign'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Delete Confirmation Modal */}
       {showDeleteModal && selectedCampaign && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -1336,6 +1189,18 @@ function Campaigns() {
                   <label className="text-sm font-medium text-gray-600">Template Language</label>
                   <p className="text-gray-900">{campaignDetails.template_language || 'N/A'}</p>
                 </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-600">Template Category</label>
+                  <p className="text-gray-900">{campaignDetails.template_category_label || 'Marketing'}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-600">Rate per message</label>
+                  <p className="text-gray-900">
+                    {campaignDetails.template_billing_category === 'service'
+                      ? 'Free'
+                      : `₹ ${formatInr(campaignDetails.rate_per_message ?? 0)}`}
+                  </p>
+                </div>
               </div>
               <div>
                 <label className="text-sm font-medium text-gray-600">Status</label>
@@ -1351,10 +1216,10 @@ function Campaigns() {
                 <div className="bg-amber-50 p-4 rounded-xl ring-1 ring-amber-100/80">
                   <label className="text-sm font-medium text-gray-600">Total Credit Usage</label>
                   <p className="text-2xl font-bold text-amber-700">
-                    ₹{Number(campaignDetails.totalCreditUsage ?? 0).toLocaleString('en-IN', {
-                      minimumFractionDigits: 3,
-                      maximumFractionDigits: 3
-                    })}
+                    ₹ {formatInr(campaignDetails.totalCreditUsage ?? 0)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-amber-800/80">
+                    {campaignDetails.sent || 0} sent × ₹ {formatInr(campaignDetails.rate_per_message ?? 0)}
                   </p>
                 </div>
                 <div className="bg-sky-50 p-4 rounded-xl ring-1 ring-sky-100/80 motion-hover-lift">

@@ -6,6 +6,7 @@ import TemplateMessagesPage from "./TemplateMessagesPage";
 import ManageAnalyticsPage from "./ManageAnalyticsPage";
 import CannedMessagesPage from "./CannedMessagesPage";
 import OptinManagementPage from "./OptinManagementPage";
+import TagsPage from "./TagsPage";
 import MainSidebarNav from "../components/MainSidebarNav";
 import AppShellSidebar from "../components/AppShellSidebar";
 import AdminHeaderProjectSwitch from "../components/AdminHeaderProjectSwitch";
@@ -291,6 +292,7 @@ function ManagePage() {
     { id: "template", label: "Template Message" },
     { id: "canned", label: "Canned Message" },
     { id: "optin", label: "Opt-in Management" },
+    { id: "tags", label: "Tags" },
     { id: "agents", label: "Agents" },
     { id: "analytics", label: "Analytics" },
   ].filter((item) => {
@@ -432,6 +434,10 @@ function ManagePage() {
               <ManageAnalyticsPage />
             ) : activeSub === "canned" ? (
               <CannedMessagesPage />
+            ) : activeSub === "tags" ? (
+              <div className="p-6 md:p-8 motion-enter">
+                <TagsPage embedded />
+              </div>
             ) : activeSub !== "agents" ? (
               <div className="p-6 md:p-8 motion-enter">
                 <div className="motion-hover-lift bg-white/95 backdrop-blur-sm border border-gray-100/90 rounded-2xl p-8 shadow-lg shadow-gray-200/40 ring-1 ring-gray-100/80 max-w-lg">

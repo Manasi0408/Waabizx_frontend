@@ -1,7 +1,8 @@
 import axios from "axios";
 
 const instance = axios.create({
-  baseURL: "https://wabizx.techwhizzc.com/api"
+  // baseURL: "https://wabizx.techwhizzc.com/api"
+  baseURL: "https://api.waabizx.com/api"
 });
 
 // Automatically attach token in every request

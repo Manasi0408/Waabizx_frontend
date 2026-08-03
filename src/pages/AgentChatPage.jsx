@@ -8,6 +8,7 @@ import {
   sendMessage as sendChatMessage,
 } from "../api/chatApi";
 import { initializeSocket, onSocketEvent, offSocketEvent } from "../services/socketService";
+import ResolveDispositionModal from "../components/ResolveDispositionModal";
 
 const AgentChatPage = () => {
   const [chats, setChats] = useState([]);
@@ -17,6 +18,9 @@ const AgentChatPage = () => {
   const [agentId, setAgentId] = useState(null);
   const [messageText, setMessageText] = useState("");
   const [sending, setSending] = useState(false);
+  const [resolveDispositionOpen, setResolveDispositionOpen] = useState(false);
+  const [selectedDisposition, setSelectedDisposition] = useState(null);
+  const [resolving, setResolving] = useState(false);
 
   useEffect(() => {
     let userId = null;
@@ -119,11 +123,27 @@ const AgentChatPage = () => {
     loadChats();
   };
 
-  const handleClose = async (id) => {
-    await closeChat(id);
-    setSelectedChat(null);
-    setMessageText("");
-    loadChats();
+  const handleClose = () => {
+    if (!selectedChat?.id || resolving) return;
+    setSelectedDisposition(null);
+    setResolveDispositionOpen(true);
+  };
+
+  const confirmClose = async () => {
+    if (!selectedChat?.id || resolving || !selectedDisposition) return;
+    setResolving(true);
+    try {
+      await closeChat(selectedChat.id, selectedDisposition);
+      setResolveDispositionOpen(false);
+      setSelectedDisposition(null);
+      setSelectedChat(null);
+      setMessageText("");
+      loadChats();
+    } catch (err) {
+      alert(err?.message || "Failed to resolve chat");
+    } finally {
+      setResolving(false);
+    }
   };
 
   const isIntervened = selectedChat && String(selectedChat.status || "").toLowerCase() === "intervened";
@@ -259,7 +279,9 @@ const AgentChatPage = () => {
                       {sending ? "Sending..." : "Send"}
                     </button>
                   </form>
-                  <button onClick={() => handleClose(selectedChat.id)}>Close Chat</button>
+                  <button onClick={handleClose} disabled={resolving}>
+                    {resolving ? "Resolving…" : "Close Chat"}
+                  </button>
                 </>
               ) : (
                 <>
@@ -268,7 +290,9 @@ const AgentChatPage = () => {
                   >
                     Intervene
                   </button>
-                  <button onClick={() => handleClose(selectedChat.id)}>Close Chat</button>
+                  <button onClick={handleClose} disabled={resolving}>
+                    {resolving ? "Resolving…" : "Close Chat"}
+                  </button>
                 </>
               )}
             </div>
@@ -277,6 +301,19 @@ const AgentChatPage = () => {
           <h3>Select a chat</h3>
         )}
       </div>
+
+      <ResolveDispositionModal
+        open={resolveDispositionOpen}
+        selected={selectedDisposition}
+        onSelect={setSelectedDisposition}
+        onConfirm={confirmClose}
+        confirming={resolving}
+        onCancel={() => {
+          if (resolving) return;
+          setResolveDispositionOpen(false);
+          setSelectedDisposition(null);
+        }}
+      />
     </div>
   );
 };

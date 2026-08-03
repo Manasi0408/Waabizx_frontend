@@ -1,4 +1,5 @@
-const API_BASE = (process.env.REACT_APP_API_URL || 'https://wabizx.techwhizzc.com').replace(/\/$/, '');
+// const API_BASE = (process.env.REACT_APP_API_URL || 'https://wabizx.techwhizzc.com').replace(/\/$/, '');
+const API_BASE = (process.env.REACT_APP_API_URL || 'https://api.waabizx.com').replace(/\/$/, '');
 const API_URL = `${API_BASE}/api`;
 
 const getToken = () => localStorage.getItem('token');
@@ -154,11 +155,12 @@ export const getContacts = async (filters = {}) => {
       throw new Error('No token found');
     }
 
-    const { status, type, search, page = 1, limit = 20 } = filters;
+    const { status, type, search, tag, page = 1, limit = 20 } = filters;
     const params = new URLSearchParams();
     if (status) params.append('status', status);
     if (type) params.append('type', type);
     if (search) params.append('search', search);
+    if (tag) params.append('tag', tag);
     params.append('page', page);
     params.append('limit', limit);
 

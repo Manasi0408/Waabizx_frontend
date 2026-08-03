@@ -1,4 +1,6 @@
-const API_URL = 'https://wabizx.techwhizzc.com/api';
+// const API_BASE = (process.env.REACT_APP_API_URL || 'https://wabizx.techwhizzc.com').replace(/\/$/, '');
+const API_BASE = (process.env.REACT_APP_API_URL || 'https://api.waabizx.com').replace(/\/$/, '');
+const API_URL = `${API_BASE}/api`;
 
 // Get token from localStorage
 const getToken = () => {
@@ -170,5 +172,31 @@ export const markAsRead = async (phone) => {
   } catch (error) {
     throw error;
   }
+};
+
+const safePhonePath = (phone) => String(phone || '').replace(/\+/g, '%2B');
+
+export const getContactCampaigns = async (phone) => {
+  const response = await fetch(`${API_URL}/inbox/${safePhonePath(phone)}/campaigns`, {
+    method: 'GET',
+    headers: buildHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.message || 'Failed to fetch contact campaigns');
+  }
+  return Array.isArray(data.campaigns) ? data.campaigns : [];
+};
+
+export const getContactPayments = async (phone) => {
+  const response = await fetch(`${API_URL}/inbox/${safePhonePath(phone)}/payments`, {
+    method: 'GET',
+    headers: buildHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || data.message || 'Failed to fetch contact payments');
+  }
+  return Array.isArray(data.payments) ? data.payments : [];
 };
 

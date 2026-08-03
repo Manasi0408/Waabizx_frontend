@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import axios from '../api/axios';
 
 const formatDate = (value) => {
   if (!value) return '—';
@@ -50,31 +51,47 @@ const statusLabel = (status) => {
 };
 
 function SuperAdminLeadsPanel() {
-  const [leads] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
   const [selectedLead, setSelectedLead] = useState(null);
+
+  const loadLeads = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await axios.get('/website-leads');
+      setLeads(Array.isArray(res?.data?.leads) ? res.data.leads : []);
+    } catch (e) {
+      setLeads([]);
+      setError(e?.response?.data?.message || e?.message || 'Failed to load website leads');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLeads();
+  }, [loadLeads]);
 
   const filteredLeads = useMemo(() => {
     const q = search.trim().toLowerCase();
+    if (!q) return leads;
     return leads.filter((lead) => {
-      const statusKey = String(lead.status || 'new').toLowerCase();
-      if (statusFilter !== 'all' && statusKey !== statusFilter) return false;
-      if (!q) return true;
       const haystack = [
         lead.full_name,
         lead.email,
         lead.phone,
         lead.subject,
         lead.message,
-        lead.descriptions,
         lead.status,
       ]
         .map((v) => String(v || '').toLowerCase())
         .join(' ');
       return haystack.includes(q);
     });
-  }, [leads, search, statusFilter]);
+  }, [leads, search]);
 
   const stats = useMemo(() => {
     const today = new Date();
@@ -110,8 +127,20 @@ function SuperAdminLeadsPanel() {
               <strong className="font-semibold text-gray-800">techwhizzc.com/waabizx</strong> appear here for follow-up.
             </p>
           </div>
+          <button
+            type="button"
+            onClick={loadLeads}
+            disabled={loading}
+            className="inline-flex items-center gap-2 self-start rounded-xl border border-violet-200 bg-white px-4 py-2 text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-60 transition"
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
         </div>
       </section>
+
+      {error ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
+      ) : null}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
         <div className="rounded-2xl border border-gray-100/90 bg-white/90 p-4 shadow-lg shadow-gray-200/30 ring-1 ring-gray-100/80 motion-hover-lift">
@@ -138,18 +167,6 @@ function SuperAdminLeadsPanel() {
             </p>
           </div>
           <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto sm:min-w-[20rem]">
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-400/20"
-            >
-              <option value="all">All statuses</option>
-              {STATUS_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
             <div className="relative flex-1 sm:max-w-xs">
             <svg
               className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
@@ -176,7 +193,11 @@ function SuperAdminLeadsPanel() {
           </div>
         </div>
 
-        {filteredLeads.length === 0 ? (
+        {loading ? (
+          <div className="py-16 flex justify-center">
+            <div className="animate-spin rounded-full h-10 w-10 border-2 border-violet-200 border-t-violet-600" />
+          </div>
+        ) : filteredLeads.length === 0 ? (
           <div className="py-16 px-4 text-center">
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-50 ring-1 ring-violet-100">
               <svg className="h-7 w-7 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
@@ -209,20 +230,26 @@ function SuperAdminLeadsPanel() {
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Subject</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Message</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Status</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Descriptions</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Submitted</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {filteredLeads.map((lead) => (
-                    <tr key={lead.id} className="hover:bg-violet-50/30 transition-colors">
+                    <tr
+                      key={lead.id}
+                      className="hover:bg-violet-50/30 transition-colors cursor-pointer"
+                      onClick={() => setSelectedLead(lead)}
+                    >
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
                         {lead.full_name || '—'}
                       </td>
                       <td className="px-4 py-3 text-gray-700">
                         {lead.email ? (
-                          <a href={`mailto:${lead.email}`} className="text-sky-700 hover:underline">
+                          <a
+                            href={`mailto:${lead.email}`}
+                            className="text-sky-700 hover:underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             {lead.email}
                           </a>
                         ) : (
@@ -239,17 +266,7 @@ function SuperAdminLeadsPanel() {
                           {statusLabel(lead.status)}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-600 max-w-[180px]">{truncate(lead.descriptions, 60)}</td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">{formatDate(lead.createdAt)}</td>
-                      <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedLead(lead)}
-                          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-violet-700 bg-violet-50 ring-1 ring-violet-200/80 hover:bg-violet-100 transition"
-                        >
-                          View
-                        </button>
-                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -304,12 +321,6 @@ function SuperAdminLeadsPanel() {
                       <div>
                         <span className="font-semibold text-gray-500">Message:</span> {truncate(lead.message, 120)}
                       </div>
-                      {lead.descriptions ? (
-                        <div>
-                          <span className="font-semibold text-gray-500">Descriptions:</span>{' '}
-                          {truncate(lead.descriptions, 120)}
-                        </div>
-                      ) : null}
                     </div>
                     <button
                       type="button"
@@ -382,12 +393,6 @@ function SuperAdminLeadsPanel() {
                 <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Message</p>
                 <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed rounded-xl bg-gray-50 p-3 ring-1 ring-gray-100">
                   {selectedLead.message || '—'}
-                </p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Descriptions</p>
-                <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed rounded-xl bg-violet-50/60 p-3 ring-1 ring-violet-100">
-                  {selectedLead.descriptions || '—'}
                 </p>
               </div>
             </div>

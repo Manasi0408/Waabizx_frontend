@@ -1,8 +1,25 @@
-const API_URL = 'https://wabizx.techwhizzc.com/api';
+// const API_URL = 'https://wabizx.techwhizzc.com/api';
+const API_URL = 'https://api.waabizx.com/api';
 
 // Get token from localStorage
 const getToken = () => {
   return localStorage.getItem('token');
+};
+
+const authHeaders = (extra = {}) => {
+  const headers = { ...extra };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const raw = localStorage.getItem('selectedProject');
+    const selected = raw ? JSON.parse(raw) : null;
+    if (selected?.id != null && String(selected.id).trim() !== '') {
+      headers['x-project-id'] = String(selected.id);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return headers;
 };
 
 // Upload and parse CSV file
@@ -18,9 +35,7 @@ export const uploadCSV = async (file) => {
 
     const response = await fetch(`${API_URL}/broadcast/upload-csv`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`
-      },
+      headers: authHeaders(),
       body: formData
     });
 
@@ -180,6 +195,42 @@ export const validateTemplate = async (templateName, templateLanguage, variableM
   }
 };
 
+// Upload header media for image/video/document templates
+export const uploadBroadcastHeaderMedia = async (file) => {
+  try {
+    const token = getToken();
+    if (!token) {
+      throw new Error('No token found');
+    }
+    if (!file) {
+      throw new Error('No file selected');
+    }
+
+    const formData = new FormData();
+    formData.append('media', file);
+
+    const response = await fetch(`${API_URL}/broadcast/upload-header-media`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: formData,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || data.message || 'Failed to upload header media');
+    }
+
+    if (data.success && data.url) {
+      return data;
+    }
+
+    throw new Error(data.message || 'Failed to upload header media');
+  } catch (error) {
+    throw error;
+  }
+};
+
 // Create broadcast campaign
 export const createBroadcast = async (broadcastData) => {
   try {
@@ -192,7 +243,7 @@ export const createBroadcast = async (broadcastData) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+        ...authHeaders(),
       },
       body: JSON.stringify(broadcastData)
     });

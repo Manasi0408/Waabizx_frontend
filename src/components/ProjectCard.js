@@ -29,15 +29,9 @@ function ProjectCard({ project, onRemove }) {
   const waNum =
     project.whatsappNumber != null && String(project.whatsappNumber).trim() !== ""
       ? String(project.whatsappNumber).trim()
-      : null;
-  const projectNumber =
-    waNum ||
-    billingNum ||
-    project.whatsapp_number ||
-    project.phone ||
-    project.mobileNumber ||
-    project.mobile_number ||
-    "--";
+      : project.whatsapp_display_phone != null && String(project.whatsapp_display_phone).trim() !== ""
+        ? String(project.whatsapp_display_phone).trim()
+        : null;
   const created = project.created_at ? new Date(project.created_at).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
@@ -79,17 +73,24 @@ function ProjectCard({ project, onRemove }) {
           </div>
 
           <div className="mt-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Number</p>
-            <p className="mt-1 text-[22px] leading-none font-semibold text-emerald-700 tabular-nums">
-              {projectNumber}
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+              WhatsApp number
+            </p>
+            <p
+              className={`mt-1 text-[22px] leading-none font-semibold tabular-nums ${
+                waNum ? "text-emerald-700" : "text-gray-400"
+              }`}
+            >
+              {waNum || "Not connected"}
             </p>
             {billingNum && waNum && billingNum !== waNum ? (
               <p className="mt-1.5 text-[11px] font-medium text-gray-500">
-                Payments (Razorpay): <span className="tabular-nums text-gray-700">{billingNum}</span>
+                Account mobile: <span className="tabular-nums text-gray-700">{billingNum}</span>
               </p>
-            ) : billingNum && !waNum ? (
+            ) : !waNum && billingNum ? (
               <p className="mt-1.5 text-[11px] font-medium text-gray-500">
-                Billing / payments number
+                Account mobile: <span className="tabular-nums text-gray-700">{billingNum}</span>
+                <span className="text-gray-400"> (not WhatsApp Business)</span>
               </p>
             ) : null}
           </div>

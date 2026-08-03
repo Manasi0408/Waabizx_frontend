@@ -13,8 +13,13 @@ import Broadcast from './pages/Broadcast';
 import Templates from './pages/Templates';
 import Analytics from './pages/Analytics';
 import Contacts from './pages/Contacts';
+import TagsPage from './pages/TagsPage';
 import Inbox from './pages/Inbox';
 import Flows from './pages/Flows';
+import FormsPage from './pages/FormsPage';
+import FormBuilderPage from './pages/FormBuilderPage';
+import WhatsAppButtonPage from './pages/WhatsAppButtonPage';
+import RcsPage from './pages/RcsPage';
 import Chatbot from './components/Chatbot';
 import MainSidebarNav from './components/MainSidebarNav';
 import AppShellSidebar from './components/AppShellSidebar';
@@ -22,6 +27,22 @@ import AdminHeaderProjectSwitch from './components/AdminHeaderProjectSwitch';
 import HeaderRightActions from './components/HeaderRightActions';
 import PasswordInput from './components/PasswordInput';
 import axios from './api/axios';
+import {
+  META_EMBEDDED_CONFIG_ID,
+  META_EMBEDDED_REDIRECT_URI,
+  META_SOLUTION_ID,
+  redirectToMetaEmbeddedSignup,
+  buildFbEmbeddedSignupLoginOptions,
+  buildMetaOAuthUrl,
+  fetchMetaConnectUrl,
+  sanitizeMetaOAuthUrl,
+  openMetaOAuthPopupWindow,
+  resolveApiBase,
+  resolveMetaAppOrigin,
+  META_SDK_VERSION,
+} from './utils/metaWhatsAppConnect';
+import { connectWhatsAppOnboarding } from './services/onboardingService';
+import { logEmbeddedSignupClient } from './utils/embeddedSignupLog';
 import ProjectLogin from './pages/ProjectLogin';
 import ProjectDashboard from './pages/ProjectDashboard';
 import AgentHomePage from './pages/AgentHomePage';
@@ -33,6 +54,8 @@ import ContactManagementPage from './pages/ContactManagementPage';
 import ManagePage from './pages/ManagePage';
 import AgentManageCannedMessagesPage from './pages/AgentManageCannedMessagesPage';
 import SuperAdminDashboard from './pages/SuperAdminDashboard';
+import SuperAdminBusinessesPage from './pages/SuperAdminBusinessesPage';
+import SuperAdminBlogsPage from './pages/SuperAdminBlogsPage';
 import CampaignReportsPage from './pages/CampaignReportsPage';
 import HistoryPage from './pages/HistoryPage';
 import ReportsComingSoonPage from './pages/ReportsComingSoonPage';
@@ -112,6 +135,18 @@ const SuperAdminDashboardRoute = () => {
   return isSuperAdmin ? <SuperAdminDashboard /> : <Navigate to="/" replace />;
 };
 
+const SuperAdminBusinessesRoute = () => {
+  const role = getCurrentUserRole();
+  const isSuperAdmin = role === "super_admin" || role === "superadmin";
+  return isSuperAdmin ? <SuperAdminBusinessesPage /> : <Navigate to="/" replace />;
+};
+
+const SuperAdminBlogsRoute = () => {
+  const role = getCurrentUserRole();
+  const isSuperAdmin = role === "super_admin" || role === "superadmin";
+  return isSuperAdmin ? <SuperAdminBlogsPage /> : <Navigate to="/" replace />;
+};
+
 // Agent dashboard: agent or admin with token can access (admin when viewing a project); else redirect to /login
 const AgentDashboardRoute = () => {
   const token = localStorage.getItem("token");
@@ -137,40 +172,43 @@ const WA_META_LIVE_PREFIX = "wa_wb_meta_live_";
 const FALLBACK_CONNECTED_BANNER =
   "WhatsApp Business is connected. You can continue with the further process.";
 
-/** Connected only when backend confirms DB has gupshup_app_id + status=connected. */
-const isGupshupDbConnected = (data) =>
+/** Connected when Meta Cloud API onboarding is saved (WABA + phone + token). */
+const isWhatsAppConnected = (data) =>
   Boolean(
     data &&
       typeof data === "object" &&
-      data.gupshupConnected === true &&
-      (data.gupshupAppId || data.gupshup_app_id || data.appId)
+      (data.onboardingCompleted === true ||
+        data.whatsappConnected === true ||
+        data.metaLinked === true ||
+        (data.wabaId && data.phoneNumberId))
   );
 const WA_EMBEDDED_SIGNUP_EVENT = "WA_EMBEDDED_SIGNUP";
+
 const META_POPUP_MESSAGE_SOURCE = "waabiz-meta-oauth-popup";
 const META_POPUP_STORAGE_KEY = "waabiz-meta-popup-result";
 const META_POPUP_POLL_INTERVAL_MS = 500;
-const META_SDK_VERSION = "v22.0";
-
-function buildMetaEmbeddedSignupExtras(solutionId) {
-  return {
-    setup: {
-      solutionID: solutionId,
-    },
-    sessionInfoVersion: 3,
-  };
-}
-
-const META_EMBEDDED_REDIRECT_URI =
-  (process.env.REACT_APP_META_REDIRECT_URI || "https://wabizx.techwhizzc.com/meta/callback").trim();
-
-const META_EMBEDDED_CONFIG_ID =
-  (process.env.REACT_APP_META_CONFIG_ID || "1616537092881932").trim();
-
-const META_EMBEDDED_APP_ORIGIN = "https://wabizx.techwhizzc.com";
-
 function isAllowedMetaMessageOrigin(origin) {
   const value = String(origin || "").toLowerCase();
-  return value.includes("facebook.com") || value.includes("fb.com");
+  if (value.includes("facebook.com") || value.includes("fb.com")) return true;
+  try {
+    const callbackOrigin = String(resolveMetaAppOrigin() || "").toLowerCase();
+    if (callbackOrigin && value === callbackOrigin) return true;
+  } catch (_) {
+    /* ignore */
+  }
+  return false;
+}
+
+function isMetaOAuthPopupOrigin(origin) {
+  const value = String(origin || "").toLowerCase();
+  if (value === String(window.location?.origin || "").toLowerCase()) return true;
+  try {
+    const callbackOrigin = String(resolveMetaAppOrigin() || "").toLowerCase();
+    if (callbackOrigin && value === callbackOrigin) return true;
+  } catch (_) {
+    /* ignore */
+  }
+  return false;
 }
 
 function extractEmbeddedSignupCode(data) {
@@ -283,7 +321,7 @@ function readWaMetaLivePack(clientId, projectId = null) {
 }
 
 function writeWaMetaLivePack(clientId, snapshot, bannerFromUrl = "", preferredProjectId = null) {
-  if (!clientId || !snapshot || !isGupshupDbConnected(snapshot)) return;
+  if (!clientId || !snapshot || !isWhatsAppConnected(snapshot)) return;
   const cid = Number(clientId);
   if (!Number.isInteger(cid) || cid <= 0) return;
 
@@ -401,7 +439,7 @@ function ConnectWhatsApp() {
   const [regOk, setRegOk] = useState("");
   const [projectListPhone, setProjectListPhone] = useState("");
   const [projectListName, setProjectListName] = useState("");
-  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+  const API_BASE = resolveApiBase();
 
   const urlParams = useMemo(() => new URLSearchParams(location.search || ""), [location.search]);
   const onboardingMessage = String(urlParams.get("onboardingMessage") || "").trim();
@@ -441,10 +479,10 @@ function ConnectWhatsApp() {
   const userName = user?.name || "User";
   const userInitial = userName.charAt(0).toUpperCase();
 
+  const onboardingOkFromUrl = urlParams.get("onboardingOk") === "1";
   const onboardingOk = Boolean(
-    waStatus &&
-    waStatus.success !== false &&
-    waStatus.onboardingCompleted
+    onboardingOkFromUrl ||
+      (waStatus && waStatus.success !== false && waStatus.onboardingCompleted)
   );
   const needsCloudReg = Boolean(waStatus?.needsCloudApiRegistration);
   const graphErr = waStatus?.cloudApiPhoneError ? String(waStatus.cloudApiPhoneError) : null;
@@ -456,9 +494,10 @@ function ConnectWhatsApp() {
   const fullyReady =
     Boolean(liveStatusChecked && onboardingOk && !needsCloudReg && !graphErr);
   const displayPhoneMeta =
-    typeof waStatus?.cloudApiPhone?.display_phone_number === "string"
+    (typeof waStatus?.displayPhone === "string" ? waStatus.displayPhone.trim() : "") ||
+    (typeof waStatus?.cloudApiPhone?.display_phone_number === "string"
       ? waStatus.cloudApiPhone.display_phone_number.trim()
-      : "";
+      : "");
   const displayPhoneLine =
     displayPhoneMeta ||
     (projectListPhone && String(projectListPhone).trim()) ||
@@ -492,12 +531,20 @@ function ConnectWhatsApp() {
       window.clearInterval(metaPopupPollRef.current);
       metaPopupPollRef.current = null;
     }
+    const popup = metaPopupRef.current;
+    if (popup && !popup.closed) {
+      try {
+        popup.close();
+      } catch (_) {
+        /* ignore cross-origin close restrictions */
+      }
+    }
     metaPopupRef.current = null;
   }, []);
 
   const presentSignupSuccessThenRedirect = useCallback(
     (bannerMessage, statusData = null) => {
-      if (!isGupshupDbConnected(statusData)) return;
+      if (!isWhatsAppConnected(statusData)) return;
       if (signupRedirectTimerRef.current) {
         window.clearTimeout(signupRedirectTimerRef.current);
         signupRedirectTimerRef.current = null;
@@ -514,8 +561,9 @@ function ConnectWhatsApp() {
         ...(statusData && typeof statusData === "object" ? statusData : {}),
         success: true,
         onboardingCompleted: true,
-        gupshupConnected: true,
         connected: true,
+        whatsappConnected: true,
+        metaLinked: true,
       }));
       setEmbeddedSignupActive(false);
       setRegBusy(false);
@@ -557,10 +605,9 @@ function ConnectWhatsApp() {
       try {
         if (!window.__waabizFbSdkInitialized) {
           window.FB.init({
-            appId,
-            cookie: true,
-            xfbml: true,
+            appId: String(appId),
             autoLogAppEvents: true,
+            xfbml: true,
             version: META_SDK_VERSION,
           });
           window.__waabizFbSdkInitialized = true;
@@ -663,7 +710,7 @@ function ConnectWhatsApp() {
         return null;
       }
 
-      const isLinked = isGupshupDbConnected(data);
+      const isLinked = isWhatsAppConnected(data);
       if (isLinked) {
         const resPidRaw = data.projectId != null ? Number(data.projectId) : null;
         const resPid =
@@ -704,116 +751,10 @@ function ConnectWhatsApp() {
     }
   }, [API_BASE, linkedProjectIdOAuth, onboardingBannerText]);
 
-  /** Path B only — call Gupshup Link App after /meta/onboard + display phone from status. */
-  const callGupshupLinkAppFromStatus = useCallback(
-    async (source, status, onboardData = {}) => {
-      const cid = readClientIdFromStorage();
-      let projectId = null;
-      try {
-        const selectedProject = JSON.parse(localStorage.getItem("selectedProject") || "null");
-        const pid = selectedProject?.id != null ? Number(selectedProject.id) : null;
-        if (Number.isInteger(pid) && pid > 0) projectId = pid;
-      } catch (_) {
-        /* ignore */
-      }
-
-      const wabaId = String(
-        status?.wabaId ||
-          onboardData?.data?.wabaId ||
-          onboardData?.data?.waba_id ||
-          ""
-      ).trim();
-      const phoneNumberId = String(
-        status?.phoneNumberId ||
-          onboardData?.data?.phoneNumberId ||
-          onboardData?.data?.phone_number_id ||
-          ""
-      ).trim();
-      let phoneNumber = String(status?.cloudApiPhone?.display_phone_number || "")
-        .replace(/\D/g, "")
-        .trim();
-
-      console.log(`[Gupshup] ${source} — resolve inputs`, {
-        wabaId: wabaId || null,
-        phoneNumberId: phoneNumberId || null,
-        phoneNumber: phoneNumber || "(empty)",
-        onboardingCompleted: status?.onboardingCompleted,
-        codeVerificationStatus: status?.codeVerificationStatus,
-      });
-
-      if (wabaId && !phoneNumber) {
-        console.log(`[Gupshup] ${source} — no display phone yet, retrying refreshConnectionStatus in 1.5s`);
-        await new Promise((r) => window.setTimeout(r, 1500));
-        const retryStatus = await refreshConnectionStatus();
-        phoneNumber = String(retryStatus?.cloudApiPhone?.display_phone_number || "")
-          .replace(/\D/g, "")
-          .trim();
-        console.log(`[Gupshup] ${source} — after retry`, {
-          phoneNumber: phoneNumber || "(empty)",
-          cloudApiPhoneError: retryStatus?.cloudApiPhoneError || null,
-        });
-      }
-
-      if (!wabaId || !phoneNumber) {
-        console.warn(`[Gupshup] ${source} — SKIP link-app`, {
-          reason: !wabaId ? "missing WABA_ID" : "missing PHONE_NUMBER (Meta display_phone_number)",
-          hint: "Complete /meta/onboard first; Meta often sends only phone_number_id in embedded postMessage",
-        });
-        return null;
-      }
-
-      let APP_NAME = "Waabizx";
-      try {
-        const selectedProject = JSON.parse(localStorage.getItem("selectedProject") || "null");
-        APP_NAME =
-          String(selectedProject?.project_name || selectedProject?.name || "").trim() || APP_NAME;
-      } catch (_) {
-        /* ignore */
-      }
-
-      const linkAppPayload = {
-        APP_NAME,
-        WABA_ID: wabaId,
-        PHONE_NUMBER: phoneNumber,
-        Phone_Number_ID: phoneNumberId || undefined,
-        client_id: cid,
-        project_id: projectId,
-      };
-
-      console.log(`[Gupshup] ${source} — STEP F1 POST /gupshup/link-app`, linkAppPayload);
-      try {
-        const linkRes = await axios.post("/gupshup/link-app", linkAppPayload);
-        console.log(`[Gupshup] ${source} — STEP F2 response`, linkRes?.data);
-        if (linkRes?.data?._save?.saved === false) {
-          console.warn(`[Gupshup] ${source} — API ok but DB not updated`, linkRes.data._save);
-        }
-        if (isGupshupDbConnected(linkRes?.data)) {
-          setWaStatus((prev) => ({
-            ...(prev && typeof prev === "object" ? prev : {}),
-            gupshupConnected: true,
-            connected: true,
-            onboardingCompleted: true,
-            gupshupAppId:
-              linkRes.data.gupshupAppId || linkRes.data.appId || linkRes.data._save?.gupshup_app_id || null,
-            gupshupStatus: linkRes.data.gupshupStatus || linkRes.data._save?.status || "connected",
-          }));
-        }
-        return linkRes?.data;
-      } catch (linkErr) {
-        console.error(
-          `[Gupshup] ${source} — STEP F3 failed`,
-          linkErr?.response?.data || linkErr?.message || linkErr
-        );
-        throw linkErr;
-      }
-    },
-    [refreshConnectionStatus]
-  );
-
   const checkWhatsAppConnection = useCallback(async () => {
     try {
       const status = await refreshConnectionStatus();
-      if (isGupshupDbConnected(status)) {
+      if (isWhatsAppConnected(status)) {
         const selectedProject = JSON.parse(localStorage.getItem("selectedProject") || "null");
         const projectName = String(selectedProject?.project_name || selectedProject?.name || "").trim();
         const liveBanner = projectName ? defaultProjectLiveBanner(projectName) : "WhatsApp Business connected successfully.";
@@ -826,8 +767,9 @@ function ConnectWhatsApp() {
           ...(status && typeof status === "object" ? status : {}),
           success: true,
           onboardingCompleted: true,
-          gupshupConnected: true,
           connected: true,
+          whatsappConnected: true,
+          metaLinked: true,
         }));
         setRegBusy(false);
         setEmbeddedSignupActive(false);
@@ -868,12 +810,12 @@ function ConnectWhatsApp() {
         return;
       }
 
-      const isLive = isGupshupDbConnected(data);
+      const isLive = isWhatsAppConnected(data);
       const successMessage =
         data.message ||
         (isLive
           ? "WhatsApp Business connected successfully."
-          : "Meta sign-in completed. Gupshup link is still pending.");
+          : "Meta sign-in completed. Finalizing WhatsApp connection...");
 
       setPopupStatusMessage(successMessage);
       setLiveStatusChecked(true);
@@ -881,17 +823,17 @@ function ConnectWhatsApp() {
         ...(prev && typeof prev === "object" ? prev : {}),
         success: true,
         onboardingCompleted: isLive,
-        gupshupConnected: isLive,
+        whatsappConnected: isLive,
+        metaLinked: isLive,
         connected: isLive,
-        gupshupAppId: isLive ? data.gupshupAppId || data.gupshup_app_id || null : null,
       }));
       setRegErr("");
       setRegOk(successMessage);
 
       refreshConnectionStatus().then((status) => {
-        const verified = isGupshupDbConnected(status) || isLive;
+        const verified = isWhatsAppConnected(status) || isLive;
         if (verified) {
-          presentSignupSuccessThenRedirect(successMessage, isGupshupDbConnected(status) ? status : data);
+          presentSignupSuccessThenRedirect(successMessage, isWhatsAppConnected(status) ? status : data);
         }
       });
     };
@@ -912,10 +854,11 @@ function ConnectWhatsApp() {
     };
 
     const handleEmbeddedSignupMessage = (event) => {
-      console.log("META MESSAGE:", event);
-      console.log("META DATA:", event.data);
+      // Official Meta sample: only accept facebook.com origins for WA_EMBEDDED_SIGNUP
+      const origin = String(event.origin || "");
+      const isFacebookOrigin = /facebook\.com$/i.test(origin) || origin.endsWith(".facebook.com");
 
-      if (event.origin === window.location.origin) {
+      if (isMetaOAuthPopupOrigin(event.origin)) {
         const data = event.data;
         if (!data || data.source !== META_POPUP_MESSAGE_SOURCE) return;
 
@@ -923,7 +866,7 @@ function ConnectWhatsApp() {
         return;
       }
 
-      if (!isAllowedMetaMessageOrigin(event.origin)) {
+      if (!isFacebookOrigin && !isAllowedMetaMessageOrigin(event.origin)) {
         return;
       }
 
@@ -946,10 +889,42 @@ function ConnectWhatsApp() {
 
       if (!data || data.type !== WA_EMBEDDED_SIGNUP_EVENT) return;
 
+      logEmbeddedSignupClient(
+        "ES_CLIENT_WA_EMBEDDED_SIGNUP_POSTMESSAGE",
+        { method: "postMessage", url: String(event?.origin || "") },
+        null,
+        {
+          event: data.event || null,
+          type: data.type,
+          hasCode: Boolean(extractEmbeddedSignupCode(data)),
+          wabaId:
+            data?.whatsapp_business_account_id ||
+            data?.data?.waba_id ||
+            data?.data?.whatsapp_business_account_id ||
+            null,
+          phoneNumberId: data?.phone_number_id || data?.data?.phone_number_id || null,
+        }
+      );
+
       const embeddedEvent = String(data.event || "").toUpperCase();
       const embeddedCode = extractEmbeddedSignupCode(data);
+      const wabaId = String(
+        data?.whatsapp_business_account_id || data?.data?.waba_id || data?.data?.whatsapp_business_account_id || ""
+      ).trim();
+      const phoneNumberId = String(
+        data?.phone_number_id || data?.data?.phone_number_id || ""
+      ).trim();
+
+      if (wabaId) {
+        setWaStatus((prev) => ({
+          ...(prev && typeof prev === "object" ? prev : {}),
+          wabaId,
+          phoneNumberId: phoneNumberId || prev?.phoneNumberId || null,
+        }));
+      }
 
       if (embeddedCode) {
+        cleanupMetaPopup();
         submitEmbeddedSignupCode(
           embeddedCode,
           "Meta signup completed. Finalizing WhatsApp connection..."
@@ -958,10 +933,11 @@ function ConnectWhatsApp() {
       }
 
       if (embeddedEvent === "FINISH") {
+        cleanupMetaPopup();
         setRegErr("");
         setRegOk("Meta signup completed. Finalizing WhatsApp connection...");
         refreshConnectionStatus().then((status) => {
-          if (isGupshupDbConnected(status)) {
+          if (isWhatsAppConnected(status)) {
             stopSignupWatchdogRef.current?.();
             presentSignupSuccessThenRedirect(
               status?.message || "WhatsApp Business connected successfully.",
@@ -972,12 +948,6 @@ function ConnectWhatsApp() {
         return;
       }
 
-      const wabaId = String(
-        data?.whatsapp_business_account_id || data?.data?.waba_id || data?.data?.whatsapp_business_account_id || ""
-      ).trim();
-      const phoneNumberId = String(
-        data?.phone_number_id || data?.data?.phone_number_id || ""
-      ).trim();
       const phoneNumber = String(
         data?.phone_number ||
           data?.phoneNumber ||
@@ -989,17 +959,12 @@ function ConnectWhatsApp() {
         .replace(/\D/g, "")
         .trim();
       if (wabaId || phoneNumberId) {
-        setWaStatus((prev) => ({
-          ...(prev && typeof prev === "object" ? prev : {}),
-          wabaId: wabaId || null,
-          phoneNumberId: phoneNumberId || null,
-        }));
         setRegErr("");
         setRegOk("Meta signup completed. Finalizing WhatsApp connection...");
-        console.log("[Gupshup] Path A — embedded signup (deferred Link App to Path B after /meta/onboard)", {
+        console.log("[Meta embedded signup] WABA resolved from SDK postMessage", {
           wabaId: wabaId || null,
           phoneNumberId: phoneNumberId || null,
-          phoneNumber: phoneNumber || "(empty — do not call Link App until Path B)",
+          phoneNumber: phoneNumber || "(empty)",
         });
         return;
       }
@@ -1192,293 +1157,246 @@ function ConnectWhatsApp() {
     }
   }, []);
 
-  const openMetaOAuthPopup = (cid, projectId, configId, solutionId) => {
-    const appId = process.env.REACT_APP_META_APP_ID || "1562341501476558";
-    const redirectUri = META_EMBEDDED_REDIRECT_URI;
-    const state =
-      projectId != null && Number.isInteger(projectId) && projectId > 0
-        ? `${cid}:${projectId}`
-        : String(cid);
-    const extras = encodeURIComponent(JSON.stringify(buildMetaEmbeddedSignupExtras(solutionId)));
+  const completeMetaOnboardWithCode = useCallback(
+    async (code, projectIdForOnboard) => {
+      const cid = readClientIdFromStorage();
+      if (!cid || !code) return;
 
-    const oauthUrl =
-      `https://www.facebook.com/${META_SDK_VERSION}/dialog/oauth` +
-      `?client_id=${encodeURIComponent(appId)}` +
-      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-      `&state=${encodeURIComponent(state)}` +
-      `&config_id=${encodeURIComponent(configId)}` +
-      `&response_type=code` +
-      `&override_default_response_type=true` +
-      `&extras=${extras}`;
+      setRegErr("");
+      setRegOk("Meta signup completed. Finalizing WhatsApp connection...");
 
-    const popupWidth = 520;
-    const popupHeight = 760;
-    const dualScreenLeft = window.screenLeft ?? window.screenX ?? 0;
-    const dualScreenTop = window.screenTop ?? window.screenY ?? 0;
-    const viewportWidth =
-      window.innerWidth || document.documentElement.clientWidth || window.screen?.width || popupWidth;
-    const viewportHeight =
-      window.innerHeight || document.documentElement.clientHeight || window.screen?.height || popupHeight;
-    const left = Math.max(0, dualScreenLeft + Math.round((viewportWidth - popupWidth) / 2));
-    const top = Math.max(0, dualScreenTop + Math.round((viewportHeight - popupHeight) / 2));
-    const popupFeatures = [
-      `width=${popupWidth}`,
-      `height=${popupHeight}`,
-      `left=${left}`,
-      `top=${top}`,
-      "resizable=yes",
-      "scrollbars=yes",
-      "status=yes",
-    ].join(",");
-
-    const popup = window.open(oauthUrl, "waabiz-meta-signup", popupFeatures);
-    if (!popup) {
-      setEmbeddedSignupActive(false);
-      setRegBusy(false);
-      setRegErr("Facebook popup was blocked. Please allow popups for this site and try again.");
-      return false;
-    }
-
-    metaPopupRef.current = popup;
-    try {
-      popup.focus();
-    } catch (_) {
-      /* ignore */
-    }
-
-    metaPopupPollRef.current = window.setInterval(() => {
-      if (consumeMetaPopupStorageResult()) {
-        cleanupMetaPopup();
-        return;
+      try {
+        const onboardBody = {
+          code,
+          client_id: cid,
+          redirect_uri: "",
+          projectId:
+            projectIdForOnboard != null && Number(projectIdForOnboard) > 0
+              ? Number(projectIdForOnboard)
+              : null,
+        };
+        logEmbeddedSignupClient(
+          "ES_CLIENT_META_ONBOARD",
+          { method: "POST", url: `${API_BASE}/meta/onboard` },
+          { ...onboardBody, codeLength: String(code).length, code: undefined },
+          { status: "requesting" }
+        );
+        const res = await fetch(`${API_BASE}/meta/onboard`, {
+          method: "POST",
+          headers: authApiHeadersJson(),
+          body: JSON.stringify(onboardBody),
+        });
+        const data = await res.json().catch(() => ({}));
+        logEmbeddedSignupClient(
+          "ES_CLIENT_META_ONBOARD",
+          { method: "POST", url: `${API_BASE}/meta/onboard` },
+          { client_id: cid, projectId: onboardBody.projectId, redirect_uri: "" },
+          { httpStatus: res.status, ...data }
+        );
+        if (!res.ok || !data?.success) {
+          throw new Error(
+            data?.message || data?.error || "Failed to complete WhatsApp onboarding."
+          );
+        }
+        const refreshed = await refreshConnectionStatus();
+        if (!isWhatsAppConnected(refreshed)) {
+          setRegErr(
+            refreshed?.reason ||
+              "Meta sign-in completed but WhatsApp is not linked yet — check server logs."
+          );
+          return;
+        }
+        const pname = (() => {
+          try {
+            const sp = JSON.parse(localStorage.getItem("selectedProject") || "null");
+            return String(sp?.project_name || sp?.name || "").trim();
+          } catch (_) {
+            return "";
+          }
+        })();
+        const banner = pname
+          ? defaultProjectLiveBanner(pname)
+          : "WhatsApp Business connected successfully.";
+        const params = new URLSearchParams();
+        params.set("onboardingMessage", banner);
+        if (projectIdForOnboard != null && Number(projectIdForOnboard) > 0) {
+          params.set("linkedProjectId", String(projectIdForOnboard));
+        }
+        params.set("onboardingOk", "1");
+        navigate(`/connect-whatsapp?${params.toString()}`, { replace: true });
+      } catch (e) {
+        setShowSignupSuccessScreen(false);
+        setRegOk("");
+        setRegErr(e?.message || "Failed to complete WhatsApp onboarding.");
+      } finally {
+        setEmbeddedSignupActive(false);
+        setRegBusy(false);
+        embeddedSignupCodeHandlerRef.current = null;
       }
+    },
+    [API_BASE, navigate, refreshConnectionStatus]
+  );
 
-      const popupWindow = metaPopupRef.current;
-      if (!popupWindow) {
-        cleanupMetaPopup();
-        return;
-      }
-      if (popupWindow.closed) {
-        cleanupMetaPopup();
-        window.setTimeout(() => {
-          if (consumeMetaPopupStorageResult()) return;
-          refreshConnectionStatus().then((status) => {
-            if (isGupshupDbConnected(status)) {
-              stopSignupWatchdogRef.current?.();
-              const pname = (() => {
-                try {
-                  const sp = JSON.parse(localStorage.getItem("selectedProject") || "null");
-                  return String(sp?.project_name || sp?.name || "").trim();
-                } catch (_) {
-                  return "";
-                }
-              })();
-              const banner = pname
-                ? defaultProjectLiveBanner(pname)
-                : "WhatsApp Business connected successfully.";
-              presentSignupSuccessThenRedirect(banner, status);
-            }
-          });
-        }, 1500);
-      }
-    }, META_POPUP_POLL_INTERVAL_MS);
-    return true;
-  };
-
-  const launchWhatsAppSignup = () => {
+  const launchWhatsAppSignup = async () => {
     const cid = readClientIdFromStorage();
     if (!cid) {
       setRegErr("Please log in again before connecting WhatsApp.");
       return;
     }
+    if (!META_EMBEDDED_CONFIG_ID) {
+      setRegErr("Meta Embedded Signup config_id is missing. Set REACT_APP_META_CONFIG_ID.");
+      return;
+    }
 
     let projectId = null;
+    let projectName = "";
     try {
       const selectedProject = JSON.parse(localStorage.getItem("selectedProject") || "null");
       const pid = selectedProject?.id != null ? Number(selectedProject.id) : null;
       if (Number.isInteger(pid) && pid > 0) projectId = pid;
+      projectName = String(
+        selectedProject?.project_name || selectedProject?.name || ""
+      ).trim();
     } catch (_) {
       /* ignore */
     }
 
-    const configId = META_EMBEDDED_CONFIG_ID;
-    const solutionId = process.env.REACT_APP_GUPSHUP_SOLUTION_ID || "27958955160361420";
-
-    console.log("[Meta embedded signup] launch (OAuth popup)", {
-      origin: window.location.origin,
-      configId,
-      redirectUri: META_EMBEDDED_REDIRECT_URI,
-      appId: process.env.REACT_APP_META_APP_ID || "1562341501476558",
-    });
-
-    if (
-      window.location.hostname !== "localhost" &&
-      window.location.origin !== META_EMBEDDED_APP_ORIGIN
-    ) {
-      setRegErr(
-        `Open this page at ${META_EMBEDDED_APP_ORIGIN} (not ${window.location.origin}). Meta will not return an authorization code on a mismatched domain.`
-      );
-      setEmbeddedSignupActive(false);
-      setRegBusy(false);
-      return;
-    }
-
-    if (!configId) {
-      setRegErr("Meta configuration is missing. Please check the WhatsApp setup.");
-      return;
-    }
-    if (!solutionId) {
-      setRegErr("Gupshup solution ID is missing. Please check the WhatsApp setup.");
-      return;
-    }
-
     setEmbeddedSignupActive(true);
     setRegBusy(true);
-    setPopupStatusMessage("");
     setRegErr("");
-    setRegOk("");
+    setRegOk("Creating business & project, then opening Meta Signup…");
     cleanupMetaPopup();
 
-    const stopSignupWatchdog = () => {
-      if (signupWatchdogIntervalRef.current) {
-        window.clearInterval(signupWatchdogIntervalRef.current);
-        signupWatchdogIntervalRef.current = null;
+    try {
+      const user = JSON.parse(localStorage.getItem("user") || "null");
+      const onboardPayload = {
+        companyName: user?.name || "",
+        email: user?.email || "",
+        mobile: user?.mobileNumber || "",
+        projectId,
+        projectName,
+        returnOrigin: String(window.location?.origin || "").trim(),
+      };
+      logEmbeddedSignupClient(
+        "ES_CLIENT_CONNECT_WHATSAPP",
+        { method: "POST", url: "/api/onboarding/connect-whatsapp" },
+        onboardPayload,
+        { status: "requesting" }
+      );
+      const onboard = await connectWhatsAppOnboarding(onboardPayload);
+      logEmbeddedSignupClient(
+        "ES_CLIENT_CONNECT_WHATSAPP",
+        { method: "POST", url: "/api/onboarding/connect-whatsapp" },
+        onboardPayload,
+        onboard
+      );
+      if (onboard?.localProjectId) {
+        projectId = Number(onboard.localProjectId) || projectId;
       }
-      if (signupWatchdogTimeoutRef.current) {
-        window.clearTimeout(signupWatchdogTimeoutRef.current);
-        signupWatchdogTimeoutRef.current = null;
-      }
-    };
 
-    const projectNameFromStorage = () => {
-      try {
-        const selectedProject = JSON.parse(localStorage.getItem("selectedProject") || "null");
-        return String(selectedProject?.project_name || selectedProject?.name || "").trim();
-      } catch (_) {
-        return "";
+      const solutionId = String(
+        onboard?.solutionId || META_SOLUTION_ID || ""
+      ).trim();
+      if (!solutionId) {
+        throw new Error(
+          "Path A blocked: Meta Solution ID missing. Set REACT_APP_META_SOLUTION_ID / META_SOLUTION_ID for AiSensy partner billing."
+        );
       }
-    };
 
-    const applyLiveSuccessUi = (statusData) => {
-      stopSignupWatchdog();
-      if (!isGupshupDbConnected(statusData)) return;
-      if (statusData && typeof statusData === "object") {
-        setWaStatus((prev) => ({
-          ...(prev && typeof prev === "object" ? prev : {}),
-          ...statusData,
-          success: true,
-          onboardingCompleted: true,
-          gupshupConnected: true,
-          connected: true,
-        }));
-      }
-      const pname = projectNameFromStorage();
-      const banner = pname ? defaultProjectLiveBanner(pname) : "WhatsApp Business connected successfully.";
-      setPopupStatusMessage(banner);
-      presentSignupSuccessThenRedirect(banner, statusData);
-    };
-
-    const startSignupWatchdog = () => {
-      stopSignupWatchdog();
-      let retry = 0;
-      signupWatchdogIntervalRef.current = window.setInterval(async () => {
-        retry += 1;
-        try {
-          const status = await checkWhatsAppConnection();
-          if (isGupshupDbConnected(status)) {
-            applyLiveSuccessUi(status);
+      // Path A: FB.login + config_id + extras.setup.solutionID (AiSensy partner billing)
+      const runFbLogin = () =>
+        new Promise((resolve, reject) => {
+          if (!window.FB || typeof window.FB.login !== "function") {
+            reject(new Error("Facebook SDK not ready"));
             return;
           }
-        } catch (_) {
-          stopSignupWatchdog();
-          setRegBusy(false);
-          setEmbeddedSignupActive(false);
-          setRegErr("Failed to verify WhatsApp connection status.");
-          return;
-        }
-        if (retry > 40) {
-          stopSignupWatchdog();
-          setRegBusy(false);
-          setEmbeddedSignupActive(false);
-          setRegErr(
-            `Connection timeout. Meta finished signup but no authorization code was received. Confirm your app domain in Meta exactly matches ${window.location.origin}.`
+          embeddedSignupCodeHandlerRef.current = (code) => {
+            completeMetaOnboardWithCode(code, projectId);
+          };
+          const loginOptions = buildFbEmbeddedSignupLoginOptions(solutionId);
+          logEmbeddedSignupClient(
+            "ES_CLIENT_FB_LOGIN",
+            { method: "FB.login", url: "facebook-sdk" },
+            loginOptions,
+            { status: "opening" }
           );
-        }
-      }, 3000);
-    };
-
-    startSignupWatchdog();
-
-    const finishSignupWithCode = (code) => {
-      if (!code) return;
-      setRegErr("");
-      setRegOk("Meta signup completed. Finalizing WhatsApp connection...");
-
-      fetch(`${API_BASE}/meta/onboard`, {
-        method: "POST",
-        headers: authApiHeadersJson(),
-        body: JSON.stringify({
-          code,
-          client_id: cid,
-          redirect_uri: "",
-          projectId: projectId != null ? Number(projectId) : null,
-        }),
-      })
-        .then(async (res) => {
-          const data = await res.json().catch(() => ({}));
-          return { res, data };
-        })
-        .then(async ({ res, data }) => {
-          if (!res.ok || !data?.success) {
-            throw new Error(data?.message || data?.error || "Failed to complete WhatsApp onboarding.");
-          }
-          const status = await refreshConnectionStatus();
-          console.log("[Gupshup] Path B — /meta/onboard done, connection status", {
-            wabaId: status?.wabaId,
-            phoneNumberId: status?.phoneNumberId,
-            display_phone_number: status?.cloudApiPhone?.display_phone_number || null,
-            onboardingCompleted: status?.onboardingCompleted,
-          });
-          try {
-            await callGupshupLinkAppFromStatus("Path B — after /meta/onboard", status, data);
-          } catch (linkErr) {
-            console.error("[Gupshup] Path B — link-app error (onboarding may still show Pending)", linkErr);
-          }
-          const refreshed = await refreshConnectionStatus();
-          if (!isGupshupDbConnected(refreshed)) {
-            setRegErr("Meta sign-in completed. Gupshup link is still pending — check server logs.");
-            return;
-          }
-          const pname = projectNameFromStorage();
-          const banner = pname ? defaultProjectLiveBanner(pname) : "WhatsApp Business connected successfully.";
-          presentSignupSuccessThenRedirect(banner, refreshed);
-        })
-        .catch((e) => {
-          setShowSignupSuccessScreen(false);
-          setRegOk("");
-          setRegErr(e?.message || "Failed to complete WhatsApp onboarding.");
-        })
-        .finally(() => {
-          stopSignupWatchdog();
-          setEmbeddedSignupActive(false);
-          setRegBusy(false);
+          window.FB.login((response) => {
+            logEmbeddedSignupClient(
+              "ES_CLIENT_FB_LOGIN",
+              { method: "FB.login", url: "facebook-sdk" },
+              loginOptions,
+              {
+                status: response?.status || null,
+                hasCode: Boolean(response?.authResponse?.code),
+                codeLength: response?.authResponse?.code
+                  ? String(response.authResponse.code).length
+                  : 0,
+                authResponseKeys: response?.authResponse
+                  ? Object.keys(response.authResponse)
+                  : [],
+              }
+            );
+            if (response?.authResponse?.code) {
+              const code = response.authResponse.code;
+              completeMetaOnboardWithCode(code, projectId);
+              resolve(response);
+              return;
+            }
+            if (response?.status === "unknown" || !response?.authResponse) {
+              setEmbeddedSignupActive(false);
+              setRegBusy(false);
+              setRegOk("");
+              setRegErr("Meta signup was cancelled or failed. Please try again.");
+              embeddedSignupCodeHandlerRef.current = null;
+              resolve(response);
+              return;
+            }
+            resolve(response);
+          }, loginOptions);
         });
-    };
 
-    embeddedSignupCodeHandlerRef.current = finishSignupWithCode;
-    stopSignupWatchdogRef.current = stopSignupWatchdog;
+      if (fbSdkReady && window.FB?.login) {
+        setRegOk("Opening Meta Embedded Signup…");
+        await runFbLogin();
+        return;
+      }
 
-    // OAuth redirect popup — reliable code exchange via /meta/callback (FB.login often returns authResponse null).
-    if (openMetaOAuthPopup(cid, projectId, configId, solutionId)) {
-      return;
+      // Fallback: OAuth URL from backend (still includes solutionID in extras)
+      const signupUrl = onboard?.signupUrl || onboard?.embeddedSignupUrl;
+      if (!signupUrl) {
+        throw new Error(onboard?.message || "No embedded signup URL returned");
+      }
+      setRegOk("Facebook SDK not ready — redirecting to Meta Signup…");
+      window.location.href = signupUrl;
+    } catch (e) {
+      setEmbeddedSignupActive(false);
+      setRegBusy(false);
+      setRegOk("");
+      setRegErr(
+        e?.response?.data?.message ||
+          e?.message ||
+          "Could not start WhatsApp onboarding."
+      );
     }
-
-    embeddedSignupCodeHandlerRef.current = null;
-    stopSignupWatchdogRef.current = null;
-    stopSignupWatchdog();
-    setEmbeddedSignupActive(false);
-    setRegBusy(false);
-    setRegErr("Facebook popup was blocked. Please allow popups for this site and try again.");
   };
+
+  const launchSignupRef = useRef(launchWhatsAppSignup);
+  launchSignupRef.current = launchWhatsAppSignup;
+
+  const autoConnectRequested = useMemo(() => {
+    const q = new URLSearchParams(location.search || "");
+    const v = String(q.get("autoConnect") || "").toLowerCase();
+    return v === "1" || v === "true" || v === "yes";
+  }, [location.search]);
+
+  const autoConnectStartedRef = useRef(false);
+
+  useEffect(() => {
+    if (!autoConnectRequested || autoConnectStartedRef.current || !liveStatusChecked) return;
+    if (waStatus && isWhatsAppConnected(waStatus)) return;
+    autoConnectStartedRef.current = true;
+    window.setTimeout(() => launchSignupRef.current?.(), 300);
+  }, [autoConnectRequested, liveStatusChecked, waStatus]);
 
   useEffect(() => {
     return () => {
@@ -1704,6 +1622,9 @@ function ConnectWhatsApp() {
                         {regOk}
                       </p>
                     ) : null}
+                    <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
+                      WhatsApp is linked. Complete Cloud API registration above if required, then send messages from the dashboard.
+                    </p>
                   </div>
                 ) : liveStatusChecked && congratulationsMessage && !onboardingOk ? (
                   <div className="relative mt-4 space-y-4 text-center">
@@ -1734,11 +1655,16 @@ function ConnectWhatsApp() {
                       <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
                         WhatsApp Business API Status
                       </span>
-                      <span className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-4 py-2 text-sm font-bold text-emerald-700 ring-2 ring-emerald-200/80">
-                        <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" aria-hidden />
-                        LIVE
-                      </span>
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        <span className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-4 py-2 text-sm font-bold text-emerald-700 ring-2 ring-emerald-200/80">
+                          <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" aria-hidden />
+                          LIVE
+                        </span>
+                      </div>
                     </div>
+                    <p className="text-xs text-center text-emerald-700">
+                      Open the dashboard to send messages.
+                    </p>
                     <p className="text-xs text-center text-gray-500">
                       This number is connected for this project. Continue from the dashboard to send messages.
                     </p>
@@ -1748,6 +1674,11 @@ function ConnectWhatsApp() {
                     <p className="relative mt-3 text-sm md:text-base text-gray-600 leading-relaxed">
                       Sign in with Meta to connect your WhatsApp Business account.
                     </p>
+                    {autoConnectRequested && (regBusy || embeddedSignupActive) ? (
+                      <p className="relative mt-3 text-sm text-sky-700 bg-sky-50 border border-sky-100 rounded-lg px-3 py-2">
+                        Opening Meta Embedded Signup… complete Facebook login, WABA setup, and phone verification in the popup.
+                      </p>
+                    ) : null}
 
                     <button
                       type="button"
@@ -1982,12 +1913,68 @@ function App() {
         />
 
         <Route
+          path="/tags"
+          element={
+            <ProtectedRoute>
+              <ManagerPermissionRoute moduleKey="manage">
+                <TagsPage />
+              </ManagerPermissionRoute>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
           path="/flows"
           element={
             <ProtectedRoute>
               <ManagerPermissionRoute moduleKey="flows">
                 <Flows />
               </ManagerPermissionRoute>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/form"
+          element={
+            <ProtectedRoute>
+              <FormsPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/form/create"
+          element={
+            <ProtectedRoute>
+              <FormBuilderPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/form/edit/:id"
+          element={
+            <ProtectedRoute>
+              <FormBuilderPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/whatsapp-button"
+          element={
+            <ProtectedRoute>
+              <WhatsAppButtonPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/rcs"
+          element={
+            <ProtectedRoute>
+              <RcsPage />
             </ProtectedRoute>
           }
         />
@@ -2033,6 +2020,22 @@ function App() {
           element={
             <ProtectedRoute>
               <SuperAdminDashboardRoute />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/super-admin/businesses"
+          element={
+            <ProtectedRoute>
+              <SuperAdminBusinessesRoute />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/super-admin/blogs"
+          element={
+            <ProtectedRoute>
+              <SuperAdminBlogsRoute />
             </ProtectedRoute>
           }
         />
@@ -2106,6 +2109,18 @@ function App() {
             </ProtectedRoute>
           }
         />
+
+        <Route
+          path="/chat-history"
+          element={
+            <ProtectedRoute>
+              <ManagerPermissionRoute moduleKey="inbox">
+                <Inbox pageMode="history" />
+              </ManagerPermissionRoute>
+            </ProtectedRoute>
+          }
+        />
+
 
         <Route
           path="/connect-whatsapp"
