@@ -56,6 +56,8 @@ import AgentManageCannedMessagesPage from './pages/AgentManageCannedMessagesPage
 import SuperAdminDashboard from './pages/SuperAdminDashboard';
 import SuperAdminBusinessesPage from './pages/SuperAdminBusinessesPage';
 import SuperAdminBlogsPage from './pages/SuperAdminBlogsPage';
+import PublicBlogListPage from './pages/PublicBlogListPage';
+import PublicBlogDetailPage from './pages/PublicBlogDetailPage';
 import CampaignReportsPage from './pages/CampaignReportsPage';
 import HistoryPage from './pages/HistoryPage';
 import ReportsComingSoonPage from './pages/ReportsComingSoonPage';
@@ -564,6 +566,7 @@ function ConnectWhatsApp() {
         connected: true,
         whatsappConnected: true,
         metaLinked: true,
+        creditLineAttached: Boolean(statusData?.creditLineAttached),
       }));
       setEmbeddedSignupActive(false);
       setRegBusy(false);
@@ -1199,7 +1202,12 @@ function ConnectWhatsApp() {
           );
         }
         const refreshed = await refreshConnectionStatus();
-        if (!isWhatsAppConnected(refreshed)) {
+        const linkedNow =
+          isWhatsAppConnected(refreshed) ||
+          isWhatsAppConnected(data?.verification) ||
+          isWhatsAppConnected(data?.data) ||
+          Boolean(data?.whatsappConnected || data?.metaLinked);
+        if (!linkedNow) {
           setRegErr(
             refreshed?.reason ||
               "Meta sign-in completed but WhatsApp is not linked yet — check server logs."
@@ -1660,6 +1668,11 @@ function ConnectWhatsApp() {
                           <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" aria-hidden />
                           LIVE
                         </span>
+                        {waStatus?.creditLineAttached || waStatus?.paymentMethodReady ? (
+                          <span className="inline-flex items-center gap-2 rounded-full bg-sky-50 px-4 py-2 text-sm font-bold text-sky-800 ring-2 ring-sky-200/80">
+                            AiSensy credit line attached
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                     <p className="text-xs text-center text-emerald-700">
@@ -2000,6 +2013,14 @@ function App() {
         />
 
         <Route
+          path="/super-admin/*"
+          element={
+            <ProtectedRoute>
+              <SuperAdminDashboardRoute />
+            </ProtectedRoute>
+          }
+        />
+        <Route
           path="/superadmin-dashboard"
           element={
             <ProtectedRoute>
@@ -2016,7 +2037,7 @@ function App() {
           }
         />
         <Route
-          path="/super-admin"
+          path="/super-admin/businesses"
           element={
             <ProtectedRoute>
               <SuperAdminDashboardRoute />
@@ -2024,18 +2045,34 @@ function App() {
           }
         />
         <Route
-          path="/super-admin/businesses"
+          path="/super-admin/blogs"
           element={
             <ProtectedRoute>
-              <SuperAdminBusinessesRoute />
+              <SuperAdminDashboardRoute />
             </ProtectedRoute>
           }
         />
         <Route
-          path="/super-admin/blogs"
+          path="/super-admin/plans"
           element={
             <ProtectedRoute>
-              <SuperAdminBlogsRoute />
+              <SuperAdminDashboardRoute />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/super-admin/leads"
+          element={
+            <ProtectedRoute>
+              <SuperAdminDashboardRoute />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/super-admin/demos"
+          element={
+            <ProtectedRoute>
+              <SuperAdminDashboardRoute />
             </ProtectedRoute>
           }
         />
@@ -2128,6 +2165,23 @@ function App() {
             <ProtectedRoute>
               <ConnectWhatsApp />
             </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/public/blogs"
+          element={
+            <PublicRoute>
+              <PublicBlogListPage />
+            </PublicRoute>
+          }
+        />
+        <Route
+          path="/public/blogs/:id"
+          element={
+            <PublicRoute>
+              <PublicBlogDetailPage />
+            </PublicRoute>
           }
         />
 

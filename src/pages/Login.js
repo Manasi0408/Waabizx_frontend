@@ -213,7 +213,7 @@ function Login() {
   };
 
   return (
-    <div className="fixed inset-0 z-[1] flex flex-col overflow-hidden overscroll-none bg-gradient-to-b from-sky-50/90 via-white to-sky-100/50">
+    <div className="login-page fixed inset-0 z-[1] flex flex-col overflow-hidden overscroll-none bg-gradient-to-b from-sky-50/90 via-white to-sky-100/50">
       <div className="absolute top-4 right-4 z-20">
         <ThemeToggle />
       </div>

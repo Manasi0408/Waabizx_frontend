@@ -25,6 +25,19 @@ const authHeaders = (extra = {}) => {
   return headers;
 };
 
+const appendProjectScope = (params = new URLSearchParams()) => {
+  try {
+    const raw = localStorage.getItem('selectedProject');
+    const selected = raw ? JSON.parse(raw) : null;
+    if (selected?.id != null && String(selected.id).trim() !== '') {
+      params.set('projectId', String(selected.id));
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return params;
+};
+
 const normalizeErrorMessage = (data, fallback) => {
   if (!data) return fallback;
   if (typeof data === 'string') return data;
@@ -56,17 +69,16 @@ export const createTemplate = async (templateData) => {
 
     const response = await fetch(`${API_URL}/templates`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: authHeaders(),
       body: JSON.stringify(templateData)
     });
 
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || data.message || 'Failed to create template');
+      const err = new Error(data.error || data.message || 'Failed to create template');
+      err.response = { data };
+      throw err;
     }
 
     if (data.success) {
@@ -88,7 +100,7 @@ export const getTemplates = async (filters = {}) => {
     }
 
     const { category, status, page = 1, limit = 20 } = filters;
-    const params = new URLSearchParams();
+    const params = appendProjectScope(new URLSearchParams());
     if (category) params.append('category', category);
     if (status) params.append('status', status);
     params.append('page', page);
@@ -157,10 +169,7 @@ export const updateTemplate = async (templateId, updates) => {
 
     const response = await fetch(`${API_URL}/templates/${templateId}`, {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: authHeaders(),
       body: JSON.stringify(updates)
     });
 
@@ -190,10 +199,7 @@ export const deleteTemplate = async (templateId) => {
 
     const response = await fetch(`${API_URL}/templates/${templateId}`, {
       method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      }
+      headers: authHeaders(),
     });
 
     const data = await response.json();
@@ -230,7 +236,9 @@ export const createMetaTemplate = async (templateData) => {
     }
 
     if (!response.ok) {
-      throw new Error(normalizeErrorMessage(data, 'Failed to submit template to Meta'));
+      const err = new Error(normalizeErrorMessage(data, 'Failed to submit template to Meta'));
+      err.response = { data };
+      throw err;
     }
 
     if (data.success) {
@@ -254,10 +262,14 @@ export const getMetaTemplateDetails = async (templateId) => {
       throw new Error('Template ID is required');
     }
 
-    const response = await fetch(`${API_URL}/templates/meta/${encodeURIComponent(templateId)}`, {
+    const params = appendProjectScope(new URLSearchParams());
+    const response = await fetch(
+      `${API_URL}/templates/meta/${encodeURIComponent(templateId)}?${params.toString()}`,
+      {
       method: 'GET',
       headers: authHeaders(),
-    });
+      }
+    );
 
     const data = await response.json();
 
@@ -283,12 +295,10 @@ export const getMetaTemplates = async () => {
       throw new Error('No token found');
     }
 
-    const response = await fetch(`${API_URL}/templates/meta`, {
+    const params = appendProjectScope(new URLSearchParams());
+    const response = await fetch(`${API_URL}/templates/meta?${params.toString()}`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      }
+      headers: authHeaders(),
     });
 
     const data = await response.json();

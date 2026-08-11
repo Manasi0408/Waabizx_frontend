@@ -10,6 +10,8 @@ import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import PlanLimitModal from '../components/PlanLimitModal';
+import { extractPlanLimitError, assertCanAddResource } from '../services/planLimitService';
 
 const API_BASE = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 const MSG_COST_RUPEES = 0.396;
@@ -270,7 +272,11 @@ async function createCampaignApi(payload) {
     body: JSON.stringify(payload),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.message || data.error || 'Failed to create campaign');
+  if (!res.ok) {
+    const err = new Error(data.message || data.error || 'Failed to create campaign');
+    err.response = { data };
+    throw err;
+  }
   return data;
 }
 
@@ -430,6 +436,7 @@ export default function CreateCampaignPage() {
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [excludeOptedOut, setExcludeOptedOut] = useState(true);
   const [wccCredits, setWccCredits] = useState(null);
+  const [planLimitModal, setPlanLimitModal] = useState(null);
 
   const templateVariables = useMemo(
     () => (selectedTemplate ? extractTemplateVariables(selectedTemplate) : []),
@@ -686,6 +693,13 @@ export default function CreateCampaignPage() {
     setBusy(true);
     setError('');
     try {
+      const precheck = await assertCanAddResource('campaigns');
+      if (!precheck.allowed) {
+        setPlanLimitModal(precheck);
+        setError('');
+        return;
+      }
+
       const variable_mapping = buildVariableMapping(templateVarMap, templateVarCustom);
       const data = await createCampaignApi({
         name: campaignName.trim(),
@@ -702,7 +716,13 @@ export default function CreateCampaignPage() {
       }
       navigate('/campaigns', { state: { success: 'Campaign created and sending started' } });
     } catch (e) {
-      setError(e.message || 'Failed to send campaign');
+      const limitPayload = extractPlanLimitError(e);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setError('');
+      } else {
+        setError(e.message || 'Failed to send campaign');
+      }
     } finally {
       setBusy(false);
     }
@@ -1225,6 +1245,7 @@ export default function CreateCampaignPage() {
           </div>
         </main>
       </div>
+      <PlanLimitModal open={Boolean(planLimitModal)} payload={planLimitModal} onClose={() => setPlanLimitModal(null)} />
     </div>
   );
 }

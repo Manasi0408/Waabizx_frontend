@@ -928,10 +928,10 @@ function Dashboard() {
             <div className="pointer-events-none absolute -top-16 -right-16 h-44 w-44 rounded-full bg-sky-200/25 blur-3xl" aria-hidden />
             <div className="relative flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-5">
               <div>
-                <h3 className="text-lg md:text-xl font-bold text-slate-900 tracking-tight">Wallet, WABA tier &amp; sends</h3>
-                <p className="text-sm text-slate-600 mt-1.5">Credits, Meta messaging tier, and daily cap — refreshed every 10 seconds</p>
+                <h3 className="text-lg md:text-xl font-bold text-slate-900 tracking-tight">WhatsApp Conversation Credits (WCC)</h3>
+                <p className="text-sm text-slate-600 mt-1.5">Per-project wallet, Meta messaging tier, and daily cap — refreshed every 10 seconds</p>
                 <p className="text-xs text-slate-500 mt-2">
-                  Account: {loadingQuota ? '...' : (conversationQuota.accountName || '—')}
+                  Project: {loadingQuota ? '...' : (conversationQuota.projectName || selectedProject?.project_name || '—')}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -946,14 +946,14 @@ function Dashboard() {
             <div className="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 motion-stagger-children">
               <div className="motion-hover-lift rounded-2xl border border-amber-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-amber-200/60 shadow-md shadow-amber-100/60">
                 <div className="flex items-center justify-between">
-                  <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">Wallet credits</div>
+                  <div className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">Remaining WCC</div>
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-amber-100 text-amber-700 text-sm">₹</span>
                 </div>
                 <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
                   {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.wccRemainingCredits || 0)} />}
                 </div>
                 <p className="mt-2 text-[11px] text-slate-500 leading-snug">
-                  Internal prepaid balance (1 credit ≈ ₹1). Deducted after each successful WhatsApp send.
+                  Internal prepaid balance for this project (1 credit ≈ ₹1). Deducted after each successful WhatsApp send.
                 </p>
               </div>
               <div className="motion-hover-lift rounded-2xl border border-indigo-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-indigo-200/60 shadow-md shadow-indigo-100/50">

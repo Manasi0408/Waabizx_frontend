@@ -100,9 +100,11 @@ export const createContact = async (contactData) => {
         error: data?.error,
         data,
       });
-      throw new Error(
+      const err = new Error(
         data?.message || data?.error || `Failed to create contact (HTTP ${response.status})`
       );
+      err.response = { data };
+      throw err;
     }
 
     if (data.success) {
@@ -113,7 +115,6 @@ export const createContact = async (contactData) => {
       return {
         contact: data.contact,
         message: data.message || '',
-        alreadyExists: /already exists/i.test(String(data.message || '')),
       };
     }
 
@@ -142,7 +143,11 @@ export const uploadContactsCSV = async (file) => {
     body: formData
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.message || data.error || 'Failed to upload CSV');
+  if (!response.ok) {
+    const err = new Error(data.message || data.error || 'Failed to upload CSV');
+    err.response = { data };
+    throw err;
+  }
   if (!data.success) throw new Error(data.message || 'Failed to upload CSV');
   return data;
 };

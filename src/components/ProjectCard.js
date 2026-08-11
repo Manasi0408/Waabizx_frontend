@@ -9,10 +9,12 @@ function statusStyles(status) {
   return { dot: "bg-slate-400", pill: "bg-slate-100 text-slate-700 ring-slate-200/80" };
 }
 
-function ProjectCard({ project, onRemove }) {
+function ProjectCard({ project, onToggleHidden, clickable = true }) {
   const status = project.status || "N/A";
   const { dot, pill } = statusStyles(status);
   const statusNormalized = String(status).toLowerCase();
+  const isHidden = Boolean(project.is_hidden === 1 || project.is_hidden === true);
+  const canOpen = clickable && !isHidden;
   const isApproved =
     project.whatsappApproved === true ||
     ["approved", "active", "live", "verified"].includes(statusNormalized);
@@ -112,17 +114,27 @@ function ProjectCard({ project, onRemove }) {
           <div className="mt-5 flex gap-2 border-t border-gray-100/90 pt-4">
             <button
               type="button"
-              className="min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-slate-600 transition-all hover:border-sky-300 hover:text-sky-700"
+              disabled={!canOpen}
+              tabIndex={canOpen ? 0 : -1}
+              className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition-all ${
+                canOpen
+                  ? "border-gray-300 bg-white text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                  : "cursor-not-allowed border-gray-200 bg-gray-50 text-gray-400"
+              }`}
             >
               View
             </button>
-            {typeof onRemove === "function" ? (
+            {typeof onToggleHidden === "function" ? (
               <button
                 type="button"
-                onClick={onRemove}
-                className="shrink-0 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-semibold text-rose-700 transition-all hover:border-rose-300 hover:bg-rose-50"
+                onClick={onToggleHidden}
+                className={`relative z-10 shrink-0 rounded-lg border px-3 py-2 text-sm font-semibold transition-all pointer-events-auto ${
+                  isHidden
+                    ? "border-sky-200 bg-sky-50 text-sky-800 hover:border-sky-300 hover:bg-sky-100"
+                    : "border-gray-300 bg-white text-slate-600 hover:border-gray-400 hover:bg-gray-50"
+                }`}
               >
-                Remove
+                {isHidden ? "Unhide" : "Hide"}
               </button>
             ) : null}
           </div>

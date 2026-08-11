@@ -21,10 +21,10 @@ export const PLAN_HIGHLIGHTS = [
 ];
 
 export const CONVERSATION_METRICS = [
-  { label: 'Marketing', text: 'Rs. 0.95 /msg', key: 'marketing' },
-  { label: 'Utility', text: 'Rs. 0.150 /msg', key: 'utility' },
-  { label: 'Authentication', text: 'Rs. 0.129 /msg', key: 'authentication' },
-  { label: 'Service', text: 'Free up to 10 agents', key: 'service' },
+  { label: 'Marketing', text: 'Rs. 0.95 /msg', key: 'marketing', rate: 0.95, rate_usd: 0.012 },
+  { label: 'Utility', text: 'Rs. 0.150 /msg', key: 'utility', rate: 0.15, rate_usd: 0.002 },
+  { label: 'Authentication', text: 'Rs. 0.129 /msg', key: 'authentication', rate: 0.129, rate_usd: 0.0016 },
+  { label: 'Service', text: 'Free up to 10 agents', key: 'service', rate: 0, rate_usd: 0 },
 ];
 
 export const MESSAGE_CATEGORY_RATES = {
@@ -34,10 +34,60 @@ export const MESSAGE_CATEGORY_RATES = {
   service: 0,
 };
 
+export const formatConversationRateText = (rate, currency = 'INR') => {
+  const n = Math.max(0, Number(rate) || 0);
+  const formatted = Number.isInteger(n) ? String(n) : String(n);
+  if (String(currency).toUpperCase() === 'USD') {
+    return `$${formatted} /msg`;
+  }
+  return `Rs. ${formatted} /msg`;
+};
+
+export const buildConversationMetrics = (metrics = null, rates = null) => {
+  if (Array.isArray(metrics) && metrics.length) {
+    return metrics.map((metric) => ({
+      key: metric.key,
+      label: metric.label,
+      text: metric.text,
+      rate: Number(metric.rate) || 0,
+    }));
+  }
+  if (rates && typeof rates === 'object') {
+    return CONVERSATION_METRICS.map((metric) => {
+      const rate = Number(rates[metric.key]);
+      if (metric.key === 'service') {
+        return { ...metric, rate: Number.isFinite(rate) ? rate : metric.rate };
+      }
+      if (!Number.isFinite(rate)) return metric;
+      return {
+        ...metric,
+        rate,
+        text: formatConversationRateText(rate),
+      };
+    });
+  }
+  return CONVERSATION_METRICS;
+};
+
+export const buildMessageCategoryRates = (rates = null) => ({
+  ...MESSAGE_CATEGORY_RATES,
+  ...(rates && typeof rates === 'object' ? rates : {}),
+});
+
 const GST_RATE = 0.18;
 
 export const formatInr = (value) =>
   Number(value).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+export const formatUsd = (value) =>
+  Number(value).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+export const formatPlanAmount = (value, currency = 'INR') =>
+  String(currency).toUpperCase() === 'USD'
+    ? `$${formatUsd(value)}`
+    : `₹ ${formatInr(value)}`;
+
+export const isInrCurrency = (currency = 'INR') => String(currency).toUpperCase() !== 'USD';
 
 export function normalizeTemplateBillingCategory(raw) {
   const c = String(raw || '').trim().toLowerCase();
@@ -70,24 +120,26 @@ export function resolveTemplateBillingCategory(template) {
   return 'marketing';
 }
 
-export function getMessageRateForBillingCategory(category) {
+export function getMessageRateForBillingCategory(category, rates = MESSAGE_CATEGORY_RATES) {
   const key = normalizeTemplateBillingCategory(category) || String(category || 'marketing').toLowerCase();
-  return MESSAGE_CATEGORY_RATES[key] ?? MESSAGE_CATEGORY_RATES.marketing;
+  const resolvedRates = rates && typeof rates === 'object' ? rates : MESSAGE_CATEGORY_RATES;
+  return resolvedRates[key] ?? resolvedRates.marketing ?? MESSAGE_CATEGORY_RATES.marketing;
 }
 
-export function estimateCampaignMessageCost(recipientCount, templateOrCategory) {
+export function estimateCampaignMessageCost(recipientCount, templateOrCategory, rates = MESSAGE_CATEGORY_RATES) {
   const count = Math.max(0, Number(recipientCount) || 0);
   const category =
     typeof templateOrCategory === 'string'
       ? normalizeTemplateBillingCategory(templateOrCategory) || 'marketing'
       : resolveTemplateBillingCategory(templateOrCategory);
-  const rate = getMessageRateForBillingCategory(category);
+  const resolvedRates = rates && typeof rates === 'object' ? rates : MESSAGE_CATEGORY_RATES;
+  const rate = getMessageRateForBillingCategory(category, resolvedRates);
   return Math.round(count * rate * 100) / 100;
 }
 
-export function getBillingCategoryLabel(category) {
+export function getBillingCategoryLabel(category, metrics = CONVERSATION_METRICS) {
   const key = normalizeTemplateBillingCategory(category) || String(category || 'marketing').toLowerCase();
-  const match = CONVERSATION_METRICS.find((m) => m.key === key);
+  const match = metrics.find((m) => m.key === key);
   return match?.label || 'Marketing';
 }
 
@@ -132,7 +184,9 @@ export const resolvePlanBillingAmount = (plan, cycle) => {
   return cycleBillingAmount(monthly, cycle);
 };
 
-export const buildCycleOptions = (monthly, plan = null) => {
+export const buildCycleOptions = (monthly, plan = null, currency = 'INR') => {
+  const isUsd = !isInrCurrency(currency);
+  const fmt = (v) => (isUsd ? `$${formatUsd(v)}` : `Rs. ${formatInr(v)}`);
   const baseMonthly = Math.max(0, Number(monthly) || Number(plan?.price_monthly) || PLAN_MONTHLY_DEFAULT);
   return ['monthly', 'quarterly', 'yearly'].map((cycle) => {
     const billingAmount = cycleBillingAmount(baseMonthly, cycle);
@@ -144,9 +198,9 @@ export const buildCycleOptions = (monthly, plan = null) => {
 
     let billingNote = 'Billed monthly recurring base subscription.';
     if (cycle === 'quarterly') {
-      billingNote = `Billed Rs. ${formatInr(billingAmount)} quarterly (−10% Applied)`;
+      billingNote = `Billed ${fmt(billingAmount)} quarterly (−10% Applied)`;
     } else if (cycle === 'yearly') {
-      billingNote = `Billed Rs. ${formatInr(billingAmount)} annually (−15% Applied)`;
+      billingNote = `Billed ${fmt(billingAmount)} annually (−15% Applied)`;
     }
 
     return {
@@ -158,17 +212,20 @@ export const buildCycleOptions = (monthly, plan = null) => {
       discountLabel: PLAN_DISCOUNT_LABEL[cycle],
       periodLabel: cycle === 'monthly' ? 'month' : cycle === 'quarterly' ? 'quarter' : 'year',
       months: cycle === 'monthly' ? 1 : cycle === 'quarterly' ? 3 : 12,
-      perProjectLabel: `Rs. ${formatInr(discountedMonthly)} /project /mo`,
+      perProjectLabel: `${fmt(discountedMonthly)} /project /mo`,
       billingNote,
+      currency: isUsd ? 'USD' : 'INR',
     };
   });
 };
 
-export const buildPricingBreakdown = (monthly, cycle, plan = null) => {
+export const buildPricingBreakdown = (monthly, cycle, plan = null, currency = 'INR') => {
+  const isUsd = !isInrCurrency(currency);
+  const fmt = (v) => (isUsd ? `$${formatUsd(v)}` : `Rs. ${formatInr(v)}`);
   const baseMonthly = Math.max(0, Number(monthly) || Number(plan?.price_monthly) || PLAN_MONTHLY_DEFAULT);
   const billingAmount = cycleBillingAmount(baseMonthly, cycle);
-  const gst = gstAmount(billingAmount);
-  const total = payableWithGst(billingAmount);
+  const gst = isUsd ? 0 : gstAmount(billingAmount);
+  const total = isUsd ? billingAmount : payableWithGst(billingAmount);
 
   if (cycle === 'monthly') {
     return {
@@ -176,9 +233,10 @@ export const buildPricingBreakdown = (monthly, cycle, plan = null) => {
       billingAmount,
       gst,
       total,
+      currency: isUsd ? 'USD' : 'INR',
       lines: [
         { label: 'Monthly plan price', value: baseMonthly },
-        { label: 'GST (18%)', value: gst, muted: true },
+        ...(isUsd ? [] : [{ label: 'GST (18%)', value: gst, muted: true }]),
       ],
       summary: 'Billed monthly recurring base subscription.',
     };
@@ -192,13 +250,14 @@ export const buildPricingBreakdown = (monthly, cycle, plan = null) => {
       billingAmount,
       gst,
       total,
+      currency: isUsd ? 'USD' : 'INR',
       lines: [
         { label: 'Monthly base price', value: baseMonthly },
         { label: 'After 10% discount', value: discounted, highlight: true },
         { label: 'Quarterly total (× 3 months)', value: billingAmount },
-        { label: 'GST (18%)', value: gst, muted: true },
+        ...(isUsd ? [] : [{ label: 'GST (18%)', value: gst, muted: true }]),
       ],
-      summary: `Billed Rs. ${formatInr(billingAmount)} quarterly (−10% Applied)`,
+      summary: `Billed ${fmt(billingAmount)} quarterly (−10% Applied)`,
     };
   }
 
@@ -209,12 +268,13 @@ export const buildPricingBreakdown = (monthly, cycle, plan = null) => {
     billingAmount,
     gst,
     total,
+    currency: isUsd ? 'USD' : 'INR',
     lines: [
       { label: 'Monthly base price', value: baseMonthly },
       { label: 'After 15% discount', value: discounted, highlight: true },
       { label: 'Yearly total (× 12 months)', value: billingAmount },
-      { label: 'GST (18%)', value: gst, muted: true },
+      ...(isUsd ? [] : [{ label: 'GST (18%)', value: gst, muted: true }]),
     ],
-    summary: `Billed Rs. ${formatInr(billingAmount)} annually (−15% Applied)`,
+    summary: `Billed ${fmt(billingAmount)} annually (−15% Applied)`,
   };
 };

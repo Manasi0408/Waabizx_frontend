@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from '../api/axios';
+import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
 
 const formatDate = (value) => {
   if (!value) return '—';
@@ -32,23 +33,14 @@ const truncate = (text, max = 80) => {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 };
 
-const STATUS_OPTIONS = [
-  { value: 'new', label: 'New' },
-  { value: 'contacted', label: 'Contacted' },
-  { value: 'closed', label: 'Closed' },
-];
-
-const statusBadgeClass = (status) => {
-  const key = String(status || 'new').toLowerCase();
-  if (key === 'contacted') return 'bg-sky-50 text-sky-800 ring-sky-200/90';
-  if (key === 'closed') return 'bg-gray-100 text-gray-600 ring-gray-200/80';
-  return 'bg-emerald-50 text-emerald-800 ring-emerald-200/90';
-};
-
-const statusLabel = (status) => {
-  const key = String(status || 'new').toLowerCase();
-  return STATUS_OPTIONS.find((o) => o.value === key)?.label || 'New';
-};
+function DetailField({ label, value }) {
+  return (
+    <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2.5">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">{label}</p>
+      <p className="mt-1 text-sm font-medium text-gray-900">{value || '—'}</p>
+    </div>
+  );
+}
 
 function SuperAdminDemoBookingsPanel() {
   const [bookings, setBookings] = useState([]);
@@ -95,6 +87,11 @@ function SuperAdminDemoBookingsPanel() {
       return haystack.includes(q);
     });
   }, [bookings, search]);
+
+  const { page, setPage, totalPages, paginatedItems, totalItems, pageSize } = useSuperAdminPagination(
+    filteredBookings,
+    [search]
+  );
 
   const stats = useMemo(() => {
     const today = new Date();
@@ -192,7 +189,7 @@ function SuperAdminDemoBookingsPanel() {
                 type="search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name, email, country, industry…"
+                placeholder="Search name, email, phone…"
                 className="w-full rounded-xl border-2 border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
               />
             </div>
@@ -235,17 +232,12 @@ function SuperAdminDemoBookingsPanel() {
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Name</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Work email</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Phone</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Country</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Industry</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Heard about</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Interest</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Company size</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Status</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Submitted</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {filteredBookings.map((booking) => (
+                  {paginatedItems.map((booking) => (
                     <tr
                       key={booking.id}
                       className="hover:bg-sky-50/30 transition-colors cursor-pointer"
@@ -254,38 +246,9 @@ function SuperAdminDemoBookingsPanel() {
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
                         {booking.full_name || '—'}
                       </td>
-                      <td className="px-4 py-3 text-gray-700">
-                        {booking.email ? (
-                          <a
-                            href={`mailto:${booking.email}`}
-                            className="text-sky-700 hover:underline"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {booking.email}
-                          </a>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
+                      <td className="px-4 py-3 text-gray-700">{booking.email || '—'}</td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPhone(booking.phone)}</td>
-                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{booking.country || '—'}</td>
-                      <td className="px-4 py-3 text-gray-700 max-w-[10rem]" title={booking.industry || ''}>
-                        {truncate(booking.industry, 40)}
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 max-w-[10rem]" title={booking.heard_about || ''}>
-                        {truncate(booking.heard_about, 40)}
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 max-w-[10rem]" title={booking.interest || ''}>
-                        {truncate(booking.interest, 40)}
-                      </td>
                       <td className="px-4 py-3 text-gray-700">{booking.company_size || '—'}</td>
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        <span
-                          className={`inline-flex items-center px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide ring-1 ${statusBadgeClass(booking.status)}`}
-                        >
-                          {statusLabel(booking.status)}
-                        </span>
-                      </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">
                         {formatDate(booking.createdAt)}
                       </td>
@@ -296,7 +259,7 @@ function SuperAdminDemoBookingsPanel() {
             </div>
 
             <div className="lg:hidden p-4 space-y-3 motion-stagger-children">
-              {filteredBookings.map((booking) => {
+              {paginatedItems.map((booking) => {
                 const initial = String(booking.full_name || '?').charAt(0).toUpperCase();
                 return (
                   <article
@@ -313,18 +276,8 @@ function SuperAdminDemoBookingsPanel() {
                             <div className="font-bold text-gray-900">{booking.full_name || 'Unnamed'}</div>
                             <div className="text-xs text-gray-500 mt-0.5">{formatDate(booking.createdAt)}</div>
                           </div>
-                          <span
-                            className={`shrink-0 inline-flex items-center px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide ring-1 ${statusBadgeClass(booking.status)}`}
-                          >
-                            {statusLabel(booking.status)}
-                          </span>
                         </div>
                         <div className="mt-2 flex flex-wrap gap-1.5">
-                          {booking.country ? (
-                            <span className="inline-flex text-[10px] font-bold uppercase tracking-wide text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded-full ring-1 ring-indigo-100">
-                              {booking.country}
-                            </span>
-                          ) : null}
                           {booking.company_size ? (
                             <span className="inline-flex text-[10px] font-bold uppercase tracking-wide text-sky-800 bg-sky-50 px-2 py-0.5 rounded-full ring-1 ring-sky-100">
                               {booking.company_size}
@@ -335,23 +288,10 @@ function SuperAdminDemoBookingsPanel() {
                     </div>
                     <div className="mt-3 space-y-1.5 text-xs text-gray-600">
                       <div>
-                        <span className="font-semibold text-gray-500">Work email:</span>{' '}
-                        {booking.email ? (
-                          <a href={`mailto:${booking.email}`} className="text-sky-700">
-                            {booking.email}
-                          </a>
-                        ) : (
-                          '—'
-                        )}
+                        <span className="font-semibold text-gray-500">Work email:</span> {booking.email || '—'}
                       </div>
                       <div>
                         <span className="font-semibold text-gray-500">Phone:</span> {formatPhone(booking.phone)}
-                      </div>
-                      <div>
-                        <span className="font-semibold text-gray-500">Industry:</span> {booking.industry || '—'}
-                      </div>
-                      <div>
-                        <span className="font-semibold text-gray-500">Interest:</span> {booking.interest || '—'}
                       </div>
                     </div>
                     <button
@@ -365,6 +305,14 @@ function SuperAdminDemoBookingsPanel() {
                 );
               })}
             </div>
+
+            <SuperAdminPagination
+              page={page}
+              totalPages={totalPages}
+              onPageChange={setPage}
+              totalItems={totalItems}
+              pageSize={pageSize}
+            />
           </>
         )}
       </section>
@@ -373,9 +321,14 @@ function SuperAdminDemoBookingsPanel() {
         <div className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-950/55 backdrop-blur-sm">
           <div className="w-full max-w-lg max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-2xl border border-gray-200/90 ring-1 ring-black/5 flex flex-col">
             <div className="shrink-0 px-5 py-4 border-b border-sky-100/90 bg-gradient-to-r from-sky-50 via-white to-blue-50 flex items-center justify-between gap-3">
-              <div>
-                <h4 className="text-base font-bold text-gray-900">Demo booking details</h4>
-                <p className="text-xs text-gray-500 mt-0.5">{formatDate(selectedBooking.createdAt)}</p>
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-blue-700 text-base font-bold text-white">
+                  {String(selectedBooking.full_name || '?').charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <h4 className="truncate text-base font-bold text-gray-900">{selectedBooking.full_name || 'Demo booking'}</h4>
+                  <p className="text-xs text-gray-500 mt-0.5">{formatDate(selectedBooking.createdAt)}</p>
+                </div>
               </div>
               <button
                 type="button"
@@ -386,81 +339,21 @@ function SuperAdminDemoBookingsPanel() {
                 ×
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Full name</p>
-                <p className="mt-1 text-sm font-semibold text-gray-900">{selectedBooking.full_name || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Work email</p>
-                <p className="mt-1 text-sm text-gray-800">
-                  {selectedBooking.email ? (
-                    <a href={`mailto:${selectedBooking.email}`} className="text-sky-700 hover:underline">
-                      {selectedBooking.email}
-                    </a>
-                  ) : (
-                    '—'
-                  )}
-                </p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Phone number</p>
-                <p className="mt-1 text-sm text-gray-800">{formatPhone(selectedBooking.phone)}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Country</p>
-                <p className="mt-1 text-sm text-gray-800">{selectedBooking.country || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Industry</p>
-                <p className="mt-1 text-sm text-gray-800">{selectedBooking.industry || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">How did you hear about us</p>
-                <p className="mt-1 text-sm text-gray-800">{selectedBooking.heard_about || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">What would you like to Waabizx</p>
-                <p className="mt-1 text-sm text-gray-800">{selectedBooking.interest || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Company size</p>
-                <p className="mt-1 text-sm text-gray-800">{selectedBooking.company_size || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Status</p>
-                <p className="mt-1">
-                  <span
-                    className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wide ring-1 ${statusBadgeClass(selectedBooking.status)}`}
-                  >
-                    {statusLabel(selectedBooking.status)}
-                  </span>
-                </p>
+            <div className="flex-1 overflow-y-auto p-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <DetailField label="Full name" value={selectedBooking.full_name} />
+                <DetailField label="Work email" value={selectedBooking.email} />
+                <DetailField label="Phone number" value={formatPhone(selectedBooking.phone)} />
+                <DetailField label="Company size" value={selectedBooking.company_size} />
               </div>
             </div>
-            <div className="shrink-0 px-5 py-4 border-t border-gray-100 flex flex-wrap gap-2 justify-end">
-              {selectedBooking.email ? (
-                <a
-                  href={`mailto:${selectedBooking.email}`}
-                  className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-sky-600 to-blue-600 shadow-sm"
-                >
-                  Reply by email
-                </a>
-              ) : null}
-              {selectedBooking.phone ? (
-                <a
-                  href={`tel:${String(selectedBooking.phone).replace(/\D/g, '')}`}
-                  className="px-4 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50"
-                >
-                  Call
-                </a>
-              ) : null}
+            <div className="shrink-0 px-5 py-4 border-t border-gray-100 flex justify-end bg-gray-50/60">
               <button
                 type="button"
                 onClick={() => setSelectedBooking(null)}
-                className="px-4 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50"
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
               >
-                Close
+                Cancel
               </button>
             </div>
           </div>

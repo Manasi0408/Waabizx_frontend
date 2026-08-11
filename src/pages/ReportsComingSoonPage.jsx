@@ -5,7 +5,7 @@ import AppShellSidebar from "../components/AppShellSidebar";
 import AdminHeaderProjectSwitch from "../components/AdminHeaderProjectSwitch";
 import HeaderRightActions from "../components/HeaderRightActions";
 import { readSessionUser } from "../services/authService";
-import { RESOLVE_DISPOSITIONS, getDispositionLabel } from "../constants/resolveDispositions";
+import { getDispositionOptions, getDispositionLabel } from "../constants/resolveDispositions";
 
 function getSelectedProjectId() {
   try {
@@ -62,6 +62,21 @@ export default function ReportsComingSoonPage() {
   const [editLead, setEditLead] = useState(null);
   const [editDisposition, setEditDisposition] = useState("");
   const [savingDisposition, setSavingDisposition] = useState(false);
+  const [dispositionLabelVersion, setDispositionLabelVersion] = useState(0);
+  const dispositionOptions = useMemo(
+    () => getDispositionOptions(),
+    [dispositionLabelVersion]
+  );
+
+  useEffect(() => {
+    const bump = () => setDispositionLabelVersion((v) => v + 1);
+    window.addEventListener("waabizx-disposition-labels-changed", bump);
+    window.addEventListener("storage", bump);
+    return () => {
+      window.removeEventListener("waabizx-disposition-labels-changed", bump);
+      window.removeEventListener("storage", bump);
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -464,7 +479,7 @@ export default function ReportsComingSoonPage() {
                         key={t.disposition}
                         className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-800 ring-1 ring-violet-100"
                       >
-                        {t.label}
+                        {getDispositionLabel(t.disposition) || t.label}
                         <span className="tabular-nums text-violet-600">{t.count}</span>
                       </span>
                     ))}
@@ -522,7 +537,7 @@ export default function ReportsComingSoonPage() {
                           <td className="px-5 py-3 text-gray-700 tabular-nums">{lead.phone}</td>
                           <td className="px-5 py-3">
                             <span className="inline-flex rounded-full bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-800 ring-1 ring-violet-100">
-                              {lead.dispositionLabel || getDispositionLabel(lead.disposition)}
+                              {getDispositionLabel(lead.disposition) || lead.dispositionLabel}
                             </span>
                           </td>
                           <td className="px-5 py-3 text-gray-700">{lead.agentName || "—"}</td>
@@ -570,7 +585,7 @@ export default function ReportsComingSoonPage() {
               </p>
             </div>
             <div className="max-h-[min(50vh,360px)] space-y-2 overflow-y-auto px-5 py-4">
-              {RESOLVE_DISPOSITIONS.map((opt) => {
+              {dispositionOptions.map((opt) => {
                 const selected = editDisposition === opt.value;
                 return (
                   <button

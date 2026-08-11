@@ -167,15 +167,19 @@ export const sendTemplateMessage = async (
     });
 
     const data = await response.json();
-    if (!response.ok) {
-      let errorMsg = data.msg || data.message || 'Failed to send template';
-      if (!errorMsg && data.error) {
-        if (typeof data.error === 'string') errorMsg = data.error;
-        else if (data.error?.message) errorMsg = data.error.message;
-        else errorMsg = JSON.stringify(data.error);
+    if (!response.ok || data.success === false) {
+      let errorMsg =
+        data.msg ||
+        data.message ||
+        data.error ||
+        (data.wabaUnverified
+          ? 'WhatsApp Business Account is not verified yet. Complete Meta Business Verification and WhatsApp number setup, then retry.'
+          : 'Failed to send template');
+      if (typeof errorMsg !== 'string') {
+        errorMsg = errorMsg?.message || JSON.stringify(errorMsg);
       }
       console.error('Template send error:', { status: response.status, data });
-      throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
+      throw new Error(errorMsg);
     }
     if (data.wccCredits != null && typeof window !== 'undefined') {
       window.dispatchEvent(

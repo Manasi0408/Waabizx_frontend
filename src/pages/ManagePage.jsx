@@ -18,6 +18,8 @@ import {
   MANAGER_MODULE_OPTIONS,
   normalizeManagerPermissions,
 } from "../utils/managerAccess";
+import PlanLimitModal from "../components/PlanLimitModal";
+import { assertCanAddResource, extractPlanLimitError } from "../services/planLimitService";
 
 function agentAvatarGradient(id) {
   const palettes = [
@@ -103,6 +105,7 @@ function ManagePage() {
   const [editForm, setEditForm] = useState(buildAgentFormState());
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
+  const [planLimitModal, setPlanLimitModal] = useState(null);
 
   useEffect(() => {
     // Agents should only be able to manage canned messages.
@@ -228,18 +231,37 @@ function ManagePage() {
 
     setCreating(true);
     try {
+      const precheck = await assertCanAddResource("agents");
+      if (!precheck.allowed) {
+        setPlanLimitModal(precheck);
+        setCreateError("");
+        return;
+      }
+
+      const projectId =
+        selectedProject?.id != null && String(selectedProject.id).trim() !== ""
+          ? Number(selectedProject.id)
+          : null;
+
       await axios.post("/auth/register", {
         name,
         email,
         password,
         role,
+        projectId,
         permissions: role === "manager" ? normalizeManagerPermissions(createForm.permissions) : null,
       });
       setCreateOpen(false);
       setCreateForm({ name: "", email: "", password: "", role: "", permissions: emptyManagerPermissions() });
       await fetchAgents();
     } catch (e) {
-      setCreateError(e?.response?.data?.message || e?.message || "Failed to create agent");
+      const limitPayload = extractPlanLimitError(e);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setCreateError("");
+      } else {
+        setCreateError(e?.response?.data?.message || e?.message || "Failed to create agent");
+      }
     } finally {
       setCreating(false);
     }
@@ -456,8 +478,17 @@ function ManagePage() {
                     {canManageRoles && (
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={async () => {
                           setCreateError("");
+                          try {
+                            const precheck = await assertCanAddResource('agents');
+                            if (!precheck.allowed) {
+                              setPlanLimitModal(precheck);
+                              return;
+                            }
+                          } catch (_) {
+                            /* open modal; backend enforces limits on submit */
+                          }
                           setCreateForm({ name: "", email: "", password: "", role: "", permissions: emptyManagerPermissions() });
                           setCreateOpen(true);
                         }}
@@ -983,6 +1014,7 @@ function ManagePage() {
           </div>
         </div>
       )}
+      <PlanLimitModal open={Boolean(planLimitModal)} payload={planLimitModal} onClose={() => setPlanLimitModal(null)} />
     </div>
   );
 }

@@ -24,6 +24,10 @@ function projectLabel(p) {
   return String(p?.project_name || p?.name || '').trim();
 }
 
+function isProjectHidden(p) {
+  return Boolean(p?.is_hidden === 1 || p?.is_hidden === true);
+}
+
 const listScrollClass =
   'max-h-[min(18rem,70vh)] overflow-y-auto overscroll-contain py-1 ' +
   '[scrollbar-width:thin] [scrollbar-color:rgb(203_213_225)_rgb(248_250_252)] ' +
@@ -51,8 +55,10 @@ export default function AdminHeaderProjectSwitch() {
   );
 
   const orderedProjects = useMemo(() => {
-    const list = Array.isArray(projects) ? [...projects] : [];
     const sid = selected?.id;
+    const list = (Array.isArray(projects) ? [...projects] : []).filter(
+      (p) => !isProjectHidden(p) || (sid != null && String(p?.id) === String(sid))
+    );
     if (sid == null || String(sid).trim() === '') return list;
     const idx = list.findIndex((p) => String(p?.id) === String(sid));
     if (idx <= 0) return list;

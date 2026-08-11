@@ -2,14 +2,17 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import axios from "../api/axios";
-import { fetchActivePlans } from "../services/planService";
+import { fetchActivePlans, fetchConversationMetrics } from "../services/planService";
 import PlanSubscriptionView, { PlanGstBreakdown } from "./PlanSubscriptionView";
 import {
   PLAN_MONTHLY_DEFAULT,
+  buildConversationMetrics,
   cycleBillingAmount,
   computeQuarterlyFromMonthly,
   computeYearlyFromMonthly,
   formatInr,
+  formatPlanAmount,
+  isInrCurrency,
   gstAmount,
   payableWithGst,
   resolvePlanBillingAmount,
@@ -42,6 +45,26 @@ const buildFallbackCatalog = () => [
 
 const wccGstAmount = gstAmount;
 const wccPayableTotal = payableWithGst;
+
+const ADDON_PRICES = {
+  INR: {
+    flowBuilder: { monthly: 2499, quarterly: 7125, yearly: 24900 },
+    agentSeat: { monthly: 450, quarterly: 1200, yearly: 4200 },
+  },
+  USD: {
+    flowBuilder: { monthly: 33, quarterly: 95, yearly: 332 },
+    agentSeat: { monthly: 6, quarterly: 16, yearly: 56 },
+  },
+};
+
+const getAddonPrices = (cycle, currency) => {
+  const key = isInrCurrency(currency) ? 'INR' : 'USD';
+  const prices = ADDON_PRICES[key];
+  return {
+    flowBuilder: prices.flowBuilder[cycle] || prices.flowBuilder.monthly,
+    agentSeat: prices.agentSeat[cycle] || prices.agentSeat.monthly,
+  };
+};
 
 const COUNTRY_CODES = ["+971", "+91", "+65", "+44", "+1"];
 
@@ -250,6 +273,7 @@ function AgentRightPanel({
   const [wccAmount, setWccAmount] = useState(100);
   const [catalogPlans, setCatalogPlans] = useState([]);
   const [plansLoading, setPlansLoading] = useState(true);
+  const [conversationMetrics, setConversationMetrics] = useState([]);
   const [adsAmount, setAdsAmount] = useState(1500);
   const [autoRechargeEnabled, setAutoRechargeEnabled] = useState(false);
   const [autoRechargeAmount, setAutoRechargeAmount] = useState(500);
@@ -259,6 +283,7 @@ function AgentRightPanel({
   const [projectPhoneApproved, setProjectPhoneApproved] = useState(false);
   const [projectPhoneLoaded, setProjectPhoneLoaded] = useState(false);
   const [matchedProject, setMatchedProject] = useState(null);
+  const [whatsappDisplayName, setWhatsappDisplayName] = useState("");
   const [accountProfile, setAccountProfile] = useState(null);
   const [showAccountEditModal, setShowAccountEditModal] = useState(false);
   const [accountEditForm, setAccountEditForm] = useState({
@@ -277,6 +302,7 @@ function AgentRightPanel({
   const [logoRemoved, setLogoRemoved] = useState(false);
   const [accountSaving, setAccountSaving] = useState(false);
   const [planInfo, setPlanInfo] = useState(null);
+  const [pricingCurrency, setPricingCurrency] = useState("INR");
 
   const [planStep, setPlanStep] = useState(1);
   const [billingCycle, setBillingCycle] = useState("monthly");
@@ -289,14 +315,20 @@ function AgentRightPanel({
     (async () => {
       setPlansLoading(true);
       try {
-        const list = await fetchActivePlans();
+        const [plansResult, metricsData] = await Promise.all([
+          fetchActivePlans(),
+          fetchConversationMetrics().catch(() => ({ metrics: [], rates: {}, currency: "INR" })),
+        ]);
         if (!cancelled) {
+          const list = Array.isArray(plansResult?.plans) ? plansResult.plans : [];
+          setPricingCurrency(plansResult.currency || metricsData.currency || "INR");
           const active = list.filter((p) => p.is_active !== false);
           const sorted = (active.length ? active : list).slice().sort(
             (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
           );
           const primary = sorted[0];
           setCatalogPlans(primary ? [primary] : buildFallbackCatalog());
+          setConversationMetrics(buildConversationMetrics(metricsData.metrics, metricsData.rates));
         }
       } catch {
         if (!cancelled) setCatalogPlans(buildFallbackCatalog());
@@ -315,6 +347,7 @@ function AgentRightPanel({
       setProjectWhatsappNumber("");
       setProjectPhoneApproved(false);
       setMatchedProject(null);
+      setWhatsappDisplayName("");
       setAccountProfile(null);
       setProjectPhoneLoaded(true);
       return;
@@ -352,6 +385,24 @@ function AgentRightPanel({
           }
         } catch (_) {
           /* keep local cache if profile API fails */
+        }
+
+        try {
+          const waProfileRes = await axios.get("/profile/whatsapp", {
+            params: { projectId: selectedProjectId },
+          });
+          const waRow = Array.isArray(waProfileRes?.data?.profileData)
+            ? waProfileRes.data.profileData[0]
+            : null;
+          const metaDisplayName = String(
+            waProfileRes?.data?.displayName ||
+              waRow?.display_name ||
+              waRow?.verified_name ||
+              ""
+          ).trim();
+          if (mounted) setWhatsappDisplayName(metaDisplayName);
+        } catch (_) {
+          if (mounted) setWhatsappDisplayName("");
         }
 
         const res = await axios.get("/projects/list");
@@ -522,6 +573,7 @@ function AgentRightPanel({
   }, [user?.id, selectedProject?.id, conversationQuota?.planInfo, conversationQuota?.projectId]);
 
   const businessName =
+    (whatsappDisplayName && String(whatsappDisplayName).trim()) ||
     (accountProfile?.name && String(accountProfile.name).trim()) ||
     matchedProject?.project_name ||
     selectedProject?.project_name ||
@@ -747,8 +799,10 @@ function AgentRightPanel({
     if (unifiedPlan?.slug) setSelectedPlan(unifiedPlan.slug);
   }, [unifiedPlan?.slug]);
 
-  const flowBuilderPrice = billingCycle === "quarterly" ? 7125 : billingCycle === "yearly" ? 24900 : 2499;
-  const agentSeatPrice = billingCycle === "quarterly" ? 1200 : billingCycle === "yearly" ? 4200 : 450;
+  const { flowBuilder: flowBuilderPrice, agentSeat: agentSeatPrice } = getAddonPrices(
+    billingCycle,
+    pricingCurrency
+  );
   const addonPrice = (flowBuilderEnabled ? flowBuilderPrice : 0) + agentSeatCount * agentSeatPrice;
   const grandTotal = basePlanPrice + addonPrice;
   const planGst = wccGstAmount(grandTotal);
@@ -1636,19 +1690,25 @@ function AgentRightPanel({
                       planName={unifiedPlan?.name || "Standard Project Plan"}
                       features={unifiedPlan?.features?.length ? unifiedPlan.features : null}
                       plan={unifiedPlan}
+                      conversationMetrics={conversationMetrics}
+                      currency={pricingCurrency}
                     >
-                      <PlanGstBreakdown monthly={planMonthlyBase} billingCycle={billingCycle} plan={unifiedPlan} />
+                      <PlanGstBreakdown monthly={planMonthlyBase} billingCycle={billingCycle} plan={unifiedPlan} currency={pricingCurrency} />
                       <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
                         <div className="flex items-center justify-between">
                           <div>
                             <p className="text-sm font-semibold text-slate-800">Total</p>
                             <p className="text-xs text-slate-500">{planSummaryText}</p>
                           </div>
-                          <p className="text-xl font-bold text-emerald-700 tabular-nums">₹ {formatInr(planStep1Payable)}</p>
+                          <p className="text-xl font-bold text-emerald-700 tabular-nums">
+                            {formatPlanAmount(planStep1Payable, pricingCurrency)}
+                          </p>
                         </div>
-                        <p className="text-[11px] text-gray-500 mt-1">
-                          Incl. GST ₹ {formatInr(planStep1Gst)} on plan ₹ {formatInr(basePlanPrice)}
-                        </p>
+                        {isInrCurrency(pricingCurrency) ? (
+                          <p className="text-[11px] text-gray-500 mt-1">
+                            Incl. GST {formatPlanAmount(planStep1Gst, pricingCurrency)} on plan {formatPlanAmount(basePlanPrice, pricingCurrency)}
+                          </p>
+                        ) : null}
                         <div className="mt-4 flex justify-end gap-2">
                           <button type="button" onClick={() => setPlanStep(2)} className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition shadow-md shadow-emerald-500/25">
                             Continue
@@ -1676,7 +1736,8 @@ function AgentRightPanel({
                         </button>
                       </div>
                       <p className="text-sm font-semibold text-emerald-700">
-                        ₹ {flowBuilderPrice.toLocaleString()}/{billingCycle === "monthly" ? "month" : billingCycle === "quarterly" ? "quarter" : "year"}
+                        {formatPlanAmount(flowBuilderPrice, pricingCurrency)}
+                        /{billingCycle === "monthly" ? "month" : billingCycle === "quarterly" ? "quarter" : "year"}
                       </p>
                     </div>
 
@@ -1702,7 +1763,8 @@ function AgentRightPanel({
                       <div className="flex items-center justify-between">
                         <p className="text-xs text-slate-600">No. of agent seats: {agentSeatCount}</p>
                         <p className="text-sm font-semibold text-emerald-700">
-                          ₹ {(agentSeatCount * agentSeatPrice).toLocaleString()}/{billingCycle === "monthly" ? "month" : billingCycle === "quarterly" ? "quarter" : "year"}
+                          {formatPlanAmount(agentSeatCount * agentSeatPrice, pricingCurrency)}
+                          /{billingCycle === "monthly" ? "month" : billingCycle === "quarterly" ? "quarter" : "year"}
                         </p>
                       </div>
                     </div>
@@ -1712,6 +1774,7 @@ function AgentRightPanel({
                       billingCycle={billingCycle}
                       subtotal={grandTotal}
                       plan={unifiedPlan}
+                      currency={pricingCurrency}
                     />
                     <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -1730,21 +1793,24 @@ function AgentRightPanel({
                           <p className="text-xs text-slate-500">{planSummaryText}</p>
                         </div>
                         <p className="text-2xl font-bold text-emerald-700 tabular-nums">
-                          ₹ {formatInr(planTotalPayable)}
+                          {formatPlanAmount(planTotalPayable, pricingCurrency)}
                           <span className="text-sm font-semibold text-slate-500">
                             /{billingCycle === "monthly" ? "month" : billingCycle === "quarterly" ? "quarter" : "year"}
                           </span>
                         </p>
                       </div>
-                      <p className="text-[11px] text-gray-500 mb-3">
-                        Incl. GST ₹ {formatInr(planGst)} on subtotal ₹ {formatInr(grandTotal)}
-                      </p>
+                      {isInrCurrency(pricingCurrency) ? (
+                        <p className="text-[11px] text-gray-500 mb-3">
+                          Incl. GST {formatPlanAmount(planGst, pricingCurrency)} on subtotal{" "}
+                          {formatPlanAmount(grandTotal, pricingCurrency)}
+                        </p>
+                      ) : null}
                       <div className="flex justify-between gap-2">
                         <button type="button" onClick={() => setPlanStep(1)} className="px-4 py-2 rounded-xl text-sm font-semibold border border-gray-200 text-slate-700 hover:bg-gray-50">
                           Back
                         </button>
                         <button type="button" onClick={purchasePlan} disabled={paymentLoading} className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-md shadow-emerald-500/25">
-                          {paymentLoading ? "Opening…" : `Purchase Now — ₹ ${formatInr(planTotalPayable)}`}
+                          {paymentLoading ? "Opening…" : `Purchase Now — ${formatPlanAmount(planTotalPayable, pricingCurrency)}`}
                         </button>
                       </div>
                     </div>

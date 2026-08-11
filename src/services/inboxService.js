@@ -126,20 +126,34 @@ export const sendMessage = async (phone, text) => {
 
     const data = await response.json();
 
-    if (!response.ok) {
+    if (!response.ok || data.success === false) {
+      const errText =
+        (typeof data.message === 'string' && data.message) ||
+        data.error ||
+        data.messageRecord?.errorMessage ||
+        `Failed to send message (${response.status})`;
       console.error('sendMessage (inbox) API error:', {
         status: response.status,
         statusText: response.statusText,
         data: data
       });
-      throw new Error(data.error || data.message || `Failed to send message (${response.status})`);
+      throw new Error(errText);
+    }
+
+    const msg = data.message;
+    if (msg && String(msg.status || '').toLowerCase() === 'failed') {
+      throw new Error(msg.errorMessage || 'Failed to send message');
     }
 
     if (data.success) {
-      return data.message;
+      return {
+        ...data.message,
+        sentViaTemplate: !!data.sentViaTemplate,
+        templateName: data.templateName || data.message?.templateName,
+      };
     }
 
-    throw new Error(data.message || 'Failed to send message');
+    throw new Error(typeof data.message === 'string' ? data.message : 'Failed to send message');
   } catch (error) {
     console.error('Error in sendMessage (inbox):', error);
     throw error;

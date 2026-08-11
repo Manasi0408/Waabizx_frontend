@@ -38,7 +38,7 @@ const removeToken = () => {
 };
 
 // Register user
-export const register = async (name, email, password, mobileNumber) => {
+export const register = async (name, email, password, mobileNumber, country, countryCode) => {
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (API_BASE && API_BASE.includes('ngrok')) {
@@ -47,7 +47,7 @@ export const register = async (name, email, password, mobileNumber) => {
     const response = await fetch(`${API_URL}/auth/register/request-otp`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ name, email, password, mobileNumber }),
+      body: JSON.stringify({ name, email, password, mobileNumber, country, countryCode }),
     });
 
     const data = await response.json();

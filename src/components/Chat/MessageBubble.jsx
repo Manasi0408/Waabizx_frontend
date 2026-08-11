@@ -28,6 +28,11 @@ export default function MessageBubble({
           } ${className}`}
         >
           {children}
+          {isOutgoing && String(status || message?.status || '').toLowerCase() === 'failed' && message?.errorMessage ? (
+            <p className="text-[10px] text-red-600 mt-0.5 px-0.5 leading-tight" title={message.errorMessage}>
+              {message.errorMessage}
+            </p>
+          ) : null}
           <MessageMeta formatTime={formatTime} status={status || message?.status} outgoing={isOutgoing} />
         </div>
       </div>

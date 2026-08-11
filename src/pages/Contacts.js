@@ -18,6 +18,8 @@ import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import PlanLimitModal from '../components/PlanLimitModal';
+import { extractPlanLimitError, gatePlanLimit, assertCanAddResource } from '../services/planLimitService';
 
 function Contacts() {
   const navigate = useNavigate();
@@ -50,6 +52,7 @@ function Contacts() {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [planLimitModal, setPlanLimitModal] = useState(null);
   const [success, setSuccess] = useState('');
   const [toast, setToast] = useState({ show: false, type: 'info', message: '' });
   const [importMenuOpen, setImportMenuOpen] = useState(false);
@@ -204,10 +207,15 @@ function Contacts() {
   };
 
   const openImportModal = () => {
-    setImportFile(null);
-    setImportModalError('');
-    setShowImportModal(true);
-    setError('');
+    gatePlanLimit('contacts', 1, {
+      onBlocked: setPlanLimitModal,
+      onAllowed: () => {
+        setImportFile(null);
+        setImportModalError('');
+        setShowImportModal(true);
+        setError('');
+      },
+    });
   };
 
   const handleImportContacts = async (e) => {
@@ -237,7 +245,14 @@ function Contacts() {
         });
       }
     } catch (err) {
-      setImportModalError(err?.message || 'Import failed. Try again.');
+      const limitPayload = extractPlanLimitError(err);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setImportModalError('');
+        setShowImportModal(false);
+      } else {
+        setImportModalError(err?.message || 'Import failed. Try again.');
+      }
     } finally {
       setImporting(false);
     }
@@ -250,6 +265,14 @@ function Contacts() {
     setSaving(true);
 
     try {
+      const precheck = await assertCanAddResource('contacts');
+      if (!precheck.allowed) {
+        setPlanLimitModal(precheck);
+        setError('');
+        showToast(precheck.message, 'error');
+        return;
+      }
+
       const tagsArray = formData.tags ? formData.tags.split(',').map(tag => tag.trim()).filter(tag => tag) : [];
       const payload = {
         phone: formData.phone,
@@ -259,27 +282,28 @@ function Contacts() {
         country: formData.country || null,
       };
       console.log('[Contacts] createContact submit', payload);
-      const result = await createContact(payload);
-      if (result?.alreadyExists) {
-        const dupMsg = 'This number already exists. Try with another number.';
-        showToast(dupMsg, 'warning');
-        console.warn('[Contacts] Create contact:', dupMsg);
-      } else {
-        setSuccess('Contact created successfully!');
-      }
+      await createContact(payload);
+      setSuccess('Contact created successfully!');
       setShowCreateModal(false);
       setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
       fetchContacts();
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
-      const msg = error.message || 'Failed to create contact';
-      setError(msg);
-      showToast(msg, 'error');
-      console.error('[Contacts] createContact failed', {
-        message: msg,
-        error,
-        formData: { phone: formData.phone, name: formData.name },
-      });
+      const limitPayload = extractPlanLimitError(error);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setError('');
+        showToast(limitPayload.message, 'error');
+      } else {
+        const msg = error.message || 'Failed to create contact';
+        setError(msg);
+        showToast(msg, 'error');
+        console.error('[Contacts] createContact failed', {
+          message: msg,
+          error,
+          formData: { phone: formData.phone, name: formData.name },
+        });
+      }
     } finally {
       setSaving(false);
     }
@@ -726,9 +750,14 @@ function Contacts() {
               <button
                 type="button"
                 onClick={() => {
-                  setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
-                  setShowCreateModal(true);
-                  setError('');
+                  gatePlanLimit('contacts', 1, {
+                    onBlocked: setPlanLimitModal,
+                    onAllowed: () => {
+                      setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
+                      setShowCreateModal(true);
+                      setError('');
+                    },
+                  });
                 }}
                 className="group relative overflow-hidden shrink-0 bg-gradient-to-r from-sky-600 via-sky-500 to-blue-600 text-white px-5 py-3 sm:px-6 rounded-xl font-semibold shadow-lg shadow-sky-600/30 hover:shadow-xl hover:shadow-sky-500/35 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 flex items-center gap-2"
               >
@@ -847,8 +876,13 @@ function Contacts() {
                   <button
                     type="button"
                     onClick={() => {
-                      setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
-                      setShowCreateModal(true);
+                      gatePlanLimit('contacts', 1, {
+                        onBlocked: setPlanLimitModal,
+                        onAllowed: () => {
+                          setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
+                          setShowCreateModal(true);
+                        },
+                      });
                     }}
                     className="bg-sky-600 text-white px-6 py-2.5 rounded-xl hover:bg-sky-700 transition-all duration-300 shadow-md shadow-sky-600/25 hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] font-medium"
                   >
@@ -1478,6 +1512,7 @@ function Contacts() {
           </div>
         </div>
       )}
+      <PlanLimitModal open={Boolean(planLimitModal)} payload={planLimitModal} onClose={() => setPlanLimitModal(null)} />
     </div>
   );
 }

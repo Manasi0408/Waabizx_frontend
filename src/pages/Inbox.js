@@ -1260,9 +1260,25 @@ function Inbox({ pageMode = 'inbox' }) {
         console.log('📊 Socket: message-status-update received', data);
         setMessages(prev => prev.map(msg => 
           msg.id === data.messageId || msg.waMessageId === data.waMessageId
-            ? { ...msg, status: data.status, deliveredAt: data.deliveredAt, readAt: data.readAt }
+            ? {
+                ...msg,
+                status: data.status,
+                deliveredAt: data.deliveredAt,
+                readAt: data.readAt,
+                errorMessage: data.errorMessage || msg.errorMessage || null,
+              }
             : msg
         ));
+        if (String(data?.status || '').toLowerCase() === 'failed') {
+          if (data?.sentViaTemplate) return;
+          const errText = String(data?.errorMessage || '').trim();
+          if (/re-engagement/i.test(errText)) return;
+          if (errText) {
+            alert(`Message failed: ${errText}`);
+          } else {
+            alert('Message failed to deliver on WhatsApp.');
+          }
+        }
       };
 
       const handleTyping = (data) => {

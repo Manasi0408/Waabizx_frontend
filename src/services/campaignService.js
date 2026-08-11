@@ -6,6 +6,31 @@ const getToken = () => {
   return localStorage.getItem('token');
 };
 
+const getSelectedProjectId = () => {
+  try {
+    const raw = localStorage.getItem('selectedProject');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const id = parsed?.id;
+      if (id != null && String(id).trim() !== '') return String(id);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+};
+
+const buildAuthHeaders = () => {
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const projectId = getSelectedProjectId();
+  if (projectId) headers['x-project-id'] = projectId;
+  return headers;
+};
+
 // Create campaign
 export const createCampaign = async (campaignData) => {
   try {
@@ -16,17 +41,16 @@ export const createCampaign = async (campaignData) => {
 
     const response = await fetch(`${API_URL}/campaigns`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: buildAuthHeaders(),
       body: JSON.stringify(campaignData)
     });
 
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || data.message || 'Failed to create campaign');
+      const err = new Error(data.error || data.message || 'Failed to create campaign');
+      err.response = { data };
+      throw err;
     }
 
     if (data.success) {

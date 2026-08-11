@@ -33,9 +33,22 @@ function ProjectDashboard() {
     }
 
     try {
-      await axios.post("/projects/create", {
+      const res = await axios.post("/projects/create", {
         project_name: projectName,
       });
+
+      const created = res?.data?.project || null;
+      const projectId = created?.id || res?.data?.projectId;
+      if (projectId) {
+        localStorage.setItem(
+          "selectedProject",
+          JSON.stringify({
+            id: projectId,
+            project_name: created?.project_name || projectName,
+            name: created?.project_name || projectName,
+          })
+        );
+      }
 
       setProjectName("");
       fetchProjects();
@@ -44,43 +57,98 @@ function ProjectDashboard() {
     }
   };
 
-  const removeProject = async (project, e) => {
+  const toggleProjectHidden = async (project, e) => {
     e?.stopPropagation?.();
-    const name = project?.project_name || "this project";
-    const ok = window.confirm(`Remove "${name}"? This cannot be undone.`);
-    if (!ok) return;
+    const isHidden = Boolean(project.is_hidden === 1 || project.is_hidden === true);
+    const nextHidden = !isHidden;
 
     try {
-      await axios.delete(`/projects/${project.id}`);
-      try {
-        const raw = localStorage.getItem("selectedProject");
-        if (raw) {
-          const selected = JSON.parse(raw);
-          if (Number(selected?.id) === Number(project.id)) {
-            localStorage.removeItem("selectedProject");
-          }
-        }
-      } catch (err) {
-        /* ignore */
-      }
-      fetchProjects();
+      await axios.patch(`/projects/${project.id}/hidden`, { hidden: nextHidden });
+      setProjects((prev) =>
+        prev.map((p) =>
+          Number(p.id) === Number(project.id)
+            ? { ...p, is_hidden: nextHidden ? 1 : 0 }
+            : p
+        )
+      );
     } catch (error) {
-      alert(error.response?.data?.message || "Failed to remove project");
+      alert(error.response?.data?.message || "Failed to update project visibility");
     }
   };
 
-  const count = projects.length;
-  const sortedProjects = [...projects].sort((a, b) => {
-    const approvedValues = ["approved", "active", "live", "verified"];
-    const aApproved =
-      a?.whatsappApproved === true || approvedValues.includes(String(a?.status || "").toLowerCase()) ? 1 : 0;
-    const bApproved =
-      b?.whatsappApproved === true || approvedValues.includes(String(b?.status || "").toLowerCase()) ? 1 : 0;
-    if (aApproved !== bApproved) return bApproved - aApproved;
-    const aDate = new Date(a?.created_at || a?.createdAt || 0).getTime();
-    const bDate = new Date(b?.created_at || b?.createdAt || 0).getTime();
-    return bDate - aDate;
-  });
+  const isProjectHidden = (project) =>
+    Boolean(project?.is_hidden === 1 || project?.is_hidden === true);
+
+  const sortProjects = (list) =>
+    [...list].sort((a, b) => {
+      const approvedValues = ["approved", "active", "live", "verified"];
+      const aApproved =
+        a?.whatsappApproved === true || approvedValues.includes(String(a?.status || "").toLowerCase()) ? 1 : 0;
+      const bApproved =
+        b?.whatsappApproved === true || approvedValues.includes(String(b?.status || "").toLowerCase()) ? 1 : 0;
+      if (aApproved !== bApproved) return bApproved - aApproved;
+      const aDate = new Date(a?.created_at || a?.createdAt || 0).getTime();
+      const bDate = new Date(b?.created_at || b?.createdAt || 0).getTime();
+      return bDate - aDate;
+    });
+
+  const visibleProjects = sortProjects(projects.filter((p) => !isProjectHidden(p)));
+  const hiddenProjects = sortProjects(projects.filter((p) => isProjectHidden(p)));
+  const count = visibleProjects.length;
+  const hiddenCount = hiddenProjects.length;
+  const totalCount = projects.length;
+
+  const openProject = (project) => {
+    try {
+      localStorage.setItem("selectedProject", JSON.stringify(project));
+    } catch (e) {}
+    navigate("/admin", { state: { project } });
+  };
+
+  const renderProjectRow = (project, { dimmed = false, clickable = true } = {}) => (
+    <div
+      key={project.id}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : -1}
+      aria-disabled={clickable ? undefined : true}
+      onClick={clickable ? () => openProject(project) : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key !== "Enter") return;
+              openProject(project);
+            }
+          : undefined
+      }
+      className={`group relative w-full overflow-hidden rounded-2xl border bg-white/95 shadow-md ring-1 transition-all duration-300 focus:outline-none ${
+        clickable
+          ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-xl focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
+          : "cursor-not-allowed pointer-events-none"
+      } ${
+        dimmed
+          ? "border-gray-200/90 opacity-75 shadow-gray-200/20 ring-gray-100/80"
+          : "border-gray-100/90 shadow-gray-200/25 ring-gray-100/80 hover:border-sky-200/90 hover:shadow-sky-500/15"
+      }`}
+    >
+      <div
+        className={`pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r opacity-90 transition-transform duration-300 ${
+          clickable ? "group-hover:scale-x-[1.02]" : ""
+        } ${
+          dimmed ? "from-gray-400 via-gray-300 to-gray-400" : "from-sky-500 via-sky-400 to-blue-600"
+        }`}
+        aria-hidden
+      />
+      <div className={clickable ? undefined : "pointer-events-auto"}>
+        <ProjectCard
+          project={project}
+          clickable={clickable}
+          onToggleHidden={
+            canManageProjects ? (e) => toggleProjectHidden(project, e) : undefined
+          }
+        />
+      </div>
+    </div>
+  );
 
   return (
     <div className="relative min-h-screen overflow-x-hidden bg-gradient-to-b from-sky-50 via-white to-sky-100/60">
@@ -217,17 +285,19 @@ function ProjectDashboard() {
                 Your projects
               </h2>
               <p className="mt-1 text-sm text-gray-500">
-                {count === 0 ? "Nothing here yet — create one above." : `${count} workspace${count !== 1 ? "s" : ""} ready to open`}
+                {totalCount === 0
+                  ? "Nothing here yet — create one above."
+                  : `${count} visible workspace${count !== 1 ? "s" : ""}${hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}`}
               </p>
             </div>
-            {count > 0 && (
+            {totalCount > 0 && (
               <span className="rounded-full border border-sky-100/90 bg-gradient-to-r from-white to-sky-50/80 px-4 py-1.5 text-xs font-bold text-sky-900 shadow-sm ring-1 ring-sky-100/60">
-                {count} total
+                {count} visible{hiddenCount > 0 ? ` / ${totalCount} total` : ""}
               </span>
             )}
           </div>
 
-          {count === 0 ? (
+          {totalCount === 0 ? (
             <div className="relative overflow-hidden rounded-2xl border-2 border-dashed border-sky-200/90 bg-gradient-to-b from-sky-50/60 via-white to-blue-50/30 px-6 py-20 text-center shadow-inner ring-1 ring-sky-100/40 md:py-24">
               <div
                 className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-sky-200/20 via-transparent to-transparent"
@@ -251,33 +321,28 @@ function ProjectDashboard() {
             </div>
           ) : (
             <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-              {sortedProjects.map((project) => (
-                <div
-                  key={project.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    try {
-                      localStorage.setItem("selectedProject", JSON.stringify(project));
-                    } catch (e) {}
-                    navigate("/admin", { state: { project } });
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key !== "Enter") return;
-                    try {
-                      localStorage.setItem("selectedProject", JSON.stringify(project));
-                    } catch (err) {}
-                    navigate("/admin", { state: { project } });
-                  }}
-                  className="group relative w-full cursor-pointer overflow-hidden rounded-2xl border border-gray-100/90 bg-white/95 shadow-md shadow-gray-200/25 ring-1 ring-gray-100/80 transition-all duration-300 hover:-translate-y-0.5 hover:border-sky-200/90 hover:shadow-xl hover:shadow-sky-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
-                >
-                  <div
-                    className="pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-sky-500 via-sky-400 to-blue-600 opacity-90 transition-transform duration-300 group-hover:scale-x-[1.02]"
-                    aria-hidden
-                  />
-                  <ProjectCard project={project} onRemove={canManageProjects ? (e) => removeProject(project, e) : undefined} />
+              {visibleProjects.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/80 px-6 py-10 text-center">
+                  <p className="text-sm font-semibold text-gray-700">All projects are hidden</p>
+                  <p className="mt-1 text-sm text-gray-500">Use Unhide below to show a project again.</p>
                 </div>
-              ))}
+              ) : (
+                visibleProjects.map((project) => renderProjectRow(project))
+              )}
+
+              {hiddenCount > 0 && (
+                <div className="mt-4 border-t border-gray-100 pt-6">
+                  <div className="mb-4">
+                    <h3 className="text-base font-bold text-gray-800">Hidden projects</h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      These are out of your main list. Click Unhide to bring one back.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-4">
+                    {hiddenProjects.map((project) => renderProjectRow(project, { dimmed: true, clickable: false }))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </section>

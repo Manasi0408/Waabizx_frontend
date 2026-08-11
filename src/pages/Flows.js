@@ -21,6 +21,8 @@ import { getProfile, isAuthenticated, logout, readSessionUser } from "../service
 import { getTemplates, getMetaTemplates, getMetaTemplateDetails, getTemplateById } from "../services/templateService";
 import { uploadFlowMedia, getFlowMediaLibrary, deleteFlowMedia } from "../services/flowService";
 import { resolveDisplayableHeaderMediaUrl, resolveHeaderImageFromComponents, resolvePublicMediaUrl } from "../utils/mediaUrl";
+import PlanLimitModal from "../components/PlanLimitModal";
+import { extractPlanLimitError, gatePlanLimit, assertCanAddResource } from "../services/planLimitService";
 
 const FLOW_HANDLE =
   "!w-[14px] !h-[14px] !min-w-[14px] !min-h-[14px] !bg-sky-600 !border-[3px] !border-white !shadow-md !opacity-100 !z-20";
@@ -2148,6 +2150,7 @@ function Flows() {
 
   const [flowName, setFlowName] = useState("My Flow");
   const [savedFlowId, setSavedFlowId] = useState(null);
+  const [planLimitModal, setPlanLimitModal] = useState(null);
   const [flowStatus, setFlowStatus] = useState("draft");
   const [metaFlowId, setMetaFlowId] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -2654,6 +2657,14 @@ function Flows() {
   const handleSaveFlow = useCallback(async () => {
     setSaving(true);
     try {
+      if (!savedFlowId) {
+        const precheck = await assertCanAddResource('flows');
+        if (!precheck.allowed) {
+          setPlanLimitModal(precheck);
+          return;
+        }
+      }
+
       const payload = {
         name: String(flowName || "Untitled").trim() || "Untitled",
         data: {
@@ -2668,6 +2679,13 @@ function Flows() {
       if (resp?.data?.success) {
         setSavedFlowId(resp.data.flow?.id || savedFlowId || resp.data.flowId || null);
         fetchSavedFlowsList();
+      }
+    } catch (error) {
+      const limitPayload = extractPlanLimitError(error);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+      } else {
+        window.alert(error?.response?.data?.message || error?.message || "Failed to save flow");
       }
     } finally {
       setSaving(false);
@@ -2859,25 +2877,30 @@ function Flows() {
   }, [savedFlowsList, loadFlowById]);
 
   const handleCreateNewFlow = useCallback(() => {
-    setNodes([
-      {
-        id: "start",
-        type: "start",
-        position: { x: 240, y: 80 },
-        data: nodeDataDefaults("start"),
+    gatePlanLimit('flows', 1, {
+      onBlocked: setPlanLimitModal,
+      onAllowed: () => {
+        setNodes([
+          {
+            id: "start",
+            type: "start",
+            position: { x: 240, y: 80 },
+            data: nodeDataDefaults("start"),
+          },
+        ]);
+        setEdges([]);
+        setFlowName("My Flow");
+        setSavedFlowId(null);
+        setFlowStatus("draft");
+        setMetaFlowId(null);
+        setSelectedNodeId(null);
+        setSelectedEdgeId(null);
+        setTestStarted(false);
+        setExecutionCurrentNodeId(null);
+        setExecutionLog([]);
+        setTestInput("");
       },
-    ]);
-    setEdges([]);
-    setFlowName("My Flow");
-    setSavedFlowId(null);
-    setFlowStatus("draft");
-    setMetaFlowId(null);
-    setSelectedNodeId(null);
-    setSelectedEdgeId(null);
-    setTestStarted(false);
-    setExecutionCurrentNodeId(null);
-    setExecutionLog([]);
-    setTestInput("");
+    });
   }, [setEdges, setNodes]);
 
   const handleDeleteFlow = useCallback(
@@ -3961,6 +3984,7 @@ function Flows() {
           </div>
         </div>
       ) : null}
+      <PlanLimitModal open={Boolean(planLimitModal)} payload={planLimitModal} onClose={() => setPlanLimitModal(null)} />
     </>
   );
 }

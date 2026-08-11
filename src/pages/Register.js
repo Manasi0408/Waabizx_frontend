@@ -20,11 +20,34 @@ const AUTH_MARQUEE_TAGS = [
   'Scale ready',
 ];
 
+const REGISTER_COUNTRIES = [
+  { code: 'IN', name: 'India', dialCode: '+91', mobileLength: 10 },
+  { code: 'US', name: 'United States', dialCode: '+1', mobileLength: 10 },
+  { code: 'GB', name: 'United Kingdom', dialCode: '+44', mobileLength: 10 },
+  { code: 'AE', name: 'United Arab Emirates', dialCode: '+971', mobileLength: 9 },
+  { code: 'SG', name: 'Singapore', dialCode: '+65', mobileLength: 8 },
+  { code: 'CA', name: 'Canada', dialCode: '+1', mobileLength: 10 },
+  { code: 'AU', name: 'Australia', dialCode: '+61', mobileLength: 9 },
+  { code: 'DE', name: 'Germany', dialCode: '+49', mobileLength: 11 },
+  { code: 'FR', name: 'France', dialCode: '+33', mobileLength: 9 },
+  { code: 'SA', name: 'Saudi Arabia', dialCode: '+966', mobileLength: 9 },
+];
+
+const countryFlag = (isoCode) => {
+  const code = String(isoCode || '').trim().toUpperCase();
+  if (code.length !== 2) return '';
+  return code.replace(/./g, (char) => String.fromCodePoint(127397 + char.charCodeAt(0)));
+};
+
+const formatCountryOption = (item) => `${countryFlag(item.code)} ${item.name} (${item.dialCode})`;
+
 function Register() {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
     name: '',
     email: '',
+    country: 'IN',
+    countryCode: '+91',
     mobileNumber: '',
     password: '',
     confirmPassword: '',
@@ -32,16 +55,32 @@ function Register() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const hasError = Boolean(error);
+  const selectedCountry =
+    REGISTER_COUNTRIES.find((item) => item.code === formData.country) || REGISTER_COUNTRIES[0];
 
   const handleChange = (e) => {
-    const value =
-      e.target.name === 'mobileNumber'
-        ? e.target.value.replace(/\D/g, '').slice(0, 10)
-        : e.target.value;
+    const { name, value } = e.target;
+
+    if (name === 'country') {
+      const nextCountry = REGISTER_COUNTRIES.find((item) => item.code === value) || REGISTER_COUNTRIES[0];
+      setFormData((prev) => ({
+        ...prev,
+        country: nextCountry.code,
+        countryCode: nextCountry.dialCode,
+        mobileNumber: '',
+      }));
+      setError('');
+      return;
+    }
+
+    const nextValue =
+      name === 'mobileNumber'
+        ? value.replace(/\D/g, '').slice(0, selectedCountry.mobileLength)
+        : value;
 
     setFormData({
       ...formData,
-      [e.target.name]: value,
+      [name]: nextValue,
     });
     setError('');
   };
@@ -60,15 +99,34 @@ function Register() {
       return;
     }
 
+    if (!formData.country || !formData.countryCode) {
+      setError('Please select your country');
+      return;
+    }
+
+    if (!formData.mobileNumber || formData.mobileNumber.length < 6) {
+      setError('Please enter a valid WhatsApp mobile number');
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const response = await register(formData.name, formData.email, formData.password, formData.mobileNumber);
+      const response = await register(
+        formData.name,
+        formData.email,
+        formData.password,
+        formData.mobileNumber,
+        formData.country,
+        formData.countryCode
+      );
       if (response.success) {
         navigate('/register/verify-otp', {
           state: {
             email: formData.email,
             mobileNumber: formData.mobileNumber,
+            country: formData.country,
+            countryCode: formData.countryCode,
             otpExpiresInSeconds: Number(response.expiresInSeconds || 600),
           },
         });
@@ -303,7 +361,7 @@ function Register() {
           </div>
         </aside>
 
-        <main className={`flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain px-4 sm:px-6 lg:px-10 xl:px-14 ${hasError ? 'justify-start py-2 lg:py-2' : 'justify-center py-5'}`}>
+        <main className={`flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain px-4 sm:px-6 lg:px-10 xl:px-14 ${hasError ? 'justify-start pt-6 pb-4 lg:pt-8' : 'justify-start py-6 sm:py-8 lg:py-10'}`}>
           <div className="mx-auto w-full max-w-md shrink-0">
             <div className="mb-3 text-center lg:hidden">
               <div className="mx-auto mb-1.5 flex justify-center">
@@ -312,16 +370,16 @@ function Register() {
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-sky-600/90 dark:text-sky-400/90">Waabizx</p>
             </div>
 
-            <div className="mt-2 mb-3 text-center lg:mt-3 lg:mb-4 lg:text-left">
-              <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.2em] text-sky-600/90 lg:mb-1.5 lg:text-[11px] lg:text-sky-600">
+            <div className="mb-4 text-center lg:mb-5 lg:text-left">
+              <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-sky-600/90 lg:text-[11px] lg:text-sky-600">
                 Create account
               </p>
-              <h1 className="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
-                <span className="bg-gradient-to-r from-gray-900 via-sky-800 to-gray-800 bg-clip-text text-transparent">
+              <h1 className="overflow-visible text-2xl font-bold leading-[1.25] tracking-tight text-gray-900 sm:text-3xl sm:leading-[1.2]">
+                <span className="inline-block bg-gradient-to-r from-gray-900 via-sky-800 to-gray-800 bg-clip-text pb-0.5 text-transparent">
                   Join Waabizx
                 </span>
               </h1>
-              <p className="mt-0.5 text-xs text-gray-600 sm:text-sm">Set up your profile — invite your team later.</p>
+              <p className="mt-1 text-xs text-gray-600 sm:text-sm">Set up your profile — invite your team later.</p>
             </div>
 
             <div className={`relative overflow-hidden rounded-2xl border border-gray-100/90 bg-white/95 shadow-xl shadow-sky-900/[0.06] ring-1 ring-gray-100/80 backdrop-blur-sm ${hasError ? 'p-3 sm:p-4' : 'p-4 sm:p-5'}`}>
@@ -376,23 +434,56 @@ function Register() {
                   </div>
 
                   <div>
-                    <label htmlFor="mobileNumber" className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-gray-500 sm:mb-1.5 sm:text-xs">
-                      WhatsApp mobile number
+                    <label htmlFor="country" className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-gray-500 sm:mb-1.5 sm:text-xs">
+                      Country <span className="text-red-500">*</span>
                     </label>
-                    <input
-                      type="text"
-                      id="mobileNumber"
-                      name="mobileNumber"
-                      value={formData.mobileNumber}
+                    <select
+                      id="country"
+                      name="country"
+                      value={formData.country}
                       onChange={handleChange}
                       required
-                      autoComplete="tel"
-                      inputMode="numeric"
-                      pattern="\d{10}"
-                      maxLength={10}
                       className={inputClass}
-                      placeholder="9876543210"
-                    />
+                    >
+                      {REGISTER_COUNTRIES.map((item) => (
+                        <option key={item.code} value={item.code}>
+                          {formatCountryOption(item)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label htmlFor="mobileNumber" className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-gray-500 sm:mb-1.5 sm:text-xs">
+                      WhatsApp mobile number <span className="text-red-500">*</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <div
+                        className="flex shrink-0 items-center gap-1.5 rounded-xl border-2 border-gray-200/90 bg-gray-50 px-3 py-2.5 text-sm font-semibold text-gray-700 shadow-sm sm:py-3"
+                        aria-label={`Country code ${formData.countryCode}`}
+                      >
+                        <span className="text-base leading-none" aria-hidden>
+                          {countryFlag(formData.country)}
+                        </span>
+                        <span>{formData.countryCode}</span>
+                      </div>
+                      <input
+                        type="text"
+                        id="mobileNumber"
+                        name="mobileNumber"
+                        value={formData.mobileNumber}
+                        onChange={handleChange}
+                        required
+                        autoComplete="tel-national"
+                        inputMode="numeric"
+                        maxLength={selectedCountry.mobileLength}
+                        className={`${inputClass} min-w-0 flex-1`}
+                        placeholder={formData.country === 'IN' ? '9876543210' : 'Mobile number'}
+                      />
+                    </div>
+                    <p className="mt-1 text-[10px] text-gray-500">
+                      Enter number without country code
+                    </p>
                   </div>
 
                   <div>

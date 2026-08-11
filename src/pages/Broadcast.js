@@ -17,8 +17,11 @@ import {
 } from '../services/broadcastService';
 import { startCampaign } from '../services/campaignService';
 import { getConversationQuota } from '../services/dashboardService';
+import { fetchConversationMetrics } from '../services/planService';
 import {
   CONVERSATION_METRICS,
+  buildConversationMetrics,
+  buildMessageCategoryRates,
   estimateCampaignMessageCost,
   formatInr,
   getBillingCategoryLabel,
@@ -457,6 +460,8 @@ function Broadcast() {
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
   const [headerMediaFile, setHeaderMediaFile] = useState(null);
   const [wccCredits, setWccCredits] = useState(null);
+  const [conversationMetrics, setConversationMetrics] = useState(CONVERSATION_METRICS);
+  const [messageCategoryRates, setMessageCategoryRates] = useState(null);
   
   const notificationRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -506,6 +511,26 @@ function Broadcast() {
     if (isAuthenticated()) {
       fetchTemplates();
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchConversationMetrics();
+        if (cancelled) return;
+        setConversationMetrics(buildConversationMetrics(data.metrics, data.rates));
+        setMessageCategoryRates(buildMessageCategoryRates(data.rates));
+      } catch {
+        if (!cancelled) {
+          setConversationMetrics(CONVERSATION_METRICS);
+          setMessageCategoryRates(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const fetchTemplates = async () => {
@@ -813,13 +838,13 @@ function Broadcast() {
   );
 
   const templateRatePerMessage = useMemo(
-    () => getMessageRateForBillingCategory(templateBillingCategory),
-    [templateBillingCategory]
+    () => getMessageRateForBillingCategory(templateBillingCategory, messageCategoryRates),
+    [templateBillingCategory, messageCategoryRates]
   );
 
   const estimatedCampaignCost = useMemo(
-    () => estimateCampaignMessageCost(audienceCount, templateBillingCategory),
-    [audienceCount, templateBillingCategory]
+    () => estimateCampaignMessageCost(audienceCount, templateBillingCategory, messageCategoryRates),
+    [audienceCount, templateBillingCategory, messageCategoryRates]
   );
 
   const wccSufficient = wccCredits == null ? true : Number(wccCredits) >= estimatedCampaignCost;
@@ -2063,7 +2088,7 @@ function Broadcast() {
                       Message pricing (as per template category)
                     </p>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      {CONVERSATION_METRICS.map((metric) => {
+                      {conversationMetrics.map((metric) => {
                         const isActive = metric.key === templateBillingCategory;
                         return (
                           <div
@@ -2091,7 +2116,7 @@ function Broadcast() {
                     <p className="mt-3 text-[11px] text-slate-500">
                       Selected template uses{' '}
                       <span className="font-semibold text-slate-700">
-                        {getBillingCategoryLabel(templateBillingCategory)}
+                        {getBillingCategoryLabel(templateBillingCategory, conversationMetrics)}
                       </span>{' '}
                       pricing — {audienceCount} recipient{audienceCount === 1 ? '' : 's'} × ₹{' '}
                       {formatInr(templateRatePerMessage)} = ₹ {formatInr(estimatedCampaignCost)}

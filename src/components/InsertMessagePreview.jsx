@@ -2,6 +2,38 @@ import React, { useRef, useState } from "react";
 import { resolvePublicMediaUrl } from "../utils/mediaUrl";
 import { uploadBroadcastHeaderMedia } from "../services/broadcastService";
 
+/** WhatsApp template headers need JPEG/PNG — convert other image types in the browser before upload. */
+async function prepareImageHeaderForUpload(file) {
+  const mime = String(file.type || "").toLowerCase();
+  const name = String(file.name || "");
+  const isJpegOrPng =
+    mime === "image/jpeg" ||
+    mime === "image/jpg" ||
+    mime === "image/png" ||
+    /\.(jpe?g|png)$/i.test(name);
+  if (isJpegOrPng || typeof createImageBitmap !== "function") return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close?.();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+    if (!blob) return file;
+    const baseName = name.replace(/\.[^.]+$/, "") || "header-image";
+    return new File([blob], `${baseName}.jpg`, { type: "image/jpeg", lastModified: file.lastModified });
+  } catch {
+    return file;
+  }
+}
+
 /**
  * AiSensy-style WhatsApp bubble preview for Insert (canned / template).
  * For image/video/document templates, optional header media upload before send.
@@ -50,7 +82,7 @@ export default function InsertMessagePreview({
       ? "video/mp4,video/3gpp"
       : mediaFormat === "DOCUMENT"
         ? ".pdf,.doc,.docx,application/pdf"
-        : "image/jpeg,image/png,image/webp";
+        : "image/*";
 
   const mediaLabel =
     mediaFormat === "VIDEO" ? "Video" : mediaFormat === "DOCUMENT" ? "Document" : "Image";
@@ -62,7 +94,11 @@ export default function InsertMessagePreview({
     setUploadError("");
     setUploading(true);
     try {
-      const uploaded = await uploadBroadcastHeaderMedia(file);
+      const uploadFile =
+        mediaFormat === "IMAGE" || mediaFormat === "" || preview?.header?.type === "image"
+          ? await prepareImageHeaderForUpload(file)
+          : file;
+      const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
       const url = uploaded?.url || uploaded?.publicUrl || uploaded?.headerMediaUrl || null;
       if (!url) throw new Error("Upload succeeded but no media URL was returned");
       onHeaderMediaChange(url, { templateName, fileName: file.name });

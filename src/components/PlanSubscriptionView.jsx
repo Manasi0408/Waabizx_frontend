@@ -3,9 +3,13 @@ import {
   PLAN_DISCOUNT_LABEL,
   PLAN_HIGHLIGHTS,
   CONVERSATION_METRICS,
+  buildConversationMetrics,
   buildCycleOptions,
   buildPricingBreakdown,
   formatInr,
+  formatUsd,
+  formatPlanAmount,
+  isInrCurrency,
   gstAmount,
   payableWithGst,
 } from '../utils/planPricing';
@@ -16,8 +20,9 @@ const CheckIcon = () => (
   </svg>
 );
 
-export function PlanBillingToggle({ monthly, billingCycle, onChange, plan = null }) {
-  const options = buildCycleOptions(monthly, plan);
+export function PlanBillingToggle({ monthly, billingCycle, onChange, plan = null, currency = 'INR' }) {
+  const options = buildCycleOptions(monthly, plan, currency);
+  const isUsd = !isInrCurrency(currency);
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -59,7 +64,7 @@ export function PlanBillingToggle({ monthly, billingCycle, onChange, plan = null
               {opt.label}
             </p>
             <p className="mt-1 text-xl font-bold tabular-nums text-emerald-700 leading-snug">
-              Rs. {formatInr(opt.discountedMonthly)}
+              {isUsd ? `$${formatUsd(opt.discountedMonthly)}` : `Rs. ${formatInr(opt.discountedMonthly)}`}
               <span className="text-sm font-semibold text-slate-500"> /project /mo</span>
             </p>
             <p className="mt-2 text-[11px] leading-snug text-slate-500">{opt.billingNote}</p>
@@ -84,35 +89,39 @@ export function PlanBillingToggle({ monthly, billingCycle, onChange, plan = null
   );
 }
 
-export function PlanGstSummary({ subtotal, title = 'Payment summary' }) {
+export function PlanGstSummary({ subtotal, title = 'Payment summary', currency = 'INR' }) {
   const base = Math.max(0, Number(subtotal) || 0);
-  const gst = gstAmount(base);
-  const total = payableWithGst(base);
+  const isUsd = !isInrCurrency(currency);
+  const gst = isUsd ? 0 : gstAmount(base);
+  const total = isUsd ? base : payableWithGst(base);
   return (
     <div className="rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-50 to-white p-5 shadow-sm ring-1 ring-slate-100/80">
       <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">{title}</p>
       <div className="space-y-2.5 text-sm">
         <div className="flex items-center justify-between gap-3 text-slate-700">
           <span>Subtotal</span>
-          <span className="font-semibold tabular-nums">₹ {formatInr(base)}</span>
+          <span className="font-semibold tabular-nums">{formatPlanAmount(base, currency)}</span>
         </div>
-        <div className="flex items-center justify-between gap-3 text-slate-500">
-          <span>GST (18%)</span>
-          <span className="font-semibold tabular-nums">₹ {formatInr(gst)}</span>
-        </div>
+        {!isUsd ? (
+          <div className="flex items-center justify-between gap-3 text-slate-500">
+            <span>GST (18%)</span>
+            <span className="font-semibold tabular-nums">{formatPlanAmount(gst, currency)}</span>
+          </div>
+        ) : null}
         <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-200/80 text-slate-900">
-          <span className="font-semibold">Total payable (incl. GST)</span>
-          <span className="text-xl font-bold text-emerald-700 tabular-nums">₹ {formatInr(total)}</span>
+          <span className="font-semibold">{isUsd ? 'Total payable' : 'Total payable (incl. GST)'}</span>
+          <span className="text-xl font-bold text-emerald-700 tabular-nums">{formatPlanAmount(total, currency)}</span>
         </div>
       </div>
     </div>
   );
 }
 
-export function PlanGstBreakdown({ monthly, billingCycle, subtotal, plan = null }) {
-  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan);
+export function PlanGstBreakdown({ monthly, billingCycle, subtotal, plan = null, currency = 'INR' }) {
+  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan, currency);
+  const isUsd = !isInrCurrency(currency);
   const base = subtotal != null ? Math.max(0, Number(subtotal) || 0) : breakdown.billingAmount;
-  const total = payableWithGst(base);
+  const total = isUsd ? base : payableWithGst(base);
   const cycleLabel =
     billingCycle === 'monthly' ? 'month' : billingCycle === 'quarterly' ? 'quarter' : 'year';
 
@@ -133,22 +142,24 @@ export function PlanGstBreakdown({ monthly, billingCycle, subtotal, plan = null 
             }`}
           >
             <span>{line.label}</span>
-            <span className="font-semibold tabular-nums">₹ {formatInr(line.value)}</span>
+            <span className="font-semibold tabular-nums">{formatPlanAmount(line.value, currency)}</span>
           </div>
         ))}
         {base !== breakdown.billingAmount ? (
           <div className="flex items-center justify-between gap-3 text-sm text-slate-700 pt-1">
             <span>Add-ons</span>
-            <span className="font-semibold tabular-nums">₹ {formatInr(base - breakdown.billingAmount)}</span>
+            <span className="font-semibold tabular-nums">{formatPlanAmount(base - breakdown.billingAmount, currency)}</span>
           </div>
         ) : null}
         <div className="flex items-center justify-between gap-3 pt-3 mt-1 border-t border-slate-200/80 text-slate-900">
-          <span className="font-semibold">Total payable (incl. GST)</span>
-          <span className="text-xl font-bold text-emerald-700 tabular-nums">₹ {formatInr(total)}</span>
+          <span className="font-semibold">{isUsd ? 'Total payable' : 'Total payable (incl. GST)'}</span>
+          <span className="text-xl font-bold text-emerald-700 tabular-nums">{formatPlanAmount(total, currency)}</span>
         </div>
       </div>
       <p className="mt-3 text-[11px] text-slate-500 leading-relaxed">{breakdown.summary}</p>
-      <p className="mt-1 text-[11px] text-slate-400">Payment is charged inclusive of 18% GST.</p>
+      {!isUsd ? (
+        <p className="mt-1 text-[11px] text-slate-400">Payment is charged inclusive of 18% GST.</p>
+      ) : null}
     </div>
   );
 }
@@ -163,10 +174,13 @@ export default function PlanSubscriptionView({
   planName = 'Standard Project Plan',
   features = null,
   plan = null,
+  conversationMetrics = null,
+  currency = 'INR',
   children,
 }) {
-  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan);
-  const cycleOptions = buildCycleOptions(monthly, plan);
+  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan, currency);
+  const cycleOptions = buildCycleOptions(monthly, plan, currency);
+  const isUsd = !isInrCurrency(currency);
   const activeOption = cycleOptions.find((o) => o.cycle === billingCycle) || cycleOptions[0];
   const featureList = Array.isArray(features) && features.length
     ? features.map((f) => String(f || '').trim()).filter(Boolean)
@@ -174,6 +188,7 @@ export default function PlanSubscriptionView({
 
   const unlimitedFeatures = featureList.filter((f) => /unlimited|multi agent/i.test(f));
   const otherFeatures = featureList.filter((f) => !/unlimited|multi agent/i.test(f));
+  const metricsDisplay = buildConversationMetrics(conversationMetrics);
 
   return (
     <div className="space-y-6">
@@ -190,6 +205,7 @@ export default function PlanSubscriptionView({
             billingCycle={billingCycle}
             onChange={onBillingCycleChange}
             plan={plan}
+            currency={currency}
           />
         </div>
       ) : null}
@@ -229,13 +245,15 @@ export default function PlanSubscriptionView({
                   {activeOption?.label}
                 </p>
                 <p className="mt-1 text-2xl md:text-3xl font-bold text-emerald-700 tabular-nums">
-                  Rs. {formatInr(activeOption?.discountedMonthly ?? breakdown.baseMonthly)}
+                  {isUsd
+                    ? `$${formatUsd(activeOption?.discountedMonthly ?? breakdown.baseMonthly)}`
+                    : `Rs. ${formatInr(activeOption?.discountedMonthly ?? breakdown.baseMonthly)}`}
                 </p>
                 <p className="text-xs font-medium text-slate-500">/project /mo</p>
                 <p className="mt-2 text-[11px] text-slate-500 leading-snug max-w-[220px] ml-auto">
                   {activeOption?.billingNote || breakdown.summary}
                 </p>
-                <p className="mt-2 text-[10px] text-slate-400">+ GST</p>
+                {!isUsd ? <p className="mt-2 text-[10px] text-slate-400">+ GST</p> : null}
               </div>
             </div>
 
@@ -287,7 +305,7 @@ export default function PlanSubscriptionView({
                 <p className="text-[10px] text-slate-400">Same rates on monthly, quarterly &amp; yearly</p>
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                {CONVERSATION_METRICS.map((m) => (
+                {metricsDisplay.map((m) => (
                   <div
                     key={m.label}
                     className="rounded-xl border border-slate-100 bg-gradient-to-b from-slate-50 to-white px-3 py-3 text-center shadow-sm ring-1 ring-slate-100/80"

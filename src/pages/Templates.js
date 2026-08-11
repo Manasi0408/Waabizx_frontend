@@ -17,6 +17,8 @@ import HeaderRightActions from '../components/HeaderRightActions';
 import CreateLocalTemplateModal, { templateToLocalForm } from '../components/CreateLocalTemplateModal';
 import TemplateFullViewModal from '../components/TemplateFullViewModal';
 import { resolvePublicMediaUrl } from '../utils/mediaUrl';
+import PlanLimitModal from '../components/PlanLimitModal';
+import { extractPlanLimitError, gatePlanLimit, assertCanAddResource } from '../services/planLimitService';
 
 function Templates() {
   const navigate = useNavigate();
@@ -46,6 +48,7 @@ function Templates() {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [planLimitModal, setPlanLimitModal] = useState(null);
   const [success, setSuccess] = useState('');
   const notificationRef = useRef(null);
 
@@ -191,6 +194,13 @@ function Templates() {
     setSaving(true);
 
     try {
+      const precheck = await assertCanAddResource('templates');
+      if (!precheck.allowed) {
+        setPlanLimitModal(precheck);
+        setError('');
+        return;
+      }
+
       let payload = eOrPayload;
       if (isEvent) {
         const isAuthCategory = String(formData.category || '').toLowerCase() === 'authentication';
@@ -207,8 +217,14 @@ function Templates() {
       fetchTemplates();
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
-      const msg = error?.message;
-      setError(typeof msg === 'string' && msg !== '[object Object]' ? msg : 'Failed to create template');
+      const limitPayload = extractPlanLimitError(error);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setError('');
+      } else {
+        const msg = error?.message;
+        setError(typeof msg === 'string' && msg !== '[object Object]' ? msg : 'Failed to create template');
+      }
     } finally {
       setSaving(false);
     }
@@ -249,6 +265,13 @@ function Templates() {
     setSaving(true);
 
     try {
+      const precheck = await assertCanAddResource('templates');
+      if (!precheck.allowed) {
+        setPlanLimitModal(precheck);
+        setError('');
+        throw new Error(precheck.message);
+      }
+
       const result = await createMetaTemplate(metaPayload);
       setSuccess(`Template submitted to Meta! Status: ${result.status || 'PENDING'}`);
       setShowCreateModal(false);
@@ -258,6 +281,12 @@ function Templates() {
       await handleFetchMetaTemplates();
       setTimeout(() => setSuccess(''), 5000);
     } catch (error) {
+      const limitPayload = extractPlanLimitError(error);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setError('');
+        throw error;
+      }
       const msg = error.message || 'Failed to submit template to Meta';
       setError(msg);
       throw new Error(msg);
@@ -550,9 +579,14 @@ function Templates() {
               <button
                 type="button"
                 onClick={() => {
-                  setCreatePrefill(null);
-                  setShowCreateModal(true);
-                  setError('');
+                  gatePlanLimit('templates', 1, {
+                    onBlocked: setPlanLimitModal,
+                    onAllowed: () => {
+                      setCreatePrefill(null);
+                      setShowCreateModal(true);
+                      setError('');
+                    },
+                  });
                 }}
                 className="group relative overflow-hidden shrink-0 bg-gradient-to-r from-sky-600 via-sky-500 to-blue-600 text-white px-5 py-3 sm:px-6 rounded-xl font-semibold shadow-lg shadow-sky-600/30 hover:shadow-xl hover:shadow-sky-500/35 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 flex items-center gap-2"
               >
@@ -617,9 +651,14 @@ function Templates() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFormData({ name: '', content: '', category: 'other', status: 'draft', variables: [] });
-                    setCreatePrefill(null);
-                    setShowCreateModal(true);
+                    gatePlanLimit('templates', 1, {
+                      onBlocked: setPlanLimitModal,
+                      onAllowed: () => {
+                        setFormData({ name: '', content: '', category: 'other', status: 'draft', variables: [] });
+                        setCreatePrefill(null);
+                        setShowCreateModal(true);
+                      },
+                    });
                   }}
                   className="bg-sky-600 text-white px-6 py-2.5 rounded-xl hover:bg-sky-700 transition-all duration-300 shadow-md shadow-sky-600/25 hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] font-medium"
                 >
@@ -739,9 +778,14 @@ function Templates() {
                           <button
                             type="button"
                             onClick={() => {
-                              setCreatePrefill(templateToLocalForm(template));
-                              setShowCreateModal(true);
-                              setError('');
+                              gatePlanLimit('templates', 1, {
+                                onBlocked: setPlanLimitModal,
+                                onAllowed: () => {
+                                  setCreatePrefill(templateToLocalForm(template));
+                                  setShowCreateModal(true);
+                                  setError('');
+                                },
+                              });
                             }}
                             className="p-2 text-gray-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all duration-200 active:scale-95"
                             title="Copy template"
@@ -971,6 +1015,7 @@ function Templates() {
         </div>
       )}
 
+      <PlanLimitModal open={Boolean(planLimitModal)} payload={planLimitModal} onClose={() => setPlanLimitModal(null)} />
     </div>
   );
 }

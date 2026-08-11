@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from '../api/axios';
+import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
 
 const formatDate = (value) => {
   if (!value) return '—';
@@ -32,23 +33,18 @@ const truncate = (text, max = 80) => {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 };
 
-const STATUS_OPTIONS = [
-  { value: 'new', label: 'New' },
-  { value: 'contacted', label: 'Contacted' },
-  { value: 'closed', label: 'Closed' },
-];
-
-const statusBadgeClass = (status) => {
-  const key = String(status || 'new').toLowerCase();
-  if (key === 'contacted') return 'bg-sky-50 text-sky-800 ring-sky-200/90';
-  if (key === 'closed') return 'bg-gray-100 text-gray-600 ring-gray-200/80';
-  return 'bg-emerald-50 text-emerald-800 ring-emerald-200/90';
-};
-
-const statusLabel = (status) => {
-  const key = String(status || 'new').toLowerCase();
-  return STATUS_OPTIONS.find((o) => o.value === key)?.label || 'New';
-};
+function DetailField({ label, value, multiline = false }) {
+  return (
+    <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-2.5">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">{label}</p>
+      <p
+        className={`mt-1 text-sm text-gray-900 ${multiline ? 'whitespace-pre-wrap leading-relaxed' : 'font-medium'}`}
+      >
+        {value || '—'}
+      </p>
+    </div>
+  );
+}
 
 function SuperAdminLeadsPanel() {
   const [leads, setLeads] = useState([]);
@@ -83,6 +79,11 @@ function SuperAdminLeadsPanel() {
         lead.full_name,
         lead.email,
         lead.phone,
+        lead.country,
+        lead.industry,
+        lead.heard_about,
+        lead.dialx_interest,
+        lead.company_size,
         lead.subject,
         lead.message,
         lead.status,
@@ -92,6 +93,11 @@ function SuperAdminLeadsPanel() {
       return haystack.includes(q);
     });
   }, [leads, search]);
+
+  const { page, setPage, totalPages, paginatedItems, totalItems, pageSize } = useSuperAdminPagination(
+    filteredLeads,
+    [search]
+  );
 
   const stats = useMemo(() => {
     const today = new Date();
@@ -227,14 +233,17 @@ function SuperAdminLeadsPanel() {
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Name</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Email</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Phone</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Subject</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Company size</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Country</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Industry</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Heard about</th>
+                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">DialX interest</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Message</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Status</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Submitted</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {filteredLeads.map((lead) => (
+                  {paginatedItems.map((lead) => (
                     <tr
                       key={lead.id}
                       className="hover:bg-violet-50/30 transition-colors cursor-pointer"
@@ -243,29 +252,14 @@ function SuperAdminLeadsPanel() {
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
                         {lead.full_name || '—'}
                       </td>
-                      <td className="px-4 py-3 text-gray-700">
-                        {lead.email ? (
-                          <a
-                            href={`mailto:${lead.email}`}
-                            className="text-sky-700 hover:underline"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {lead.email}
-                          </a>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
+                      <td className="px-4 py-3 text-gray-700">{lead.email || '—'}</td>
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{formatPhone(lead.phone)}</td>
-                      <td className="px-4 py-3 text-gray-700">{lead.subject || '—'}</td>
+                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{lead.company_size || '—'}</td>
+                      <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{lead.country || '—'}</td>
+                      <td className="px-4 py-3 text-gray-700">{lead.industry || '—'}</td>
+                      <td className="px-4 py-3 text-gray-700">{lead.heard_about || '—'}</td>
+                      <td className="px-4 py-3 text-gray-700">{lead.dialx_interest || '—'}</td>
                       <td className="px-4 py-3 text-gray-600 max-w-[220px]">{truncate(lead.message)}</td>
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        <span
-                          className={`inline-flex items-center px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide ring-1 ${statusBadgeClass(lead.status)}`}
-                        >
-                          {statusLabel(lead.status)}
-                        </span>
-                      </td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">{formatDate(lead.createdAt)}</td>
                     </tr>
                   ))}
@@ -274,7 +268,7 @@ function SuperAdminLeadsPanel() {
             </div>
 
             <div className="md:hidden p-4 space-y-3 motion-stagger-children">
-              {filteredLeads.map((lead) => {
+              {paginatedItems.map((lead) => {
                 const initial = String(lead.full_name || '?').charAt(0).toUpperCase();
                 return (
                   <article
@@ -291,33 +285,41 @@ function SuperAdminLeadsPanel() {
                             <div className="font-bold text-gray-900">{lead.full_name || 'Unnamed'}</div>
                             <div className="text-xs text-gray-500 mt-0.5">{formatDate(lead.createdAt)}</div>
                           </div>
-                          <span
-                            className={`shrink-0 inline-flex items-center px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide ring-1 ${statusBadgeClass(lead.status)}`}
-                          >
-                            {statusLabel(lead.status)}
-                          </span>
                         </div>
-                        {lead.subject ? (
-                          <span className="mt-2 inline-flex text-[10px] font-bold uppercase tracking-wide text-violet-800 bg-violet-50 px-2 py-0.5 rounded-full ring-1 ring-violet-100">
-                            {lead.subject}
-                          </span>
-                        ) : null}
                       </div>
                     </div>
                     <div className="mt-3 space-y-1.5 text-xs text-gray-600">
                       <div>
-                        <span className="font-semibold text-gray-500">Email:</span>{' '}
-                        {lead.email ? (
-                          <a href={`mailto:${lead.email}`} className="text-sky-700">
-                            {lead.email}
-                          </a>
-                        ) : (
-                          '—'
-                        )}
+                        <span className="font-semibold text-gray-500">Email:</span> {lead.email || '—'}
                       </div>
                       <div>
                         <span className="font-semibold text-gray-500">Phone:</span> {formatPhone(lead.phone)}
                       </div>
+                      {lead.company_size ? (
+                        <div>
+                          <span className="font-semibold text-gray-500">Company size:</span> {lead.company_size}
+                        </div>
+                      ) : null}
+                      {lead.country ? (
+                        <div>
+                          <span className="font-semibold text-gray-500">Country:</span> {lead.country}
+                        </div>
+                      ) : null}
+                      {lead.industry ? (
+                        <div>
+                          <span className="font-semibold text-gray-500">Industry:</span> {lead.industry}
+                        </div>
+                      ) : null}
+                      {lead.heard_about ? (
+                        <div>
+                          <span className="font-semibold text-gray-500">Heard about:</span> {lead.heard_about}
+                        </div>
+                      ) : null}
+                      {lead.dialx_interest ? (
+                        <div>
+                          <span className="font-semibold text-gray-500">DialX interest:</span> {lead.dialx_interest}
+                        </div>
+                      ) : null}
                       <div>
                         <span className="font-semibold text-gray-500">Message:</span> {truncate(lead.message, 120)}
                       </div>
@@ -333,17 +335,30 @@ function SuperAdminLeadsPanel() {
                 );
               })}
             </div>
+
+            <SuperAdminPagination
+              page={page}
+              totalPages={totalPages}
+              onPageChange={setPage}
+              totalItems={totalItems}
+              pageSize={pageSize}
+            />
           </>
         )}
       </section>
 
       {selectedLead ? (
         <div className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-950/55 backdrop-blur-sm">
-          <div className="w-full max-w-lg max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-2xl border border-gray-200/90 ring-1 ring-black/5 flex flex-col">
+          <div className="w-full max-w-2xl max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-2xl border border-gray-200/90 ring-1 ring-black/5 flex flex-col">
             <div className="shrink-0 px-5 py-4 border-b border-violet-100/90 bg-gradient-to-r from-violet-50 via-white to-blue-50 flex items-center justify-between gap-3">
-              <div>
-                <h4 className="text-base font-bold text-gray-900">Lead details</h4>
-                <p className="text-xs text-gray-500 mt-0.5">{formatDate(selectedLead.createdAt)}</p>
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-blue-700 text-base font-bold text-white">
+                  {String(selectedLead.full_name || '?').charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <h4 className="truncate text-base font-bold text-gray-900">{selectedLead.full_name || 'Lead details'}</h4>
+                  <p className="text-xs text-gray-500 mt-0.5">{formatDate(selectedLead.createdAt)}</p>
+                </div>
               </div>
               <button
                 type="button"
@@ -354,71 +369,28 @@ function SuperAdminLeadsPanel() {
                 ×
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Full name</p>
-                <p className="mt-1 text-sm font-semibold text-gray-900">{selectedLead.full_name || '—'}</p>
+            <div className="flex-1 overflow-y-auto p-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <DetailField label="Full name" value={selectedLead.full_name} />
+                <DetailField label="Email" value={selectedLead.email} />
+                <DetailField label="Phone" value={formatPhone(selectedLead.phone)} />
+                <DetailField label="Company size" value={selectedLead.company_size} />
+                <DetailField label="Country" value={selectedLead.country} />
+                <DetailField label="Industry" value={selectedLead.industry} />
+                <DetailField label="Heard about us" value={selectedLead.heard_about} />
+                <DetailField label="DialX interest" value={selectedLead.dialx_interest} />
               </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Email</p>
-                <p className="mt-1 text-sm text-gray-800">
-                  {selectedLead.email ? (
-                    <a href={`mailto:${selectedLead.email}`} className="text-sky-700 hover:underline">
-                      {selectedLead.email}
-                    </a>
-                  ) : (
-                    '—'
-                  )}
-                </p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Phone</p>
-                <p className="mt-1 text-sm text-gray-800">{formatPhone(selectedLead.phone)}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Subject</p>
-                <p className="mt-1 text-sm text-gray-800">{selectedLead.subject || '—'}</p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Status</p>
-                <p className="mt-1">
-                  <span
-                    className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wide ring-1 ${statusBadgeClass(selectedLead.status)}`}
-                  >
-                    {statusLabel(selectedLead.status)}
-                  </span>
-                </p>
-              </div>
-              <div>
-                <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">Message</p>
-                <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed rounded-xl bg-gray-50 p-3 ring-1 ring-gray-100">
-                  {selectedLead.message || '—'}
-                </p>
+              <div className="mt-3">
+                <DetailField label="Message" value={selectedLead.message} multiline />
               </div>
             </div>
-            <div className="shrink-0 px-5 py-4 border-t border-gray-100 flex flex-wrap gap-2 justify-end">
-              {selectedLead.email ? (
-                <a
-                  href={`mailto:${selectedLead.email}`}
-                  className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-sky-600 to-blue-600 shadow-sm"
-                >
-                  Reply by email
-                </a>
-              ) : null}
-              {selectedLead.phone ? (
-                <a
-                  href={`tel:${String(selectedLead.phone).replace(/\D/g, '')}`}
-                  className="px-4 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50"
-                >
-                  Call
-                </a>
-              ) : null}
+            <div className="shrink-0 px-5 py-4 border-t border-gray-100 flex justify-end bg-gray-50/60">
               <button
                 type="button"
                 onClick={() => setSelectedLead(null)}
-                className="px-4 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50"
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
               >
-                Close
+                Cancel
               </button>
             </div>
           </div>

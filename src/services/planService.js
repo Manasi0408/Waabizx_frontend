@@ -2,10 +2,13 @@ import axios from '../api/axios';
 
 export const fetchActivePlans = async () => {
   const res = await axios.get('/plans');
-  const data = res?.data;
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.plans)) return data.plans;
-  return [];
+  const data = res?.data || {};
+  const plans = Array.isArray(data?.plans) ? data.plans : Array.isArray(data) ? data : [];
+  return {
+    plans,
+    country: data.country || 'IN',
+    currency: data.currency || 'INR',
+  };
 };
 
 export const fetchAdminPlans = async () => {
@@ -26,4 +29,31 @@ export const updatePlan = async (id, payload) => {
 export const deletePlan = async (id) => {
   const res = await axios.delete(`/admin/plans/${id}`);
   return res?.data;
+};
+
+export const fetchConversationMetrics = async () => {
+  const res = await axios.get('/conversation-metrics');
+  return {
+    metrics: Array.isArray(res?.data?.metrics) ? res.data.metrics : [],
+    rates: res?.data?.rates && typeof res.data.rates === 'object' ? res.data.rates : {},
+    country: res?.data?.country || 'IN',
+    currency: res?.data?.currency || 'INR',
+  };
+};
+
+export const fetchAdminConversationMetrics = async () => {
+  const res = await axios.get('/admin/conversation-metrics');
+  return {
+    metrics: Array.isArray(res?.data?.metrics) ? res.data.metrics : [],
+    rates: res?.data?.rates && typeof res.data.rates === 'object' ? res.data.rates : {},
+    config: res?.data?.config && typeof res.data.config === 'object' ? res.data.config : {},
+  };
+};
+
+export const updateConversationMetrics = async (payload) => {
+  const res = await axios.put('/admin/conversation-metrics', payload);
+  return {
+    metrics: Array.isArray(res?.data?.metrics) ? res.data.metrics : [],
+    rates: res?.data?.rates && typeof res.data.rates === 'object' ? res.data.rates : {},
+  };
 };

@@ -106,6 +106,7 @@ export const getConversationQuota = async (accountId) => {
     templatesSentToday: data.templatesSentToday ?? 0,
     accountName: data.accountName ?? null,
     projectId: data.projectId ?? null,
+    projectName: data.projectName ?? null,
     wccCredits: data.wccCredits ?? 0,
     wccRemainingCredits: data.wccRemainingCredits ?? data.wccCredits ?? 0,
     remainingEstimatedMessages: data.remainingEstimatedMessages ?? 0,

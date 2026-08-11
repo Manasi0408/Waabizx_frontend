@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from '../api/axios';
+import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
 
 const API_ORIGIN = String(axios.defaults.baseURL || '')
   .replace(/\/api\/?$/, '')
@@ -43,12 +44,181 @@ const emptyForm = (userName = 'SuperAdmin') => ({
   is_active: true,
 });
 
-const FONT_SIZE_MAP = {
-  small: '13px',
-  normal: '16px',
-  large: '20px',
-  huge: '28px',
-};
+const BLOCK_FORMATS = [
+  { label: 'Normal', tag: 'p' },
+  { label: 'Quote', tag: 'blockquote' },
+  { label: 'Code', tag: 'pre' },
+  { label: 'Header 1', tag: 'h1' },
+  { label: 'Header 2', tag: 'h2' },
+  { label: 'Header 3', tag: 'h3' },
+  { label: 'Header 4', tag: 'h4' },
+  { label: 'Header 5', tag: 'h5' },
+  { label: 'Header 6', tag: 'h6' },
+];
+
+const LINE_SPACING_OPTIONS = [
+  { label: '1.0', value: '1' },
+  { label: '1.5', value: '1.5' },
+  { label: '2.0', value: '2' },
+];
+
+const FONT_SIZE_OPTIONS = [
+  { label: '10', value: '10px' },
+  { label: '12', value: '12px' },
+  { label: '14', value: '14px' },
+  { label: '16', value: '16px' },
+  { label: '18', value: '18px' },
+  { label: '20', value: '20px' },
+  { label: '24', value: '24px' },
+  { label: '28', value: '28px' },
+  { label: '32', value: '32px' },
+  { label: '36', value: '36px' },
+];
+
+function AlignIcon({ type }) {
+  const lines = {
+    left: ['w-full', 'w-4/5', 'w-full', 'w-3/5'],
+    center: ['w-4/5 mx-auto', 'w-full mx-auto', 'w-3/5 mx-auto', 'w-4/5 mx-auto'],
+    right: ['w-full ml-auto', 'w-4/5 ml-auto', 'w-full ml-auto', 'w-3/5 ml-auto'],
+    full: ['w-full', 'w-full', 'w-full', 'w-full'],
+  };
+  return (
+    <span className="inline-flex w-4 flex-col gap-0.5" aria-hidden>
+      {(lines[type] || lines.left).map((cls, i) => (
+        <span key={i} className={`block h-0.5 rounded bg-current ${cls}`} />
+      ))}
+    </span>
+  );
+}
+
+const editorBodyClass =
+  'min-h-[180px] max-h-[360px] overflow-y-auto bg-white px-3 py-3 text-sm text-gray-800 outline-none prose prose-sm max-w-none ' +
+  '[&_a]:text-sky-600 [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 ' +
+  '[&_blockquote]:border-l-4 [&_blockquote]:border-sky-300 [&_blockquote]:pl-4 [&_blockquote]:italic ' +
+  '[&_pre]:rounded-lg [&_pre]:bg-gray-900 [&_pre]:p-3 [&_pre]:text-gray-100 [&_table]:w-full [&_table]:border-collapse ' +
+  '[&_td]:border [&_td]:border-gray-300 [&_td]:px-2 [&_td]:py-1.5 [&_th]:border [&_th]:border-gray-300 [&_th]:bg-gray-50 [&_th]:px-2 [&_th]:py-1.5 ' +
+  '[&_.blog-editor-table-wrap_table]:w-full [&_.blog-editor-table-remove:hover]:bg-red-50';
+
+const BLOCK_TAGS = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'BLOCKQUOTE', 'PRE', 'TD', 'TH']);
+
+const EMPTY_EDITOR_HTML = '<p><br></p>';
+const TABLE_WRAP_CLASS = 'blog-editor-table-wrap';
+const TABLE_REMOVE_CLASS = 'blog-editor-table-remove';
+
+function createTableElement(rows, cols) {
+  const table = document.createElement('table');
+  table.setAttribute('border', '1');
+  table.setAttribute('cellpadding', '8');
+  table.setAttribute('cellspacing', '0');
+  table.style.borderCollapse = 'collapse';
+  table.style.width = '100%';
+
+  const tbody = document.createElement('tbody');
+  for (let r = 0; r < rows; r += 1) {
+    const tr = document.createElement('tr');
+    for (let c = 0; c < cols; c += 1) {
+      const td = document.createElement('td');
+      td.innerHTML = '&nbsp;';
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+function wrapTableWithRemoveControl(table) {
+  if (!table || table.closest(`.${TABLE_WRAP_CLASS}`)) return table?.closest(`.${TABLE_WRAP_CLASS}`) || table;
+
+  const wrap = document.createElement('div');
+  wrap.className = TABLE_WRAP_CLASS;
+  wrap.style.position = 'relative';
+  wrap.style.margin = '0.5rem 0';
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = TABLE_REMOVE_CLASS;
+  removeBtn.title = 'Remove table';
+  removeBtn.setAttribute('aria-label', 'Remove table');
+  removeBtn.textContent = '×';
+  removeBtn.contentEditable = 'false';
+  removeBtn.style.cssText =
+    'position:absolute;top:-8px;right:-8px;z-index:2;width:20px;height:20px;padding:0;' +
+    'border:1px solid #fca5a5;border-radius:9999px;background:#fff;color:#dc2626;' +
+    'font-size:14px;line-height:1;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.08);';
+
+  if (table.parentNode) {
+    table.parentNode.insertBefore(wrap, table);
+  }
+  wrap.appendChild(removeBtn);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function normalizeTablesForEditor(editor) {
+  if (!editor) return;
+  editor.querySelectorAll('table').forEach((table) => {
+    if (!table.closest(`.${TABLE_WRAP_CLASS}`)) {
+      wrapTableWithRemoveControl(table);
+    }
+  });
+}
+
+function serializeEditorHtml(editor) {
+  if (!editor) return '';
+  const clone = editor.cloneNode(true);
+  clone.querySelectorAll(`.${TABLE_WRAP_CLASS}`).forEach((wrap) => {
+    const table = wrap.querySelector('table');
+    if (table) {
+      wrap.replaceWith(table.cloneNode(true));
+    } else {
+      wrap.remove();
+    }
+  });
+  return clone.innerHTML;
+}
+
+function focusTableCell(table) {
+  const cell = table?.querySelector('td, th');
+  if (!cell) return;
+  const range = document.createRange();
+  range.selectNodeContents(cell);
+  range.collapse(true);
+  const sel = window.getSelection();
+  if (!sel) return;
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function getBlockElement(node, editor) {
+  let current = node;
+  if (current?.nodeType === Node.TEXT_NODE) current = current.parentElement;
+  while (current && current !== editor && !BLOCK_TAGS.has(current.tagName)) {
+    current = current.parentElement;
+  }
+  return current && current !== editor ? current : null;
+}
+
+function ensureEditorHasBlock(editor) {
+  if (!editor) return null;
+  const text = String(editor.textContent || '').replace(/\u200b/g, '').trim();
+  if (!text && !editor.querySelector('p,div,h1,h2,h3,h4,h5,h6,ul,ol,table,blockquote,pre')) {
+    editor.innerHTML = EMPTY_EDITOR_HTML;
+  }
+  const sel = window.getSelection();
+  if (!sel) return editor.querySelector('p') || editor.firstElementChild;
+  if (sel.rangeCount === 0 || !editor.contains(sel.anchorNode)) {
+    const block = editor.querySelector('p') || editor.firstElementChild;
+    if (block) {
+      const range = document.createRange();
+      range.selectNodeContents(block);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+  return getBlockElement(sel.anchorNode, editor);
+}
 
 function RichTextEditor({ value, onChange }) {
   const editorRef = useRef(null);
@@ -59,16 +229,17 @@ function RichTextEditor({ value, onChange }) {
     const el = editorRef.current;
     if (!el) return;
     const next = value || '';
-    if (next !== lastHtmlRef.current && el.innerHTML !== next) {
-      el.innerHTML = next;
-      lastHtmlRef.current = next;
+    if (next !== lastHtmlRef.current) {
+      el.innerHTML = next || EMPTY_EDITOR_HTML;
+      normalizeTablesForEditor(el);
+      lastHtmlRef.current = next || EMPTY_EDITOR_HTML;
     }
   }, [value]);
 
   const emitChange = () => {
     const el = editorRef.current;
     if (!el) return;
-    const html = el.innerHTML;
+    const html = serializeEditorHtml(el);
     lastHtmlRef.current = html;
     onChange(html);
   };
@@ -86,29 +257,52 @@ function RichTextEditor({ value, onChange }) {
     const range = savedSelectionRef.current;
     if (!range) return false;
     const sel = window.getSelection();
+    if (!sel) return false;
     sel.removeAllRanges();
     sel.addRange(range);
     return true;
   };
 
   const focusEditor = () => {
-    editorRef.current?.focus();
-    restoreSelection();
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    if (!restoreSelection()) {
+      ensureEditorHasBlock(editor);
+    }
   };
 
-  const wrapSelection = (mutateNode) => {
-    focusEditor();
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-    const range = sel.getRangeAt(0);
+  const withEditorSelection = (fn) => {
     const editor = editorRef.current;
-    if (!editor || !editor.contains(range.commonAncestorContainer)) return;
+    if (!editor) return;
+    focusEditor();
+    ensureEditorHasBlock(editor);
+    fn(editor);
+    saveSelection();
+    emitChange();
+  };
 
-    if (range.collapsed) return;
+  const wrapSelectionInline = (mutateNode) => {
+    const editor = editorRef.current;
+    const sel = window.getSelection();
+    if (!editor || !sel?.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer)) return;
+
+    if (range.collapsed) {
+      const span = document.createElement('span');
+      mutateNode(span);
+      span.appendChild(document.createTextNode('\u200b'));
+      range.insertNode(span);
+      range.setStart(span.firstChild, 1);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
 
     const wrapper = document.createElement('span');
     mutateNode(wrapper);
-
     try {
       range.surroundContents(wrapper);
     } catch (_) {
@@ -116,41 +310,204 @@ function RichTextEditor({ value, onChange }) {
       wrapper.appendChild(fragment);
       range.insertNode(wrapper);
     }
-
     range.setStartAfter(wrapper);
     range.collapse(true);
     sel.removeAllRanges();
     sel.addRange(range);
-    savedSelectionRef.current = range.cloneRange();
-    emitChange();
+  };
+
+  const exec = (command, arg = null) => {
+    try {
+      return document.execCommand(command, false, arg);
+    } catch (_) {
+      return false;
+    }
   };
 
   const run = (command, arg = null) => {
-    focusEditor();
-    try {
-      document.execCommand(command, false, arg);
-    } catch (_) {
-      /* ignore */
+    withEditorSelection(() => {
+      exec(command, arg);
+    });
+  };
+
+  const toolbarAction = (handler) => (e) => {
+    e.preventDefault();
+    saveSelection();
+    handler();
+  };
+
+  const applyBlockFormat = (tag) => {
+    if (!tag) return;
+    withEditorSelection((editor) => {
+      const sel = window.getSelection();
+      if (!sel?.rangeCount) return;
+      const block = getBlockElement(sel.getRangeAt(0).commonAncestorContainer, editor) || ensureEditorHasBlock(editor);
+      const applied =
+        exec('formatBlock', `<${tag}>`) ||
+        exec('formatBlock', tag);
+
+      if (!applied && block?.parentNode) {
+        const replacement = document.createElement(tag);
+        if (tag === 'pre') {
+          const code = document.createElement('code');
+          code.textContent = block.textContent || '';
+          replacement.appendChild(code);
+        } else {
+          replacement.innerHTML = block.innerHTML || '<br>';
+        }
+        block.parentNode.replaceChild(replacement, block);
+        const range = document.createRange();
+        range.selectNodeContents(replacement);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    });
+  };
+
+  const applyTextColor = (color) => {
+    if (!color) return;
+    withEditorSelection(() => {
+      exec('styleWithCSS', true);
+      if (!exec('foreColor', color)) {
+        wrapSelectionInline((node) => {
+          node.style.color = color;
+        });
+      }
+    });
+  };
+
+  const applyHighlightColor = (color) => {
+    if (!color) return;
+    withEditorSelection(() => {
+      exec('styleWithCSS', true);
+      if (color === 'transparent') {
+        wrapSelectionInline((node) => {
+          node.style.backgroundColor = 'transparent';
+        });
+        return;
+      }
+      if (!exec('hiliteColor', color) && !exec('backColor', color)) {
+        wrapSelectionInline((node) => {
+          node.style.backgroundColor = color;
+        });
+      }
+    });
+  };
+
+  const applyFontSize = (size) => {
+    if (!size) return;
+    withEditorSelection(() => {
+      wrapSelectionInline((node) => {
+        node.style.fontSize = size;
+      });
+    });
+  };
+
+  const applyLineSpacing = (lineHeight) => {
+    if (!lineHeight) return;
+    withEditorSelection((editor) => {
+      const sel = window.getSelection();
+      if (!sel?.rangeCount) return;
+      const range = sel.getRangeAt(0);
+
+      if (!range.collapsed) {
+        const wrapper = document.createElement('span');
+        wrapper.style.lineHeight = lineHeight;
+        wrapper.style.display = 'inline-block';
+        try {
+          range.surroundContents(wrapper);
+        } catch (_) {
+          const fragment = range.extractContents();
+          wrapper.appendChild(fragment);
+          range.insertNode(wrapper);
+        }
+        return;
+      }
+
+      const block = getBlockElement(range.startContainer, editor) || ensureEditorHasBlock(editor);
+      if (block) block.style.lineHeight = lineHeight;
+    });
+  };
+
+  const applyAlign = (align) => {
+    const commandMap = {
+      left: 'justifyLeft',
+      center: 'justifyCenter',
+      right: 'justifyRight',
+      full: 'justifyFull',
+    };
+    withEditorSelection((editor) => {
+      const sel = window.getSelection();
+      if (!sel?.rangeCount) return;
+      const block = getBlockElement(sel.getRangeAt(0).commonAncestorContainer, editor) || ensureEditorHasBlock(editor);
+      exec(commandMap[align]);
+      if (block) {
+        block.style.textAlign = align === 'full' ? 'justify' : align;
+      }
+    });
+  };
+
+  const [textColor, setTextColor] = useState('#111827');
+  const [highlightColor, setHighlightColor] = useState('#fef08a');
+
+  const insertTable = () => {
+    const rowsRaw = window.prompt('How many rows?', '3');
+    if (rowsRaw == null) return;
+    const colsRaw = window.prompt('How many columns?', '3');
+    if (colsRaw == null) return;
+
+    const rows = Math.min(20, Math.max(0, parseInt(String(rowsRaw).trim(), 10) || 0));
+    const cols = Math.min(20, Math.max(0, parseInt(String(colsRaw).trim(), 10) || 0));
+    if (rows < 1 || cols < 1) {
+      window.alert('Please enter valid numbers for rows and columns (1–20).');
+      return;
     }
-    emitChange();
-  };
 
-  const applyFontFamily = (fontFamily) => {
-    if (!fontFamily) return;
-    wrapSelection((node) => {
-      node.style.fontFamily = fontFamily;
+    withEditorSelection((editor) => {
+      const table = createTableElement(rows, cols);
+      const wrap = wrapTableWithRemoveControl(table);
+
+      const sel = window.getSelection();
+      if (sel?.rangeCount && editor.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(wrap);
+        const spacer = document.createElement('p');
+        spacer.innerHTML = '<br>';
+        wrap.after(spacer);
+      } else {
+        editor.appendChild(wrap);
+        const spacer = document.createElement('p');
+        spacer.innerHTML = '<br>';
+        editor.appendChild(spacer);
+      }
+
+      focusTableCell(table);
     });
   };
 
-  const applyFontSize = (sizeKey) => {
-    const fontSize = FONT_SIZE_MAP[sizeKey];
-    if (!fontSize) return;
-    wrapSelection((node) => {
-      node.style.fontSize = fontSize;
-    });
+  const handleEditorMouseDown = (e) => {
+    if (e.target.closest(`.${TABLE_REMOVE_CLASS}`)) {
+      e.preventDefault();
+    }
+  };
+
+  const handleEditorClick = (e) => {
+    const removeBtn = e.target.closest(`.${TABLE_REMOVE_CLASS}`);
+    if (!removeBtn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const wrap = removeBtn.closest(`.${TABLE_WRAP_CLASS}`);
+    if (wrap) {
+      wrap.remove();
+      ensureEditorHasBlock(editorRef.current);
+      emitChange();
+    }
   };
 
   const applyLink = () => {
+    saveSelection();
     focusEditor();
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
@@ -195,98 +552,162 @@ function RichTextEditor({ value, onChange }) {
     emitChange();
   };
 
-  const preventToolbarFocusLoss = (e) => {
-    e.preventDefault();
+  const saveSelectionForSelect = () => {
     saveSelection();
   };
 
+  const handleSelectChange = (handler) => (e) => {
+    saveSelection();
+    handler(e);
+  };
+
+  const handleEditorFocus = () => {
+    ensureEditorHasBlock(editorRef.current);
+  };
+
   const btnClass =
-    'px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:bg-sky-50 hover:border-sky-200 transition';
+    'inline-flex items-center justify-center min-w-[2rem] px-2 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:bg-sky-50 hover:border-sky-200 transition';
+
+  const selectClass =
+    'rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 outline-none focus:border-sky-400';
 
   return (
     <div className="rounded-xl border-2 border-gray-200 overflow-hidden focus-within:border-sky-400 focus-within:ring-4 focus-within:ring-sky-500/10">
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-200 bg-gray-50 px-2 py-2">
-        <button
-          type="button"
-          className={btnClass}
-          onMouseDown={preventToolbarFocusLoss}
-          onClick={() => run('bold')}
-          title="Bold"
-        >
+      <div className="flex flex-wrap items-center gap-1 border-b border-gray-200 bg-gray-50 px-2 py-2">
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => run('bold'))} title="Bold">
           <strong>B</strong>
         </button>
-        <button
-          type="button"
-          className={btnClass}
-          onMouseDown={preventToolbarFocusLoss}
-          onClick={() => run('italic')}
-          title="Italic"
-        >
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => run('italic'))} title="Italic">
           <em>I</em>
         </button>
-        <button
-          type="button"
-          className={btnClass}
-          onMouseDown={preventToolbarFocusLoss}
-          onClick={() => run('underline')}
-          title="Underline"
-        >
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => run('underline'))} title="Underline">
           <span className="underline">U</span>
         </button>
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(applyLink)} title="Link">
+          Link
+        </button>
+
+        <span className="mx-0.5 h-5 w-px bg-gray-300" aria-hidden />
+
+        <select
+          className={`${selectClass} max-w-[72px]`}
+          defaultValue=""
+          onMouseDown={saveSelectionForSelect}
+          onFocus={saveSelectionForSelect}
+          onChange={handleSelectChange((e) => {
+            if (e.target.value) applyFontSize(e.target.value);
+          })}
+          title="Font size"
+        >
+          <option value="" disabled>
+            Size
+          </option>
+          {FONT_SIZE_OPTIONS.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+
         <button
           type="button"
           className={btnClass}
-          onMouseDown={preventToolbarFocusLoss}
-          onClick={applyLink}
-          title="Hyperlink"
+          onMouseDown={toolbarAction(() => run('insertUnorderedList'))}
+          title="Bulleted list"
         >
-          Link
+          •
         </button>
-        <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
-        <label className="inline-flex items-center gap-1 text-xs font-semibold text-gray-600">
-          Font
-          <select
-            className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs"
-            defaultValue=""
-            onMouseDown={preventToolbarFocusLoss}
-            onChange={(e) => {
-              const font = e.target.value;
-              if (font) applyFontFamily(font);
-              e.target.value = '';
-            }}
-          >
-            <option value="" disabled>
-              Family
+        <button
+          type="button"
+          className={btnClass}
+          onMouseDown={toolbarAction(() => run('insertOrderedList'))}
+          title="Numbered list"
+        >
+          1.
+        </button>
+
+        <span className="mx-0.5 h-5 w-px bg-gray-300" aria-hidden />
+
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => applyAlign('left'))} title="Align left">
+          <AlignIcon type="left" />
+        </button>
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => applyAlign('center'))} title="Align center">
+          <AlignIcon type="center" />
+        </button>
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => applyAlign('right'))} title="Align right">
+          <AlignIcon type="right" />
+        </button>
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(() => applyAlign('full'))} title="Justify">
+          <AlignIcon type="full" />
+        </button>
+
+        <select
+          className={`${selectClass} max-w-[88px]`}
+          defaultValue=""
+          onMouseDown={saveSelectionForSelect}
+          onFocus={saveSelectionForSelect}
+          onChange={handleSelectChange((e) => {
+            if (e.target.value) applyLineSpacing(e.target.value);
+          })}
+          title="Line spacing"
+        >
+          <option value="" disabled>
+            Spacing
+          </option>
+          {LINE_SPACING_OPTIONS.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
             </option>
-            <option value="Arial, sans-serif">Arial</option>
-            <option value="Georgia, serif">Georgia</option>
-            <option value="'Times New Roman', Times, serif">Times New Roman</option>
-            <option value="Verdana, sans-serif">Verdana</option>
-            <option value="'Courier New', Courier, monospace">Courier New</option>
-            <option value="Tahoma, sans-serif">Tahoma</option>
-          </select>
-        </label>
-        <label className="inline-flex items-center gap-1 text-xs font-semibold text-gray-600">
-          Size
-          <select
-            className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs"
-            defaultValue=""
-            onMouseDown={preventToolbarFocusLoss}
-            onChange={(e) => {
-              const sizeKey = e.target.value;
-              if (sizeKey) applyFontSize(sizeKey);
-              e.target.value = '';
+          ))}
+        </select>
+
+        <span className="mx-0.5 h-5 w-px bg-gray-300" aria-hidden />
+
+        <label
+          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-gray-200 bg-white px-1.5 py-1 text-xs font-semibold text-gray-700"
+          title="Text color"
+        >
+          <span>A</span>
+          <span className="h-1 w-5 rounded-sm" style={{ backgroundColor: textColor }} aria-hidden />
+          <input
+            type="color"
+            value={textColor}
+            className="h-7 w-8 cursor-pointer rounded border border-gray-200 bg-white p-0.5"
+            onMouseDown={saveSelectionForSelect}
+            onFocus={saveSelectionForSelect}
+            onInput={(e) => {
+              setTextColor(e.target.value);
+              applyTextColor(e.target.value);
             }}
-          >
-            <option value="" disabled>
-              Size
-            </option>
-            <option value="small">Small</option>
-            <option value="normal">Normal</option>
-            <option value="large">Large</option>
-            <option value="huge">Huge</option>
-          </select>
+          />
         </label>
+
+        <label
+          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-gray-200 bg-white px-1.5 py-1 text-xs font-semibold text-gray-700"
+          title="Highlight color"
+        >
+          <span>HL</span>
+          <span
+            className="h-1 w-5 rounded-sm border border-gray-200"
+            style={{ backgroundColor: highlightColor }}
+            aria-hidden
+          />
+          <input
+            type="color"
+            value={highlightColor}
+            className="h-7 w-8 cursor-pointer rounded border border-gray-200 bg-white p-0.5"
+            onMouseDown={saveSelectionForSelect}
+            onFocus={saveSelectionForSelect}
+            onInput={(e) => {
+              setHighlightColor(e.target.value);
+              applyHighlightColor(e.target.value);
+            }}
+          />
+        </label>
+
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(insertTable)} title="Insert table">
+          Table
+        </button>
       </div>
       <div
         ref={editorRef}
@@ -294,9 +715,12 @@ function RichTextEditor({ value, onChange }) {
         suppressContentEditableWarning
         role="textbox"
         aria-label="Blog details"
-        className="min-h-[180px] max-h-[360px] overflow-y-auto bg-white px-3 py-3 text-sm text-gray-800 outline-none prose prose-sm max-w-none [&_a]:text-sky-600 [&_a]:underline"
+        className={editorBodyClass}
         onInput={emitChange}
         onBlur={emitChange}
+        onClick={handleEditorClick}
+        onMouseDown={handleEditorMouseDown}
+        onFocus={handleEditorFocus}
         onMouseUp={saveSelection}
         onKeyUp={saveSelection}
       />
@@ -362,6 +786,11 @@ function SuperAdminBlogsPanel() {
       return hay.includes(q);
     });
   }, [blogs, search]);
+
+  const { page, setPage, totalPages, paginatedItems, totalItems, pageSize } = useSuperAdminPagination(
+    filteredBlogs,
+    [search]
+  );
 
   const openCreate = () => {
     setForm(emptyForm(defaultAuthor));
@@ -651,7 +1080,20 @@ function SuperAdminBlogsPanel() {
               </label>
               <RichTextEditor value={form.details} onChange={(html) => setField('details', html)} />
               <p className="mt-1.5 text-xs text-gray-500">
-                Select text first, then use toolbar for bold, underline, hyperlink, font family, or font size.
+                Use the toolbar for headings, lists, alignment, colors, tables, links, and rich formatting.
+                {form.id ? (
+                  <>
+                    {' '}
+                    <a
+                      href={`/public/blogs/${form.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-semibold text-sky-600 hover:text-sky-800"
+                    >
+                      Preview public page
+                    </a>
+                  </>
+                ) : null}
               </p>
             </div>
 
@@ -706,8 +1148,9 @@ function SuperAdminBlogsPanel() {
             No blogs yet. Click “New blog” to create one.
           </div>
         ) : (
+          <>
           <div className="space-y-3">
-            {filteredBlogs.map((blog) => (
+            {paginatedItems.map((blog) => (
               <article
                 key={blog.id}
                 className="flex flex-col gap-3 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:flex-row sm:items-center"
@@ -769,6 +1212,14 @@ function SuperAdminBlogsPanel() {
               </article>
             ))}
           </div>
+          <SuperAdminPagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            totalItems={totalItems}
+            pageSize={pageSize}
+          />
+          </>
         )}
       </section>
     </div>

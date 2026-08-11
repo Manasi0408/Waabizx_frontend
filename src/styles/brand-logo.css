@@ -84,3 +84,19 @@ html.dark main.flex.h-full .brand-logo-mark:not(.auth-brand-logo-pulse) {
     0 4px 16px rgba(0, 0, 0, 0.45),
     0 0 0 1px rgba(148, 163, 184, 0.28);
 }
+
+/* Login page — circular logo badge */
+.login-page .brand-logo-mark {
+  border-radius: 9999px !important;
+  overflow: hidden;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0.35rem;
+}
+
+.login-page .brand-logo-mark__img {
+  height: 100%;
+  width: 100%;
+  max-width: none;
+  object-fit: contain;
+}

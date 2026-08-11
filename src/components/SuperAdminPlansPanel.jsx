@@ -2,20 +2,30 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   createPlan,
   deletePlan,
+  fetchAdminConversationMetrics,
   fetchAdminPlans,
+  updateConversationMetrics,
   updatePlan,
 } from '../services/planService';
 import PlanSubscriptionView from './PlanSubscriptionView';
+import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
 import {
+  CONVERSATION_METRICS,
   PLAN_HIGHLIGHTS,
   PLAN_MONTHLY_DEFAULT,
+  buildConversationMetrics,
   buildCycleOptions,
   computeQuarterlyFromMonthly,
   computeYearlyFromMonthly,
   discountedMonthlyRate,
+  formatConversationRateText,
   formatInr,
+  formatUsd,
+  formatPlanAmount,
   withDerivedPricesFromMonthly,
 } from '../utils/planPricing';
+
+const PLAN_MONTHLY_USD_DEFAULT = 10;
 
 const withDerivedPrices = (monthly) => {
   const derived = withDerivedPricesFromMonthly(monthly);
@@ -26,14 +36,33 @@ const withDerivedPrices = (monthly) => {
   };
 };
 
+const withDerivedUsdPrices = (monthly) => {
+  const derived = withDerivedPricesFromMonthly(monthly);
+  return {
+    price_monthly_usd: derived.price_monthly,
+    price_quarterly_usd: String(derived.price_quarterly),
+    price_yearly_usd: String(derived.price_yearly),
+  };
+};
+
 const defaultFeaturesText = () => PLAN_HIGHLIGHTS.join('\n');
+
+const slugifyPlanName = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
 
 const emptyForm = () => ({
   id: null,
   slug: 'standard',
   name: 'Standard Project Plan',
   ...withDerivedPrices(PLAN_MONTHLY_DEFAULT),
+  ...withDerivedUsdPrices(PLAN_MONTHLY_USD_DEFAULT),
   autoDerivePrices: true,
+  autoDeriveUsdPrices: true,
   users_limit: '0',
   messages_limit: '0',
   featuresText: defaultFeaturesText(),
@@ -53,6 +82,16 @@ const planToForm = (plan) => {
     (!storedQuarterly || storedQuarterly === computedQuarterly) &&
     (!storedYearly || storedYearly === computedYearly);
 
+  const monthlyUsd = String(plan.price_monthly_usd ?? PLAN_MONTHLY_USD_DEFAULT);
+  const derivedUsd = withDerivedUsdPrices(monthlyUsd);
+  const storedQuarterlyUsd = Number(plan.price_quarterly_usd);
+  const storedYearlyUsd = Number(plan.price_yearly_usd);
+  const computedQuarterlyUsd = computeQuarterlyFromMonthly(monthlyUsd);
+  const computedYearlyUsd = computeYearlyFromMonthly(monthlyUsd);
+  const autoDeriveUsdPrices =
+    (!storedQuarterlyUsd || storedQuarterlyUsd === computedQuarterlyUsd) &&
+    (!storedYearlyUsd || storedYearlyUsd === computedYearlyUsd);
+
   return {
     id: plan.id,
     slug: plan.slug || 'standard',
@@ -60,7 +99,11 @@ const planToForm = (plan) => {
     price_monthly: monthly,
     price_quarterly: String(storedQuarterly || derived.price_quarterly),
     price_yearly: String(storedYearly || derived.price_yearly),
+    price_monthly_usd: monthlyUsd,
+    price_quarterly_usd: String(storedQuarterlyUsd || derivedUsd.price_quarterly_usd),
+    price_yearly_usd: String(storedYearlyUsd || derivedUsd.price_yearly_usd),
     autoDerivePrices,
+    autoDeriveUsdPrices,
     users_limit: String(plan.users_limit ?? 0),
     messages_limit: String(plan.messages_limit ?? 0),
     featuresText: Array.isArray(plan.features) && plan.features.length
@@ -72,6 +115,49 @@ const planToForm = (plan) => {
   };
 };
 
+const emptyMetricsForm = () =>
+  CONVERSATION_METRICS.reduce((acc, metric) => {
+    acc[metric.key] = {
+      label: metric.label,
+      rate: String(metric.rate ?? ''),
+      rate_usd: String(metric.rate_usd ?? ''),
+      text: metric.key === 'service' ? metric.text : '',
+    };
+    return acc;
+  }, {});
+
+const metricsToForm = (metrics = []) => {
+  const form = emptyMetricsForm();
+  metrics.forEach((metric) => {
+    if (!metric?.key || !form[metric.key]) return;
+    form[metric.key] = {
+      label: metric.label || form[metric.key].label,
+      rate: String(metric.rate ?? form[metric.key].rate),
+      rate_usd: String(metric.rate_usd ?? form[metric.key].rate_usd ?? ''),
+      text: metric.key === 'service' ? (metric.text || form[metric.key].text) : '',
+    };
+  });
+  return form;
+};
+
+const formToMetricsPreview = (form) =>
+  CONVERSATION_METRICS.map((metric) => {
+    const item = form[metric.key] || {};
+    const rate = Math.max(0, Number(item.rate) || 0);
+    const rateUsd = Math.max(0, Number(item.rate_usd) || 0);
+    const text =
+      metric.key === 'service'
+        ? String(item.text || metric.text).trim() || metric.text
+        : `${formatConversationRateText(rate, 'INR')} · ${formatConversationRateText(rateUsd, 'USD')}`;
+    return {
+      key: metric.key,
+      label: item.label || metric.label,
+      rate,
+      rate_usd: rateUsd,
+      text,
+    };
+  });
+
 function SuperAdminPlansPanel() {
   const [plans, setPlans] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -82,6 +168,39 @@ function SuperAdminPlansPanel() {
   const [form, setForm] = useState(emptyForm());
   const [showForm, setShowForm] = useState(false);
   const [previewCycle, setPreviewCycle] = useState('monthly');
+  const [metricsForm, setMetricsForm] = useState(emptyMetricsForm());
+  const [metricsPreview, setMetricsPreview] = useState(CONVERSATION_METRICS);
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [metricsSaving, setMetricsSaving] = useState(false);
+  const [metricsEditing, setMetricsEditing] = useState(false);
+  const [metricsError, setMetricsError] = useState('');
+  const [metricsSuccess, setMetricsSuccess] = useState('');
+
+  const loadConversationMetrics = useCallback(async () => {
+    setMetricsError('');
+    setMetricsLoading(true);
+    try {
+      const data = await fetchAdminConversationMetrics();
+      const metrics = buildConversationMetrics(data.metrics, data.rates).map((metric) => {
+        const cfg = data.config?.[metric.key];
+        const rateUsd = Math.max(0, Number(cfg?.rate_usd) || 0);
+        if (metric.key === 'service') return metric;
+        return {
+          ...metric,
+          rate_usd: rateUsd,
+          text: `${formatConversationRateText(metric.rate, 'INR')} · ${formatConversationRateText(rateUsd, 'USD')}`,
+        };
+      });
+      setMetricsPreview(metrics);
+      setMetricsForm(metricsToForm(metrics));
+    } catch (e) {
+      setMetricsError(e?.response?.data?.message || e?.message || 'Failed to load conversation metrics');
+      setMetricsPreview(CONVERSATION_METRICS);
+      setMetricsForm(emptyMetricsForm());
+    } finally {
+      setMetricsLoading(false);
+    }
+  }, []);
 
   const loadPlans = useCallback(async () => {
     setError('');
@@ -108,7 +227,8 @@ function SuperAdminPlansPanel() {
 
   useEffect(() => {
     loadPlans();
-  }, [loadPlans]);
+    loadConversationMetrics();
+  }, [loadPlans, loadConversationMetrics]);
 
   const primaryPlan = useMemo(() => {
     const active = plans.filter((p) => p.is_active);
@@ -119,18 +239,28 @@ function SuperAdminPlansPanel() {
   }, [plans]);
 
   const monthlyPrice = Number(primaryPlan?.price_monthly) || PLAN_MONTHLY_DEFAULT;
+  const monthlyPriceUsd = Number(primaryPlan?.price_monthly_usd) || PLAN_MONTHLY_USD_DEFAULT;
   const cycleStats = useMemo(
-    () => buildCycleOptions(monthlyPrice, primaryPlan),
+    () => buildCycleOptions(monthlyPrice, primaryPlan, 'INR'),
     [monthlyPrice, primaryPlan]
+  );
+  const cycleStatsUsd = useMemo(
+    () => buildCycleOptions(monthlyPriceUsd, { ...primaryPlan, price_monthly: monthlyPriceUsd }, 'USD'),
+    [monthlyPriceUsd, primaryPlan]
   );
 
   const stats = useMemo(() => ({
     monthly: monthlyPrice,
+    monthlyUsd: monthlyPriceUsd,
     quarterly: cycleStats.find((c) => c.cycle === 'quarterly')?.billingAmount || 0,
     yearly: cycleStats.find((c) => c.cycle === 'yearly')?.billingAmount || 0,
+    quarterlyUsd: cycleStatsUsd.find((c) => c.cycle === 'quarterly')?.billingAmount || 0,
+    yearlyUsd: cycleStatsUsd.find((c) => c.cycle === 'yearly')?.billingAmount || 0,
     total: plans.length,
     published: plans.filter((p) => p.is_active).length,
-  }), [monthlyPrice, cycleStats, plans]);
+  }), [monthlyPrice, monthlyPriceUsd, cycleStats, cycleStatsUsd, plans]);
+
+  const { page, setPage, totalPages, paginatedItems, totalItems, pageSize } = useSuperAdminPagination(plans);
 
   const openAdd = () => {
     setForm(emptyForm());
@@ -163,6 +293,18 @@ function SuperAdminPlansPanel() {
     });
   };
 
+  const updateMonthlyPriceUsd = (value) => {
+    setForm((f) => {
+      const next = { ...f, price_monthly_usd: value };
+      if (f.autoDeriveUsdPrices) {
+        const derived = withDerivedUsdPrices(value);
+        next.price_quarterly_usd = derived.price_quarterly_usd;
+        next.price_yearly_usd = derived.price_yearly_usd;
+      }
+      return next;
+    });
+  };
+
   const onSave = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -175,13 +317,25 @@ function SuperAdminPlansPanel() {
     const yearly = form.autoDerivePrices
       ? computeYearlyFromMonthly(monthly)
       : Number(form.price_yearly) || 0;
+    const monthlyUsd = Number(form.price_monthly_usd) || 0;
+    const quarterlyUsd = form.autoDeriveUsdPrices
+      ? computeQuarterlyFromMonthly(monthlyUsd)
+      : Number(form.price_quarterly_usd) || 0;
+    const yearlyUsd = form.autoDeriveUsdPrices
+      ? computeYearlyFromMonthly(monthlyUsd)
+      : Number(form.price_yearly_usd) || 0;
 
     const payload = {
-      slug: form.slug.trim() || 'standard',
+      slug: form.id
+        ? form.slug.trim() || 'standard'
+        : slugifyPlanName(form.name) || 'standard',
       name: form.name.trim() || 'Standard Project Plan',
       price_monthly: monthly,
       price_quarterly: quarterly,
       price_yearly: yearly,
+      price_monthly_usd: monthlyUsd,
+      price_quarterly_usd: quarterlyUsd,
+      price_yearly_usd: yearlyUsd,
       users_limit: Number(form.users_limit) || 0,
       messages_limit: Number(form.messages_limit) || 0,
       features: form.featuresText,
@@ -236,6 +390,62 @@ function SuperAdminPlansPanel() {
     }
   };
 
+  const updateMetricField = (key, field, value) => {
+    setMetricsForm((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] || {}),
+        [field]: value,
+      },
+    }));
+  };
+
+  const startMetricsEdit = () => {
+    setMetricsForm(metricsToForm(metricsPreview));
+    setMetricsEditing(true);
+    setMetricsSuccess('');
+    setMetricsError('');
+  };
+
+  const cancelMetricsEdit = () => {
+    setMetricsForm(metricsToForm(metricsPreview));
+    setMetricsEditing(false);
+    setMetricsError('');
+  };
+
+  const onSaveMetrics = async (e) => {
+    e.preventDefault();
+    setMetricsSaving(true);
+    setMetricsError('');
+    setMetricsSuccess('');
+    try {
+      const payload = {};
+      CONVERSATION_METRICS.forEach((metric) => {
+        const item = metricsForm[metric.key] || {};
+        payload[metric.key] = {
+          label: item.label || metric.label,
+          rate: Math.max(0, Number(item.rate) || 0),
+          rate_usd: Math.max(0, Number(item.rate_usd) || 0),
+          ...(metric.key === 'service'
+            ? { text: String(item.text || metric.text).trim() || metric.text }
+            : {}),
+        };
+      });
+      const data = await updateConversationMetrics(payload);
+      const metrics = buildConversationMetrics(data.metrics, data.rates);
+      setMetricsPreview(metrics);
+      setMetricsForm(metricsToForm(metrics));
+      setMetricsEditing(false);
+      setMetricsSuccess('Conversation metrics updated successfully.');
+    } catch (err) {
+      setMetricsError(err?.response?.data?.message || err?.message || 'Failed to save conversation metrics');
+    } finally {
+      setMetricsSaving(false);
+    }
+  };
+
+  const previewMetrics = metricsEditing ? formToMetricsPreview(metricsForm) : metricsPreview;
+
   return (
     <div className="motion-enter space-y-6">
       <section className="relative overflow-hidden rounded-2xl border border-sky-100/90 bg-white/95 p-5 md:p-6 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 backdrop-blur-sm">
@@ -275,17 +485,17 @@ function SuperAdminPlansPanel() {
         <div className="rounded-2xl border border-sky-100/90 bg-gradient-to-br from-sky-500/10 via-white to-blue-500/10 p-4 shadow-lg shadow-sky-200/25 ring-1 ring-sky-100/60 motion-hover-lift">
           <p className="text-[11px] font-bold uppercase tracking-wider text-sky-800/70">Monthly /mo</p>
           <p className="mt-1 text-2xl font-bold tabular-nums text-sky-800">₹ {formatInr(stats.monthly)}</p>
-          <p className="mt-0.5 text-[10px] text-sky-600 font-semibold">/project</p>
+          <p className="mt-0.5 text-[10px] text-sky-600 font-semibold">/project · ${formatUsd(stats.monthlyUsd)} USD</p>
         </div>
         <div className="rounded-2xl border border-emerald-100/90 bg-gradient-to-br from-emerald-50/80 via-white to-teal-50/40 p-4 shadow-lg shadow-emerald-100/30 ring-1 ring-emerald-100/60 motion-hover-lift">
           <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-800/70">Quarterly bill</p>
           <p className="mt-1 text-2xl font-bold tabular-nums text-emerald-700">₹ {formatInr(stats.quarterly)}</p>
-          <p className="mt-0.5 text-[10px] text-emerald-600 font-semibold">₹ {formatInr(discountedMonthlyRate(stats.monthly, 'quarterly'))}/mo (−10%)</p>
+          <p className="mt-0.5 text-[10px] text-emerald-600 font-semibold">${formatUsd(stats.quarterlyUsd)} USD</p>
         </div>
         <div className="rounded-2xl border border-rose-100/90 bg-gradient-to-br from-rose-50/80 via-white to-orange-50/40 p-4 shadow-lg shadow-rose-100/30 ring-1 ring-rose-100/60 motion-hover-lift">
           <p className="text-[11px] font-bold uppercase tracking-wider text-rose-800/70">Yearly bill</p>
           <p className="mt-1 text-2xl font-bold tabular-nums text-rose-700">₹ {formatInr(stats.yearly)}</p>
-          <p className="mt-0.5 text-[10px] text-rose-600 font-semibold">₹ {formatInr(discountedMonthlyRate(stats.monthly, 'yearly'))}/mo (−15%)</p>
+          <p className="mt-0.5 text-[10px] text-rose-600 font-semibold">${formatUsd(stats.yearlyUsd)} USD</p>
         </div>
         <div className="rounded-2xl border border-gray-100/90 bg-white p-4 shadow-lg shadow-gray-200/25 ring-1 ring-gray-100/60 motion-hover-lift">
           <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500">Total plans</p>
@@ -307,6 +517,131 @@ function SuperAdminPlansPanel() {
           {success}
         </div>
       ) : null}
+      {metricsSuccess ? (
+        <div className="p-4 bg-emerald-50 border border-emerald-200/90 rounded-2xl text-sm text-emerald-800 ring-1 ring-emerald-100/50">
+          {metricsSuccess}
+        </div>
+      ) : null}
+      {metricsError ? (
+        <div className="p-4 bg-red-50 border border-red-200/90 rounded-2xl text-sm text-red-700 ring-1 ring-red-100/50">
+          {metricsError}
+        </div>
+      ) : null}
+
+      <section className="rounded-2xl border border-gray-100/90 bg-white/95 backdrop-blur-sm shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 overflow-hidden">
+        <div className="px-4 md:px-5 py-4 border-b border-gray-100/90 bg-gradient-to-r from-white via-violet-50/40 to-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">Pay-per-use conversation metrics</h3>
+            <p className="text-xs text-gray-500 mt-0.5">Edit message rates shown on Get Plan, Broadcast &amp; billing</p>
+          </div>
+          {!metricsEditing ? (
+            <button
+              type="button"
+              onClick={startMetricsEdit}
+              disabled={metricsLoading}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-100 disabled:opacity-50"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Edit rates
+            </button>
+          ) : null}
+        </div>
+
+        <div className="p-4 md:p-5">
+          {metricsLoading ? (
+            <div className="py-10 flex flex-col items-center justify-center gap-3">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-violet-200 border-t-violet-600" />
+              <p className="text-sm text-gray-500">Loading conversation metrics…</p>
+            </div>
+          ) : metricsEditing ? (
+            <form onSubmit={onSaveMetrics} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+                {CONVERSATION_METRICS.map((metric) => {
+                  const item = metricsForm[metric.key] || {};
+                  const previewText =
+                    metric.key === 'service'
+                      ? String(item.text || metric.text).trim() || metric.text
+                      : formatConversationRateText(item.rate);
+                  return (
+                    <div key={metric.key} className="rounded-2xl border border-violet-100 bg-violet-50/30 p-4 ring-1 ring-violet-100/70">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-violet-700/80">{metric.label}</p>
+                      {metric.key === 'service' ? (
+                        <label className="block mt-3">
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Display text</span>
+                          <input
+                            type="text"
+                            value={item.text || ''}
+                            onChange={(e) => updateMetricField(metric.key, 'text', e.target.value)}
+                            className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2 text-sm bg-white focus:border-violet-400 focus:ring-2 focus:ring-violet-400/20 outline-none"
+                          />
+                        </label>
+                      ) : (
+                        <>
+                          <label className="block mt-3">
+                            <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Rate (₹ / msg)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.001"
+                              required
+                              value={item.rate ?? ''}
+                              onChange={(e) => updateMetricField(metric.key, 'rate', e.target.value)}
+                              className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2 text-sm bg-white focus:border-violet-400 focus:ring-2 focus:ring-violet-400/20 outline-none"
+                            />
+                          </label>
+                          <label className="block mt-3">
+                            <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Rate ($ / msg)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.0001"
+                              required
+                              value={item.rate_usd ?? ''}
+                              onChange={(e) => updateMetricField(metric.key, 'rate_usd', e.target.value)}
+                              className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2 text-sm bg-white focus:border-violet-400 focus:ring-2 focus:ring-violet-400/20 outline-none"
+                            />
+                          </label>
+                        </>
+                      )}
+                      <p className="mt-3 text-xs font-semibold text-gray-700">Preview: {previewText}</p>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={cancelMetricsEdit}
+                  className="px-4 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={metricsSaving}
+                  className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-violet-600 to-purple-600 shadow-md disabled:opacity-50"
+                >
+                  {metricsSaving ? 'Saving…' : 'Save rates'}
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              {metricsPreview.map((metric) => (
+                <div
+                  key={metric.key}
+                  className="rounded-xl border border-slate-100 bg-gradient-to-b from-slate-50 to-white px-3 py-3 text-center shadow-sm ring-1 ring-slate-100/80"
+                >
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{metric.label}</p>
+                  <p className="mt-1.5 text-sm font-bold text-slate-800">{metric.text}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
 
       <section className="rounded-2xl border border-gray-100/90 bg-white/95 backdrop-blur-sm shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 overflow-hidden">
         <div className="px-4 md:px-5 py-4 border-b border-gray-100/90 bg-gradient-to-r from-white via-sky-50/40 to-white">
@@ -332,9 +667,11 @@ function SuperAdminPlansPanel() {
             </button>
           </div>
         ) : (
+          <>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 p-4 md:p-5">
-            {plans.map((plan) => {
-              const cycles = buildCycleOptions(plan.price_monthly, plan);
+            {paginatedItems.map((plan) => {
+              const cycles = buildCycleOptions(plan.price_monthly, plan, 'INR');
+              const cyclesUsd = buildCycleOptions(plan.price_monthly_usd || PLAN_MONTHLY_USD_DEFAULT, plan, 'USD');
               return (
                 <article
                   key={plan.id}
@@ -358,15 +695,20 @@ function SuperAdminPlansPanel() {
                   </div>
 
                   <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    {cycles.map((c) => (
+                    {cycles.map((c) => {
+                      const cUsd = cyclesUsd.find((item) => item.cycle === c.cycle);
+                      return (
                       <div key={c.cycle} className="rounded-xl bg-slate-50 px-2.5 py-2.5 text-left ring-1 ring-slate-100">
                         <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{c.label}</p>
                         <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">
-                          Rs. {formatInr(c.discountedMonthly)} <span className="text-[10px] font-semibold text-slate-500">/project /mo</span>
+                          ₹ {formatInr(c.discountedMonthly)} <span className="text-[10px] font-semibold text-slate-500">/project /mo</span>
+                        </p>
+                        <p className="mt-0.5 text-xs font-semibold tabular-nums text-sky-700">
+                          ${formatUsd(cUsd?.discountedMonthly || 0)} <span className="text-[10px] font-semibold text-slate-500">USD /mo</span>
                         </p>
                         <p className="mt-1 text-[10px] leading-snug text-slate-500">{c.billingNote}</p>
                       </div>
-                    ))}
+                    );})}
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-1.5">
@@ -397,6 +739,14 @@ function SuperAdminPlansPanel() {
               );
             })}
           </div>
+          <SuperAdminPagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            totalItems={totalItems}
+            pageSize={pageSize}
+          />
+          </>
         )}
       </section>
 
@@ -426,7 +776,9 @@ function SuperAdminPlansPanel() {
               planName={primaryPlan.name}
               features={primaryPlan.features?.length ? primaryPlan.features : null}
               plan={primaryPlan}
+              conversationMetrics={previewMetrics}
               showGst
+              currency="INR"
             />
           )}
         </div>
@@ -449,10 +801,11 @@ function SuperAdminPlansPanel() {
                 <label className="block sm:col-span-2">
                   <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Plan name</span>
                   <input type="text" required value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 outline-none" />
-                </label>
-                <label className="block">
-                  <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Slug</span>
-                  <input type="text" required value={form.slug} onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value }))} className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 outline-none" />
+                  {form.id ? (
+                    <p className="mt-1 text-[10px] text-gray-500">Plan ID: {form.slug || 'standard'} (used internally for billing &amp; limits)</p>
+                  ) : (
+                    <p className="mt-1 text-[10px] text-gray-500">Plan ID is generated automatically from the plan name when you save.</p>
+                  )}
                 </label>
                 <label className="block">
                   <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Sort order</span>
@@ -516,11 +869,67 @@ function SuperAdminPlansPanel() {
                 </div>
               </div>
 
+              <div className="rounded-2xl border border-indigo-100 bg-indigo-50/40 p-4 space-y-3 ring-1 ring-indigo-100/80">
+                <p className="text-xs font-bold uppercase tracking-wide text-indigo-800">Billing prices (USD)</p>
+                <label className="block">
+                  <span className="text-xs font-semibold text-gray-600">Monthly ($)</span>
+                  <input type="number" min={0} required value={form.price_monthly_usd} onChange={(e) => updateMonthlyPriceUsd(e.target.value)} className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm bg-white focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20 outline-none" />
+                </label>
+
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.autoDeriveUsdPrices}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setForm((f) => {
+                        const next = { ...f, autoDeriveUsdPrices: checked };
+                        if (checked) {
+                          const derived = withDerivedUsdPrices(f.price_monthly_usd);
+                          next.price_quarterly_usd = derived.price_quarterly_usd;
+                          next.price_yearly_usd = derived.price_yearly_usd;
+                        }
+                        return next;
+                      });
+                    }}
+                    className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span className="text-sm text-gray-700">Auto-calculate USD quarterly &amp; yearly from monthly</span>
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-xs font-semibold text-gray-600">Quarterly total ($)</span>
+                    <input
+                      type="number"
+                      min={0}
+                      required
+                      disabled={form.autoDeriveUsdPrices}
+                      value={form.price_quarterly_usd}
+                      onChange={(e) => setForm((f) => ({ ...f, price_quarterly_usd: e.target.value }))}
+                      className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm bg-white disabled:bg-gray-50 disabled:text-gray-500 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20 outline-none"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-semibold text-gray-600">Yearly total ($)</span>
+                    <input
+                      type="number"
+                      min={0}
+                      required
+                      disabled={form.autoDeriveUsdPrices}
+                      value={form.price_yearly_usd}
+                      onChange={(e) => setForm((f) => ({ ...f, price_yearly_usd: e.target.value }))}
+                      className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm bg-white disabled:bg-gray-50 disabled:text-gray-500 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20 outline-none"
+                    />
+                  </label>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <label className="block">
                   <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Users limit</span>
                   <input type="number" min={0} value={form.users_limit} onChange={(e) => setForm((f) => ({ ...f, users_limit: e.target.value }))} className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 outline-none" />
-                  <p className="mt-1 text-[10px] text-gray-500">0 = unlimited</p>
+                  <p className="mt-1 text-[10px] text-gray-500">0 = unlimited. Used only when plan features has lines and agents are not listed there.</p>
                 </label>
                 <label className="block">
                   <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Messages limit</span>
@@ -537,6 +946,14 @@ function SuperAdminPlansPanel() {
                 <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Plan features</span>
                 <p className="text-[10px] text-gray-500 mt-0.5 mb-1">One per line — shown on monthly, quarterly &amp; yearly</p>
                 <textarea rows={8} value={form.featuresText} onChange={(e) => setForm((f) => ({ ...f, featuresText: e.target.value }))} className="w-full rounded-xl border-2 border-gray-200 px-3 py-2.5 text-sm focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 outline-none resize-y" />
+                <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
+                  Use one feature per line. Unlimited: <strong>Unlimited Agents</strong>. Limited:{' '}
+                  <strong>1 Agent</strong>, <strong>can create 1 agent only</strong>,{' '}
+                  <strong>2 Agents</strong>, <strong>3 Campaigns</strong>, <strong>5 Templates</strong>,{' '}
+                  <strong>2 Flows</strong>, <strong>100 Contacts</strong>. Set <strong>Users limit</strong> only when
+                  agents are not listed in features (leave at 0 if you use feature lines). Empty plan features = unlimited for all resources.
+                  Limits apply from the active plan in Super Admin (or the plan assigned to the project).
+                </p>
               </label>
 
               <label className="flex items-center gap-2 cursor-pointer rounded-xl border border-emerald-100 bg-emerald-50/50 px-3 py-2.5">

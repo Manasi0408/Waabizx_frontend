@@ -24,6 +24,8 @@ import {
   getBillingCategoryLabel,
   getMessageRateForBillingCategory,
 } from '../utils/planPricing';
+import PlanLimitModal from '../components/PlanLimitModal';
+import { extractPlanLimitError, assertCanAddResource } from '../services/planLimitService';
 // Campaign creation now uses parse-only CSV upload (no heavy contact loading)
 
 function Campaigns() {
@@ -56,6 +58,7 @@ function Campaigns() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [planLimitModal, setPlanLimitModal] = useState(null);
   const [loadingCSV, setLoadingCSV] = useState(false);
   // uploadContactsResult removed (no contacts upload in campaign modal)
   const notificationRef = useRef(null);
@@ -208,6 +211,13 @@ function Campaigns() {
     setSaving(true);
 
     try {
+      const precheck = await assertCanAddResource('campaigns');
+      if (!precheck.allowed) {
+        setPlanLimitModal(precheck);
+        setError('');
+        return;
+      }
+
       const validAudience = formData.audience.filter(a => a.phone && a.phone.trim() !== '');
       if (validAudience.length === 0) {
         setError('Upload CSV (or add at least one row manually) to create a campaign.');
@@ -241,7 +251,13 @@ function Campaigns() {
       fetchCampaigns();
       setTimeout(() => setSuccess(''), 3000);
     } catch (error) {
-      setError(error.message || 'Failed to create campaign');
+      const limitPayload = extractPlanLimitError(error);
+      if (limitPayload) {
+        setPlanLimitModal(limitPayload);
+        setError('');
+      } else {
+        setError(error.message || 'Failed to create campaign');
+      }
     } finally {
       setSaving(false);
     }
@@ -1332,6 +1348,7 @@ function Campaigns() {
           </div>
         </div>
       )}
+      <PlanLimitModal open={Boolean(planLimitModal)} payload={planLimitModal} onClose={() => setPlanLimitModal(null)} />
     </div>
   );
 }
