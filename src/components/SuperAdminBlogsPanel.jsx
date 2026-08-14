@@ -801,24 +801,43 @@ function SuperAdminBlogsPanel() {
     setSuccess('');
   };
 
-  const openEdit = (blog) => {
-    setForm({
-      id: blog.id,
-      title: blog.title || '',
-      blog_date: String(blog.blog_date || todayInputValue()).slice(0, 10),
-      created_by: blog.created_by || defaultAuthor,
-      image_url: blog.image_url || '',
-      meta_title: blog.meta_title || '',
-      meta_description: blog.meta_description || '',
-      meta_keywords: blog.meta_keywords || '',
-      details: blog.details || '',
-      is_active: blog.is_active !== false,
-    });
-    setImageFile(null);
-    setImagePreview(resolveMediaUrl(blog.image_url));
-    setShowForm(true);
+  const openEdit = async (blog) => {
     setError('');
     setSuccess('');
+    setShowForm(true);
+    setImageFile(null);
+    setImagePreview(resolveMediaUrl(blog.image_url));
+    try {
+      const res = await axios.get(`/blogs/${blog.id}`);
+      const full = res?.data?.blog || blog;
+      setForm({
+        id: full.id,
+        title: full.title || '',
+        blog_date: String(full.blog_date || todayInputValue()).slice(0, 10),
+        created_by: full.created_by || defaultAuthor,
+        image_url: full.image_url || full.image_public_url || '',
+        meta_title: full.meta_title || '',
+        meta_description: full.meta_description || '',
+        meta_keywords: full.meta_keywords || '',
+        details: full.details || '',
+        is_active: full.is_active !== false,
+      });
+      setImagePreview(resolveMediaUrl(full.image_url || full.image_public_url));
+    } catch (err) {
+      setForm({
+        id: blog.id,
+        title: blog.title || '',
+        blog_date: String(blog.blog_date || todayInputValue()).slice(0, 10),
+        created_by: blog.created_by || defaultAuthor,
+        image_url: blog.image_url || '',
+        meta_title: blog.meta_title || '',
+        meta_description: blog.meta_description || '',
+        meta_keywords: blog.meta_keywords || '',
+        details: blog.details || '',
+        is_active: blog.is_active !== false,
+      });
+      setError(err?.response?.data?.message || err?.message || 'Failed to load blog for editing');
+    }
   };
 
   const closeForm = () => {
@@ -838,30 +857,40 @@ function SuperAdminBlogsPanel() {
     setError('');
     setSuccess('');
     try {
-      const fd = new FormData();
-      fd.append('title', form.title.trim());
-      fd.append('blog_date', form.blog_date);
-      fd.append('created_by', form.created_by.trim());
-      fd.append('meta_title', form.meta_title.trim());
-      fd.append('meta_description', form.meta_description.trim());
-      fd.append('meta_keywords', form.meta_keywords.trim());
-      fd.append('details', form.details || '');
-      fd.append('is_active', form.is_active ? 'true' : 'false');
-      if (imageFile) {
-        fd.append('image', imageFile);
-      } else if (form.image_url) {
-        fd.append('image_url', form.image_url);
-      }
+      const payload = {
+        title: form.title.trim(),
+        blog_date: form.blog_date,
+        created_by: form.created_by.trim(),
+        meta_title: form.meta_title.trim(),
+        meta_description: form.meta_description.trim(),
+        meta_keywords: form.meta_keywords.trim(),
+        details: form.details || '',
+        is_active: form.is_active,
+      };
 
       if (form.id) {
-        await axios.put(`/blogs/${form.id}`, fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
+        if (imageFile) {
+          const fd = new FormData();
+          Object.entries(payload).forEach(([key, value]) => {
+            fd.append(key, key === 'is_active' ? (value ? 'true' : 'false') : String(value ?? ''));
+          });
+          fd.append('image', imageFile);
+          await axios.put(`/blogs/${form.id}`, fd);
+        } else {
+          if (form.image_url) payload.image_url = form.image_url;
+          await axios.put(`/blogs/${form.id}`, payload);
+        }
         setSuccess('Blog updated successfully.');
-      } else {
-        await axios.post('/blogs', fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
+      } else if (imageFile) {
+        const fd = new FormData();
+        Object.entries(payload).forEach(([key, value]) => {
+          fd.append(key, key === 'is_active' ? (value ? 'true' : 'false') : String(value ?? ''));
         });
+        fd.append('image', imageFile);
+        await axios.post('/blogs', fd);
+        setSuccess('Blog created successfully.');
+      } else {
+        await axios.post('/blogs', payload);
         setSuccess('Blog created successfully.');
       }
       closeForm();

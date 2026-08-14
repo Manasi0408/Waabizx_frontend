@@ -1835,9 +1835,9 @@ function LiveChatPage() {
                 { id: "intervened", label: "Intervened" },
                 { id: "history", label: "History" },
               ].map((t) => (
-                <button
+              <button
                   key={t.id}
-                  type="button"
+                type="button"
                   onClick={() => {
                     if (t.id === tab) return;
                     liveChatFetchSeqRef.current += 1;
@@ -1850,12 +1850,12 @@ function LiveChatPage() {
                   }}
                   className={`shrink-0 px-2.5 py-2 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide transition-all duration-200 rounded-lg whitespace-nowrap ${
                     tab === t.id
-                      ? "bg-gradient-to-r from-sky-600 to-blue-700 text-white shadow-md shadow-sky-600/25 ring-1 ring-sky-400/30"
+                    ? "bg-gradient-to-r from-sky-600 to-blue-700 text-white shadow-md shadow-sky-600/25 ring-1 ring-sky-400/30"
                       : "text-sky-900/80 bg-white/70 hover:bg-white border border-transparent hover:border-sky-100"
-                  }`}
-                >
+                }`}
+              >
                   {t.label}{tab === t.id ? ` (${tabCount})` : ""}
-                </button>
+              </button>
               ))}
             </div>
             {tab === "history" && (
@@ -1865,8 +1865,8 @@ function LiveChatPage() {
             )}
             {tab === "intervened" && !isAgent && (
               <div className="border-b border-gray-200/80 bg-white shrink-0 relative z-30">
-                <button
-                  type="button"
+              <button
+                type="button"
                   onClick={() => setIntervenedFilterOpen((v) => !v)}
                   className="w-full flex items-center justify-between px-3 py-2.5 text-left text-sm font-semibold text-gray-800 bg-gray-100/90 hover:bg-gray-100"
                 >
@@ -1919,16 +1919,16 @@ function LiveChatPage() {
                         </span>
                         <span className="flex-1 truncate text-gray-800">{opt.label}</span>
                         <span className="text-xs text-gray-500 shrink-0">({opt.count})</span>
-                      </button>
+              </button>
                     ))}
                     {intervenedFilterOptions.agents.map((agent) => {
                       const aid = agent.id;
                       const filterId = `agent:${aid}`;
                       const name = agent.name || agent.email || `Agent ${aid}`;
                       return (
-                        <button
+              <button
                           key={filterId}
-                          type="button"
+                type="button"
                           onClick={() => {
                             setIntervenedFilter(filterId);
                             setIntervenedFilterOpen(false);
@@ -1942,10 +1942,10 @@ function LiveChatPage() {
                           </span>
                           <span className="flex-1 truncate text-gray-800">Intervened By {name}</span>
                           <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden />
-                        </button>
+              </button>
                       );
                     })}
-                  </div>
+            </div>
                 ) : null}
               </div>
             )}
@@ -1968,7 +1968,7 @@ function LiveChatPage() {
                       ? "No intervened chats match this filter."
                       : tab === "history"
                         ? "No history conversations."
-                      : `No ${tab} chats.`}
+                    : `No ${tab} chats.`}
                 </div>
               ) : (
                 filteredConversations.map((conv, index) => {
@@ -2041,13 +2041,13 @@ function LiveChatPage() {
                         String(conv.status || "").toLowerCase() === "requesting" &&
                         isManager && (
                         <div className="relative" ref={assignMenuConvId === conv.id ? assignMenuRef : null}>
-                          <button
-                            type="button"
-                            onClick={(e) => handleAssignChat(e, conv)}
-                            className="w-full py-2 px-2 text-xs font-bold rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-600/20 hover:from-violet-500 hover:to-indigo-500 transition"
-                          >
-                            Assign to agent
-                          </button>
+                        <button
+                          type="button"
+                          onClick={(e) => handleAssignChat(e, conv)}
+                          className="w-full py-2 px-2 text-xs font-bold rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-600/20 hover:from-violet-500 hover:to-indigo-500 transition"
+                        >
+                          Assign to agent
+                        </button>
                           {assignMenuConvId === conv.id && tab === "requesting" && (
                             <div className="absolute left-0 right-0 top-full mt-1 max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-xl z-[1000] py-1">
                               {agentsList.length === 0 ? (
@@ -2420,7 +2420,7 @@ function LiveChatPage() {
                             </div>
                           </>
                         )}
-                        </div>
+                      </div>
                       </div>
                       )}
                     </div>
@@ -2592,8 +2592,8 @@ function LiveChatPage() {
                             }}
                           >
                             {tag.name}
-                            <button
-                              type="button"
+                      <button
+                        type="button"
                               disabled={tagBusy}
                               onClick={async () => {
                                 setTagBusy(true);
@@ -2613,7 +2613,7 @@ function LiveChatPage() {
                               className="ml-0.5 text-current/70 hover:text-current"
                             >
                               ×
-                            </button>
+                      </button>
                           </span>
                         ))}
                       </div>
@@ -2664,8 +2664,8 @@ function LiveChatPage() {
                                       {tag.name}
                                     </button>
                                   ))
-                              )}
-                            </div>
+                      )}
+                    </div>
                           )}
                         </div>
                         <button

@@ -15,6 +15,7 @@ import {
   isInrCurrency,
   gstAmount,
   payableWithGst,
+  resolvePayableAmount,
   resolvePlanBillingAmount,
 } from "../utils/planPricing";
 
@@ -147,6 +148,66 @@ const readMetaLiveFromStorage = (clientId, projectId = null) => {
 };
 
 const PROJECT_PROFILE_PREFIX = "waabiz_project_profile_";
+const WA_CONNECTED_PREFIX = "waabiz_wa_connected_";
+const WA_DISPLAY_NAME_PREFIX = "waabiz_wa_display_name_";
+
+const readWhatsAppConnectedLatch = (clientId, projectId) => {
+  const cid = Number(clientId);
+  const pid = Number(projectId);
+  if (!Number.isInteger(cid) || cid <= 0 || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    return localStorage.getItem(`${WA_CONNECTED_PREFIX}${cid}_p${pid}`) === "1";
+  } catch (_) {
+    return false;
+  }
+};
+
+const writeWhatsAppConnectedLatch = (clientId, projectId) => {
+  const cid = Number(clientId);
+  const pid = Number(projectId);
+  if (!Number.isInteger(cid) || cid <= 0 || !Number.isInteger(pid) || pid <= 0) return;
+  try {
+    localStorage.setItem(`${WA_CONNECTED_PREFIX}${cid}_p${pid}`, "1");
+  } catch (_) {
+    /* ignore */
+  }
+};
+
+const readCachedWhatsappDisplayName = (projectId) => {
+  const pid = Number(projectId);
+  if (!Number.isInteger(pid) || pid <= 0) return "";
+  try {
+    return String(localStorage.getItem(`${WA_DISPLAY_NAME_PREFIX}${pid}`) || "").trim();
+  } catch (_) {
+    return "";
+  }
+};
+
+const writeCachedWhatsappDisplayName = (projectId, name) => {
+  const pid = Number(projectId);
+  const value = String(name || "").trim();
+  if (!Number.isInteger(pid) || pid <= 0 || !value) return;
+  try {
+    localStorage.setItem(`${WA_DISPLAY_NAME_PREFIX}${pid}`, value);
+  } catch (_) {
+    /* ignore */
+  }
+};
+
+const parseOnboardingLiveFromStatus = (data) =>
+  Boolean(
+    data?.onboardingCompleted ||
+      data?.whatsappConnected ||
+      data?.metaLinked ||
+      data?.connected
+  );
+
+const extractWhatsappDisplayName = (payload) => {
+  const row = Array.isArray(payload?.profileData) ? payload.profileData[0] : null;
+  return String(
+    payload?.displayName || row?.display_name || row?.verified_name || ""
+  ).trim();
+};
 
 const getApiOrigin = () => {
   const base = String(
@@ -219,6 +280,9 @@ const resolveProjectLogo = (project, profile) => {
   return "";
 };
 
+const resolveUserPricingCurrency = (u) =>
+  String(u?.currency || "").toUpperCase() === "USD" ? "USD" : "INR";
+
 function AgentRightPanel({
   user = null,
   selectedProject = null,
@@ -233,6 +297,30 @@ function AgentRightPanel({
   const API_URL = `${API_BASE.replace(/\/$/, "")}`;
   const [metaOnboardingLive, setMetaOnboardingLive] = useState(() =>
     readMetaLiveFromStorage(
+      (() => {
+        try {
+          const raw = localStorage.getItem("user");
+          return raw ? JSON.parse(raw)?.id : null;
+        } catch (_) {
+          return null;
+        }
+      })(),
+      selectedProject?.id
+    ) ||
+      readWhatsAppConnectedLatch(
+        (() => {
+          try {
+            const raw = localStorage.getItem("user");
+            return raw ? JSON.parse(raw)?.id : null;
+          } catch (_) {
+            return null;
+          }
+        })(),
+        selectedProject?.id
+      )
+  );
+  const [whatsappConnectedLatch, setWhatsappConnectedLatch] = useState(() =>
+    readWhatsAppConnectedLatch(
       (() => {
         try {
           const raw = localStorage.getItem("user");
@@ -283,7 +371,9 @@ function AgentRightPanel({
   const [projectPhoneApproved, setProjectPhoneApproved] = useState(false);
   const [projectPhoneLoaded, setProjectPhoneLoaded] = useState(false);
   const [matchedProject, setMatchedProject] = useState(null);
-  const [whatsappDisplayName, setWhatsappDisplayName] = useState("");
+  const [whatsappDisplayName, setWhatsappDisplayName] = useState(() =>
+    readCachedWhatsappDisplayName(selectedProject?.id)
+  );
   const [accountProfile, setAccountProfile] = useState(null);
   const [showAccountEditModal, setShowAccountEditModal] = useState(false);
   const [accountEditForm, setAccountEditForm] = useState({
@@ -302,13 +392,17 @@ function AgentRightPanel({
   const [logoRemoved, setLogoRemoved] = useState(false);
   const [accountSaving, setAccountSaving] = useState(false);
   const [planInfo, setPlanInfo] = useState(null);
-  const [pricingCurrency, setPricingCurrency] = useState("INR");
+  const [pricingCurrency, setPricingCurrency] = useState(() => resolveUserPricingCurrency(user));
 
   const [planStep, setPlanStep] = useState(1);
   const [billingCycle, setBillingCycle] = useState("monthly");
   const [selectedPlan, setSelectedPlan] = useState("standard");
   const [flowBuilderEnabled, setFlowBuilderEnabled] = useState(false);
   const [agentSeatCount, setAgentSeatCount] = useState(0);
+
+  useEffect(() => {
+    setPricingCurrency(resolveUserPricingCurrency(user));
+  }, [user?.currency]);
 
   useEffect(() => {
     let cancelled = false;
@@ -321,7 +415,9 @@ function AgentRightPanel({
         ]);
         if (!cancelled) {
           const list = Array.isArray(plansResult?.plans) ? plansResult.plans : [];
-          setPricingCurrency(plansResult.currency || metricsData.currency || "INR");
+          setPricingCurrency(
+            plansResult.currency || metricsData.currency || resolveUserPricingCurrency(user)
+          );
           const active = list.filter((p) => p.is_active !== false);
           const sorted = (active.length ? active : list).slice().sort(
             (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
@@ -348,6 +444,7 @@ function AgentRightPanel({
       setProjectPhoneApproved(false);
       setMatchedProject(null);
       setWhatsappDisplayName("");
+      setWhatsappConnectedLatch(false);
       setAccountProfile(null);
       setProjectPhoneLoaded(true);
       return;
@@ -355,6 +452,10 @@ function AgentRightPanel({
 
     const savedProfile = readProjectProfile(selectedProjectId);
     setAccountProfile(savedProfile);
+    setWhatsappDisplayName(readCachedWhatsappDisplayName(selectedProjectId));
+    setWhatsappConnectedLatch(
+      readWhatsAppConnectedLatch(Number(user?.id), selectedProjectId)
+    );
     setLogoFile(null);
     setLogoRemoved(false);
 
@@ -390,19 +491,15 @@ function AgentRightPanel({
         try {
           const waProfileRes = await axios.get("/profile/whatsapp", {
             params: { projectId: selectedProjectId },
+            headers: { "x-project-id": String(selectedProjectId) },
           });
-          const waRow = Array.isArray(waProfileRes?.data?.profileData)
-            ? waProfileRes.data.profileData[0]
-            : null;
-          const metaDisplayName = String(
-            waProfileRes?.data?.displayName ||
-              waRow?.display_name ||
-              waRow?.verified_name ||
-              ""
-          ).trim();
-          if (mounted) setWhatsappDisplayName(metaDisplayName);
+          const metaDisplayName = extractWhatsappDisplayName(waProfileRes?.data);
+          if (mounted && metaDisplayName) {
+            setWhatsappDisplayName(metaDisplayName);
+            writeCachedWhatsappDisplayName(selectedProjectId, metaDisplayName);
+          }
         } catch (_) {
-          if (mounted) setWhatsappDisplayName("");
+          /* keep cached display name on transient API errors */
         }
 
         const res = await axios.get("/projects/list");
@@ -448,7 +545,25 @@ function AgentRightPanel({
     return () => {
       mounted = false;
     };
-  }, [selectedProject?.id]);
+  }, [selectedProject?.id, user?.id]);
+
+  const refreshWhatsappDisplayName = useCallback(async (projectId) => {
+    const pid = Number(projectId);
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    try {
+      const waProfileRes = await axios.get("/profile/whatsapp", {
+        params: { projectId: pid },
+        headers: { "x-project-id": String(pid) },
+      });
+      const metaDisplayName = extractWhatsappDisplayName(waProfileRes?.data);
+      if (metaDisplayName) {
+        setWhatsappDisplayName(metaDisplayName);
+        writeCachedWhatsappDisplayName(pid, metaDisplayName);
+      }
+    } catch (_) {
+      /* keep last known display name */
+    }
+  }, []);
 
   const refreshWhatsAppLiveStatus = useCallback(async () => {
     const clientId = Number(user?.id);
@@ -462,7 +577,13 @@ function AgentRightPanel({
       return;
     }
 
-    setMetaOnboardingLive(readMetaLiveFromStorage(clientId, projectId));
+    const storedLive =
+      readMetaLiveFromStorage(clientId, projectId) ||
+      readWhatsAppConnectedLatch(clientId, projectId);
+    setMetaOnboardingLive(storedLive);
+    if (storedLive) {
+      setWhatsappConnectedLatch(true);
+    }
 
     const token = localStorage.getItem("token");
     const headers = {};
@@ -475,15 +596,22 @@ function AgentRightPanel({
       const res = await fetch(url, { headers });
       const data = await res.json().catch(() => ({}));
       if (res.status === 401 || !res.ok) {
-        setMetaOnboardingLive(readMetaLiveFromStorage(clientId, projectId));
+        setMetaOnboardingLive((prev) => prev || storedLive);
         return;
       }
-      const live = Boolean(data?.success !== false && data?.onboardingCompleted);
-      setMetaOnboardingLive(live || readMetaLiveFromStorage(clientId, projectId));
+      const live = parseOnboardingLiveFromStatus(data);
+      if (live) {
+        writeWhatsAppConnectedLatch(clientId, projectId);
+        setWhatsappConnectedLatch(true);
+        setMetaOnboardingLive(true);
+        refreshWhatsappDisplayName(projectId);
+        return;
+      }
+      setMetaOnboardingLive((prev) => live || prev || storedLive);
     } catch (_) {
-      setMetaOnboardingLive(readMetaLiveFromStorage(clientId, projectId));
+      setMetaOnboardingLive((prev) => prev || storedLive);
     }
-  }, [API_BASE, user?.id, selectedProject?.id]);
+  }, [API_BASE, user?.id, selectedProject?.id, refreshWhatsappDisplayName]);
 
   useEffect(() => {
     refreshWhatsAppLiveStatus();
@@ -775,7 +903,22 @@ function AgentRightPanel({
   // Prefer account mobile for Razorpay — not WhatsApp Business / sandbox sender number.
   const paymentContactDigits = userMobileDigits || businessPhoneDigits;
 
-  const whatsappConnected = Boolean(isWhatsAppApiLive || metaOnboardingLive);
+  const whatsappConnected = Boolean(
+    whatsappConnectedLatch ||
+      isWhatsAppApiLive ||
+      metaOnboardingLive ||
+      (projectPhoneLoaded && projectPhoneApproved && showBusinessPhoneNumber && businessPhoneDigits)
+  );
+
+  useEffect(() => {
+    const clientId = Number(user?.id);
+    const projectId = Number(selectedProject?.id);
+    if (!whatsappConnected || !Number.isInteger(clientId) || !Number.isInteger(projectId)) {
+      return;
+    }
+    writeWhatsAppConnectedLatch(clientId, projectId);
+    setWhatsappConnectedLatch(true);
+  }, [whatsappConnected, user?.id, selectedProject?.id]);
 
   const unifiedPlan = useMemo(() => {
     if (!catalogPlans.length) return null;
@@ -805,10 +948,11 @@ function AgentRightPanel({
   );
   const addonPrice = (flowBuilderEnabled ? flowBuilderPrice : 0) + agentSeatCount * agentSeatPrice;
   const grandTotal = basePlanPrice + addonPrice;
-  const planGst = wccGstAmount(grandTotal);
-  const planTotalPayable = wccPayableTotal(grandTotal);
-  const planStep1Gst = wccGstAmount(basePlanPrice);
-  const planStep1Payable = wccPayableTotal(basePlanPrice);
+  const isUsdPricing = !isInrCurrency(pricingCurrency);
+  const planGst = isUsdPricing ? 0 : wccGstAmount(grandTotal);
+  const planTotalPayable = resolvePayableAmount(grandTotal, pricingCurrency);
+  const planStep1Gst = isUsdPricing ? 0 : wccGstAmount(basePlanPrice);
+  const planStep1Payable = resolvePayableAmount(basePlanPrice, pricingCurrency);
   const wccBalance =
     conversationQuota != null && !loadingQuota ? Number(conversationQuota.wccCredits ?? 0) : null;
   const wccBaseAmount = Math.max(0, Number(wccAmount) || 0);
@@ -867,7 +1011,14 @@ function AgentRightPanel({
       document.body.appendChild(script);
     });
 
-  const openRazorpayCheckout = async ({ amount, purpose, description, metadata = {}, onSuccess }) => {
+  const openRazorpayCheckout = async ({
+    amount,
+    purpose,
+    description,
+    metadata = {},
+    currency = pricingCurrency,
+    onSuccess,
+  }) => {
     if (paymentLoading) return;
     const token = localStorage.getItem("token");
     if (!token) {
@@ -879,7 +1030,7 @@ function AgentRightPanel({
       const createOrderRes = await fetch(`${API_URL}/api/payments/create-order`, {
         method: "POST",
         headers: paymentJsonHeaders(),
-        body: JSON.stringify({ amount, purpose, metadata }),
+        body: JSON.stringify({ amount, purpose, metadata, currency }),
       });
       const createOrderData = await createOrderRes.json();
       if (!createOrderRes.ok || !createOrderData.success) {
@@ -986,6 +1137,7 @@ function AgentRightPanel({
     return openRazorpayCheckout({
       amount: planTotalPayable,
       purpose: "plan_purchase",
+      currency: pricingCurrency,
       description: `${selectedPlan.toUpperCase()} plan (${billingCycle})`,
       metadata: {
         projectId,
@@ -997,6 +1149,7 @@ function AgentRightPanel({
         basePlanPrice,
         addonPrice,
         planSubtotal: grandTotal,
+        currency: pricingCurrency,
       },
       onSuccess: async () => {
         const nowIso = new Date().toISOString();

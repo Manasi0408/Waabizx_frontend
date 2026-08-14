@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from '../api/axios';
 import { fetchAdminPlans } from '../services/planService';
-import { formatInr } from '../utils/planPricing';
+import { formatInr, formatPlanAmount, isInrCurrency } from '../utils/planPricing';
 import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
 
 const formatDisplayDate = (value) => {
@@ -107,14 +107,19 @@ function DownloadWccReportModal({ open, onClose, onDownload, downloading }) {
   );
 }
 
-function resolvePlanValue(planCatalog, slug, cycle) {
+function resolvePlanValue(planCatalog, slug, cycle, currency = 'INR') {
   if (!slug) return null;
   const plan = planCatalog.find((p) => String(p.slug).toLowerCase() === String(slug).toLowerCase());
   if (!plan) return null;
+  const isUsd = !isInrCurrency(currency);
   const key = String(cycle || 'monthly').toLowerCase();
-  if (key === 'quarterly') return Number(plan.price_quarterly) || null;
-  if (key === 'yearly') return Number(plan.price_yearly) || null;
-  return Number(plan.price_monthly) || null;
+  if (key === 'quarterly') {
+    return Number(isUsd ? plan.price_quarterly_usd : plan.price_quarterly) || null;
+  }
+  if (key === 'yearly') {
+    return Number(isUsd ? plan.price_yearly_usd : plan.price_yearly) || null;
+  }
+  return Number(isUsd ? plan.price_monthly_usd : plan.price_monthly) || null;
 }
 
 function AdjustWccModal({ open, row, onClose, onSaved, saving, setSaving }) {
@@ -288,7 +293,7 @@ function SuperAdminBusinessesPanel() {
     const q = search.trim().toLowerCase();
     if (!q) return purchasedRows;
     return purchasedRows.filter((r) => {
-      const planValue = resolvePlanValue(planCatalog, r.planSlug, r.planCycle);
+      const planValue = resolvePlanValue(planCatalog, r.planSlug, r.planCycle, r.adminCurrency);
       const hay = [
         r.businessName,
         r.adminEmail,
@@ -438,7 +443,12 @@ function SuperAdminBusinessesPanel() {
                 </thead>
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {paginatedItems.map((row) => {
-                    const planValue = resolvePlanValue(planCatalog, row.planSlug, row.planCycle);
+                    const planValue = resolvePlanValue(
+                      planCatalog,
+                      row.planSlug,
+                      row.planCycle,
+                      row.adminCurrency
+                    );
                     return (
                       <tr key={`${row.adminId}-${row.projectId}`} className="transition hover:bg-sky-50/40">
                         <td className="whitespace-nowrap px-3 py-3 font-semibold text-gray-900">{row.businessName}</td>
@@ -457,7 +467,7 @@ function SuperAdminBusinessesPanel() {
                           </span>
                         </td>
                         <td className="whitespace-nowrap px-3 py-3 font-semibold tabular-nums text-gray-900">
-                          {planValue != null ? `₹ ${formatInr(planValue)}` : '—'}
+                          {planValue != null ? formatPlanAmount(planValue, row.adminCurrency || 'INR') : '—'}
                         </td>
                         <td className="whitespace-nowrap px-3 py-3 text-gray-700">{formatDisplayDate(row.planStartOn)}</td>
                         <td className="whitespace-nowrap px-3 py-3 text-gray-700">{formatDisplayDate(row.planRenewalDate)}</td>

@@ -178,8 +178,22 @@ export const payableWithGst = (base) => {
   return Math.round((b + gstAmount(b)) * 100) / 100;
 };
 
-/** Billing totals always follow monthly + cycle discount (−10% / −15%). */
+/** INR includes 18% GST; USD is tax-exclusive (pay subtotal as-is). */
+export const resolvePayableAmount = (base, currency = 'INR') => {
+  const b = Math.max(0, Number(base) || 0);
+  return isInrCurrency(currency) ? payableWithGst(b) : Math.round(b * 100) / 100;
+};
+
+/** Billing totals prefer stored cycle prices, else monthly + cycle discount (−10% / −15%). */
 export const resolvePlanBillingAmount = (plan, cycle) => {
+  if (cycle === 'quarterly') {
+    const quarterly = Number(plan?.price_quarterly);
+    if (Number.isFinite(quarterly) && quarterly > 0) return quarterly;
+  }
+  if (cycle === 'yearly') {
+    const yearly = Number(plan?.price_yearly);
+    if (Number.isFinite(yearly) && yearly > 0) return yearly;
+  }
   const monthly = Math.max(0, Number(plan?.price_monthly) || PLAN_MONTHLY_DEFAULT);
   return cycleBillingAmount(monthly, cycle);
 };

@@ -6,6 +6,7 @@ import InfiniteScroll from 'react-infinite-scroll-component';
 import { getProfile, isAuthenticated, logout, readSessionUser } from '../services/authService';
 import { getNotifications, markAsRead as markNotificationAsRead, markAllAsRead } from '../services/notificationService';
 import { getInboxList, getContactMessages, sendMessage, markAsRead } from '../services/inboxService';
+import { getConversationQuota } from '../services/dashboardService';
 import { sendMetaMessage, getAllMetaMessages, getWebhookLogs } from '../services/metaMessageService';
 import { initializeSocket, disconnectSocket, joinContactRoom, leaveContactRoom, sendTypingStart, sendTypingStop, onSocketEvent, offSocketEvent } from '../services/socketService';
 import { getPaginatedMessages, sendTemplateMessage } from '../services/messageService';
@@ -473,6 +474,8 @@ function Inbox({ pageMode = 'inbox' }) {
   const [transferring, setTransferring] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [resolveDispositionOpen, setResolveDispositionOpen] = useState(false);
+  const [planInfo, setPlanInfo] = useState(null);
+  const [planInfoLoaded, setPlanInfoLoaded] = useState(false);
   const [selectedDisposition, setSelectedDisposition] = useState(null);
   const [resolvedConvIds, setResolvedConvIds] = useState(() => new Set());
   const [templateCatalog, setTemplateCatalog] = useState(() => new Map());
@@ -525,6 +528,42 @@ function Inbox({ pageMode = 'inbox' }) {
       cancelled = true;
     };
   }, [navigate]);
+
+  const refreshPlanInfo = useCallback(async () => {
+    const accountId = user?.id;
+    if (!isAuthenticated() || accountId == null) {
+      setPlanInfo(null);
+      setPlanInfoLoaded(false);
+      return;
+    }
+    try {
+      const quota = await getConversationQuota(accountId);
+      setPlanInfo(quota?.planInfo ?? null);
+      setPlanInfoLoaded(true);
+    } catch (_) {
+      setPlanInfo(null);
+      setPlanInfoLoaded(true);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    refreshPlanInfo();
+  }, [refreshPlanInfo, activeProjectId]);
+
+  useEffect(() => {
+    const onPlanOrWccUpdate = () => {
+      refreshPlanInfo();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshPlanInfo();
+    };
+    window.addEventListener('wcc-quota-updated', onPlanOrWccUpdate);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('wcc-quota-updated', onPlanOrWccUpdate);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [refreshPlanInfo]);
 
   const isAdminOrManager = user && ['admin', 'manager'].includes(String(user.role || '').toLowerCase());
   const isAgentUser = user && String(user.role || '').toLowerCase() === 'agent';
@@ -1278,6 +1317,13 @@ function Inbox({ pageMode = 'inbox' }) {
           } else {
             alert('Message failed to deliver on WhatsApp.');
           }
+        }
+        if (data?.wccCredits != null && typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('wcc-quota-updated', {
+              detail: { wccCredits: Number(data.wccCredits) },
+            })
+          );
         }
       };
 
@@ -2213,6 +2259,11 @@ function Inbox({ pageMode = 'inbox' }) {
     const phone = selectedContact?.phone;
     const textToSend = overrideText !== undefined ? String(overrideText || "") : String(messageText || "");
     if (!textToSend.trim() || !selectedContact || sending) return;
+
+    if (planBlocked) {
+      alert('Your plan has ended. Recharge now to send messages.');
+      return;
+    }
 
     const currentFlowState = botFlowState[phone];
     const isIntervened = intervenedPhones[phone];
@@ -3710,8 +3761,10 @@ function Inbox({ pageMode = 'inbox' }) {
     isIntervenedTab ||
     (selectedPhone && intervenedPhones[selectedPhone]) ||
     contactStatusLower === 'intervened';
+  const planBlocked = planInfoLoaded && !planInfo?.active;
   const canHumanReply =
     !isHistoryTab &&
+    !planBlocked &&
     Boolean(selectedContact?.conversationId || selectedContact?.phone) &&
     (isIntervenedChat || contactStatusLower === 'active' || inboxTab === 'active');
   const showAdminIntervenedActions =
@@ -4865,6 +4918,21 @@ function Inbox({ pageMode = 'inbox' }) {
                   </div>
                 )}
 
+                {!isHistoryTab && planBlocked && selectedContact?.phone && (
+                  <div className="bg-gradient-to-r from-rose-50 via-orange-50 to-amber-50 border-t border-rose-200/80 px-6 py-4 text-center shadow-inner">
+                    <p className="text-sm font-semibold text-rose-900">
+                      Your plan has ended. Recharge now to send messages.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/dashboard')}
+                      className="mt-3 inline-flex items-center rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-md hover:from-emerald-500 hover:to-teal-500 transition"
+                    >
+                      Get plan
+                    </button>
+                  </div>
+                )}
+
                 {/* Message Input — Active + Intervened (AiSensy: reply after Accept) */}
                 {!isHistoryTab && (
                 <div className="bg-white/95 backdrop-blur-md border-t border-sky-100/80 px-6 py-4 flex justify-center items-center flex-wrap gap-2 shadow-[0_-8px_28px_-12px_rgba(14,165,233,0.18)]">
@@ -5080,11 +5148,11 @@ function Inbox({ pageMode = 'inbox' }) {
                             onChange={(e) => setMessageText(e.target.value)}
                             placeholder="Type a message..."
                             className="flex-1 px-4 py-2.5 border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none bg-gray-50/80 hover:bg-white transition-all text-sm"
-                            disabled={sending}
+                            disabled={sending || planBlocked}
                           />
                           <button
                             type="submit"
-                            disabled={!messageText.trim() || sending}
+                            disabled={!messageText.trim() || sending || planBlocked}
                             className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-sky-600 to-sky-700 text-white font-semibold text-sm hover:from-sky-700 hover:to-sky-800 shadow-md shadow-sky-600/25 disabled:opacity-50 transition-all duration-200 active:scale-[0.98]"
                           >
                             {sending ? 'Sending...' : 'Send'}

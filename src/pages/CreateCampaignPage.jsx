@@ -2,10 +2,11 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import BrandLogoMark from '../components/BrandLogoMark';
 import { useNavigate, Link } from 'react-router-dom';
 import { getProfile, isAuthenticated, logout, readSessionUser } from '../services/authService';
-import { getTemplates, getMetaTemplates } from '../services/templateService';
+import { getTemplates, getMetaTemplates, getMetaTemplateDetails, getTemplateById } from '../services/templateService';
 import { getConversationQuota } from '../services/dashboardService';
 import { sendTemplateMessage } from '../services/messageService';
 import { startCampaign } from '../services/campaignService';
+import { uploadBroadcastHeaderMedia } from '../services/broadcastService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
@@ -66,32 +67,221 @@ function extractTemplateVariables(template) {
   return nums;
 }
 
+function parseTemplateVariablesMeta(variables) {
+  if (!variables) return {};
+  if (typeof variables === 'string') {
+    try {
+      return JSON.parse(variables);
+    } catch {
+      return {};
+    }
+  }
+  return typeof variables === 'object' && !Array.isArray(variables) ? variables : {};
+}
+
 function templateHasMedia(template) {
   if (Array.isArray(template?.components)) {
     return template.components.some(
       (c) =>
-        c.type === 'HEADER' &&
+        String(c.type || '').toUpperCase() === 'HEADER' &&
         ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(c.format || '').toUpperCase())
     );
   }
+  const meta = parseTemplateVariablesMeta(template?.variables);
+  const templateType = String(meta.templateType || '').toLowerCase();
+  if (['image', 'video', 'document'].includes(templateType)) return true;
   return /\[image\]|\[video\]|\[document\]/i.test(String(template?.content || ''));
 }
 
-function getTemplatePreviewParts(template) {
-  if (Array.isArray(template?.components)) {
-    const header = template.components.find((c) => c.type === 'HEADER');
-    const body = template.components.find((c) => c.type === 'BODY');
-    const footer = template.components.find((c) => c.type === 'FOOTER');
-    const buttons = template.components.filter((c) => c.type === 'BUTTONS');
-    return {
-      headerFormat: header?.format || null,
-      headerText: header?.text || '',
-      body: body?.text || '',
-      footer: footer?.text || '',
-      buttons: buttons.flatMap((b) => b.buttons || []),
-    };
+function normalizeTemplateButtons(buttons) {
+  return (buttons || [])
+    .map((b) => {
+      if (typeof b === 'string') return { type: 'QUICK_REPLY', text: b };
+      const rawType = String(b?.type || 'QUICK_REPLY').toUpperCase();
+      return {
+        type: rawType === 'PHONE' ? 'PHONE_NUMBER' : rawType,
+        text: b?.text || b?.title || b?.label || '',
+        url: b?.url,
+        phone_number: b?.phone_number || b?.phoneNumber,
+      };
+    })
+    .filter((b) => String(b.text || '').trim());
+}
+
+function getTemplateComponentsList(template) {
+  if (Array.isArray(template?.components) && template.components.length) {
+    return template.components;
   }
-  return { headerFormat: null, headerText: '', body: template?.content || '', footer: '', buttons: [] };
+  const meta = parseTemplateVariablesMeta(template?.variables);
+  if (Array.isArray(meta.components) && meta.components.length) {
+    return meta.components;
+  }
+  return [];
+}
+
+function extractButtonsFromComponents(components) {
+  const buttons = [];
+  (components || []).forEach((comp) => {
+    const type = String(comp?.type || '').toUpperCase();
+    if (type === 'BUTTONS' && Array.isArray(comp.buttons)) {
+      buttons.push(...comp.buttons);
+    }
+  });
+  return normalizeTemplateButtons(buttons);
+}
+
+function buildInteractiveButtonsFromMeta(meta) {
+  if (!meta || typeof meta !== 'object') return [];
+
+  if (Array.isArray(meta.interactiveButtons) && meta.interactiveButtons.length) {
+    return normalizeTemplateButtons(meta.interactiveButtons);
+  }
+
+  const buttons = [];
+  const showCta = meta.actionMode === 'cta' || meta.actionMode === 'all';
+  const showQr = meta.actionMode === 'quick_reply' || meta.actionMode === 'all';
+
+  if (showCta && Array.isArray(meta.callToActions)) {
+    meta.callToActions
+      .filter((a) => {
+        if (!String(a?.label || '').trim()) return false;
+        if (a.type === 'button') return true;
+        return Boolean(String(a?.value || '').trim());
+      })
+      .forEach((cta) => {
+        if (cta.type === 'button') {
+          buttons.push({ type: 'QUICK_REPLY', text: cta.label });
+        } else {
+          buttons.push({
+            type: cta.type === 'phone' ? 'PHONE_NUMBER' : 'URL',
+            text: cta.label,
+            url: cta.type === 'url' ? cta.value : undefined,
+            phone_number: cta.type === 'phone' ? cta.value : undefined,
+          });
+        }
+      });
+  }
+  if (showQr && Array.isArray(meta.quickReplies)) {
+    meta.quickReplies
+      .filter((a) => String(a?.label || '').trim())
+      .forEach((qr) => buttons.push({ type: 'QUICK_REPLY', text: qr.label }));
+  }
+
+  return normalizeTemplateButtons(buttons);
+}
+
+function mergeTemplateButtons(componentButtons, metaButtons) {
+  const fromComponents = normalizeTemplateButtons(componentButtons);
+  if (!metaButtons.length) return fromComponents;
+  if (!fromComponents.length) return metaButtons;
+
+  const merged = [...fromComponents];
+  const seen = new Set(
+    fromComponents.map((b) => `${String(b.type).toUpperCase()}::${String(b.text).toLowerCase()}`)
+  );
+  metaButtons.forEach((btn) => {
+    const key = `${String(btn.type).toUpperCase()}::${String(btn.text).toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(btn);
+    }
+  });
+  return merged;
+}
+
+async function resolveCampaignTemplate(template) {
+  if (!template) return null;
+
+  let resolved = { ...template };
+  resolved.variables = parseTemplateVariablesMeta(resolved.variables);
+
+  if (!Array.isArray(resolved.components) || !resolved.components.length) {
+    const fromVars = resolved.variables?.components;
+    if (Array.isArray(fromVars) && fromVars.length) {
+      resolved.components = fromVars;
+    }
+  }
+
+  const needsButtons = !getTemplatePreviewParts(resolved)?.buttons?.length;
+
+  if (resolved.id && needsButtons) {
+    try {
+      const full = await getTemplateById(resolved.id);
+      if (full) {
+        const fullVars = parseTemplateVariablesMeta(full.variables);
+        resolved = {
+          ...resolved,
+          ...full,
+          variables: { ...resolved.variables, ...fullVars },
+          components: full.components || fullVars.components || resolved.components,
+          metaTemplateId: full.metaTemplateId || resolved.metaTemplateId,
+        };
+      }
+    } catch (_) {
+      /* optional */
+    }
+  }
+
+  if (getTemplatePreviewParts(resolved)?.buttons?.length) return resolved;
+
+  const metaId = resolved.metaTemplateId;
+  if (!metaId) return resolved;
+
+  try {
+    const details = await getMetaTemplateDetails(metaId);
+    if (!details?.components?.length) return resolved;
+    const header = details.components.find((c) => String(c.type || '').toUpperCase() === 'HEADER');
+    const format = String(header?.format || '').toUpperCase();
+    const templateType =
+      format === 'IMAGE' ? 'image' : format === 'VIDEO' ? 'video' : format === 'DOCUMENT' ? 'document' : 'text';
+    return {
+      ...resolved,
+      language: details.language || resolved.language,
+      components: details.components,
+      content:
+        details.components.find((c) => String(c.type || '').toUpperCase() === 'BODY')?.text ||
+        resolved.content,
+      variables: {
+        ...parseTemplateVariablesMeta(resolved.variables),
+        templateType,
+        language: details.language || resolved.variables?.language,
+        components: details.components,
+      },
+    };
+  } catch (_) {
+    return resolved;
+  }
+}
+
+function getTemplatePreviewParts(template) {
+  if (!template) return null;
+
+  const meta = parseTemplateVariablesMeta(template.variables);
+  const components = getTemplateComponentsList(template);
+  const metaButtons = buildInteractiveButtonsFromMeta(meta);
+  const componentButtons = extractButtonsFromComponents(components);
+
+  const findComp = (type) =>
+    components.find((c) => String(c.type || '').toUpperCase() === type);
+  const header = findComp('HEADER');
+  const body = findComp('BODY');
+  const footerComp = findComp('FOOTER');
+  const bodyText = body?.text || template?.content || '';
+
+  const buttons = mergeTemplateButtons(componentButtons, metaButtons);
+
+  const templateType = String(meta.templateType || 'text').toLowerCase();
+  const headerFormat =
+    (header?.format ? String(header.format).toUpperCase() : null) ||
+    ({ image: 'IMAGE', video: 'VIDEO', document: 'DOCUMENT' }[templateType] || null);
+
+  return {
+    headerFormat,
+    headerText: header?.text || '',
+    body: bodyText,
+    footer: footerComp?.text || meta.footer || '',
+    buttons: normalizeTemplateButtons(buttons),
+  };
 }
 
 function autoMapCsvColumns(columns) {
@@ -363,7 +553,7 @@ function WhatsAppPreview({
         <BrandLogoMark size="xs" tone="contrast" />
         <span className="font-medium">WhatsApp Preview</span>
       </div>
-      <div className="p-3 min-h-[200px]">
+      <div className="p-3 max-h-[420px] overflow-y-auto">
         <div className="bg-white rounded-lg shadow-sm overflow-hidden text-sm text-gray-900">
           {(parts.headerFormat === 'IMAGE' || parts.headerFormat === 'VIDEO' || mediaPreviewUrl) && (
             <div className="bg-gray-100 aspect-video flex items-center justify-center overflow-hidden">
@@ -428,6 +618,7 @@ export default function CreateCampaignPage() {
   const [templateVarCustom, setTemplateVarCustom] = useState({});
   const [mediaFile, setMediaFile] = useState(null);
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
+  const [resolvingTemplate, setResolvingTemplate] = useState(false);
 
   const [testName, setTestName] = useState('');
   const [testPhone, setTestPhone] = useState('');
@@ -437,6 +628,31 @@ export default function CreateCampaignPage() {
   const [excludeOptedOut, setExcludeOptedOut] = useState(true);
   const [wccCredits, setWccCredits] = useState(null);
   const [planLimitModal, setPlanLimitModal] = useState(null);
+
+  const handleSelectTemplate = async (t) => {
+    setSelectedTemplate(t);
+    setTemplateSearch(t.name);
+    const lang =
+      t.language ||
+      parseTemplateVariablesMeta(t.variables)?.language;
+    if (lang) setTemplateLanguage(String(lang));
+
+    setResolvingTemplate(true);
+    try {
+      const resolved = await resolveCampaignTemplate(t);
+      if (resolved) {
+        setSelectedTemplate(resolved);
+        const resolvedLang =
+          resolved.language ||
+          parseTemplateVariablesMeta(resolved.variables)?.language;
+        if (resolvedLang) setTemplateLanguage(String(resolvedLang));
+      }
+    } catch (_) {
+      /* keep basic template */
+    } finally {
+      setResolvingTemplate(false);
+    }
+  };
 
   const templateVariables = useMemo(
     () => (selectedTemplate ? extractTemplateVariables(selectedTemplate) : []),
@@ -568,6 +784,8 @@ export default function CreateCampaignPage() {
     setTemplateVarMap(next);
     setTemplateVarCustom({});
     setTemplateLanguage(selectedTemplate.language || 'en_US');
+    setMediaFile(null);
+    setMediaPreviewUrl('');
   }, [selectedTemplate, csvColumns, columnMapping]);
 
   const handleCsvUpload = async (file) => {
@@ -666,6 +884,10 @@ export default function CreateCampaignPage() {
         setError('Fix template variable mapping before continuing');
         return;
       }
+      if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !mediaPreviewUrl) {
+        setError('This template needs a header image or video. Upload media to continue.');
+        return;
+      }
       setStep(4);
       return;
     }
@@ -690,6 +912,10 @@ export default function CreateCampaignPage() {
       setError('No valid audience rows');
       return;
     }
+    if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !mediaPreviewUrl) {
+      setError('This template needs a header image or video. Upload media before sending.');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -700,6 +926,14 @@ export default function CreateCampaignPage() {
         return;
       }
 
+      let headerMediaUrl = null;
+      if (mediaFile) {
+        const uploaded = await uploadBroadcastHeaderMedia(mediaFile);
+        headerMediaUrl = uploaded.url;
+      } else if (mediaPreviewUrl && !String(mediaPreviewUrl).startsWith('blob:')) {
+        headerMediaUrl = mediaPreviewUrl;
+      }
+
       const variable_mapping = buildVariableMapping(templateVarMap, templateVarCustom);
       const data = await createCampaignApi({
         name: campaignName.trim(),
@@ -708,6 +942,7 @@ export default function CreateCampaignPage() {
         schedule_time: scheduleEnabled ? new Date(Date.now() + 3600000).toISOString() : null,
         audience,
         variable_mapping,
+        header_media_url: headerMediaUrl,
       });
       const campaignId = data.campaignId || data.campaign?.id;
       if (!campaignId) throw new Error('Campaign created but id missing');
@@ -968,10 +1203,7 @@ export default function CreateCampaignPage() {
                               <li key={t.name}>
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    setSelectedTemplate(t);
-                                    setTemplateSearch(t.name);
-                                  }}
+                                  onClick={() => handleSelectTemplate(t)}
                                   className={`w-full text-left px-4 py-3 text-sm hover:bg-sky-50 transition-colors ${
                                     selectedTemplate?.name === t.name ? 'bg-sky-50 font-semibold text-sky-900' : 'text-gray-800'
                                   }`}
@@ -1032,17 +1264,29 @@ export default function CreateCampaignPage() {
                       )}
                       {selectedTemplate && templateHasMedia(selectedTemplate) && (
                         <div className="mt-6">
-                          <label className="block text-sm font-semibold text-gray-800 mb-2">Upload media</label>
+                          <label className="block text-sm font-semibold text-gray-800 mb-2">
+                            Upload header {String(getTemplatePreviewParts(selectedTemplate).headerFormat || 'media').toLowerCase()}
+                          </label>
+                          <p className="text-xs text-gray-500 mb-2">
+                            Required for this template. Preview updates after you choose a file.
+                          </p>
                           <input
                             type="file"
                             accept="image/*,video/*"
                             onChange={(e) => {
                               const f = e.target.files?.[0];
                               setMediaFile(f || null);
-                              if (f) setMediaPreviewUrl(URL.createObjectURL(f));
+                              if (f) {
+                                setMediaPreviewUrl(URL.createObjectURL(f));
+                              } else {
+                                setMediaPreviewUrl('');
+                              }
                             }}
                             className="block w-full text-sm"
                           />
+                          {mediaPreviewUrl && (
+                            <p className="mt-2 text-xs text-green-700 font-medium">Header media ready for preview</p>
+                          )}
                         </div>
                       )}
                     </div>
