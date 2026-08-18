@@ -393,6 +393,7 @@ function AgentRightPanel({
   const [accountSaving, setAccountSaving] = useState(false);
   const [planInfo, setPlanInfo] = useState(null);
   const [pricingCurrency, setPricingCurrency] = useState(() => resolveUserPricingCurrency(user));
+  const [planDiscounts, setPlanDiscounts] = useState(null);
 
   const [planStep, setPlanStep] = useState(1);
   const [billingCycle, setBillingCycle] = useState("monthly");
@@ -418,6 +419,7 @@ function AgentRightPanel({
           setPricingCurrency(
             plansResult.currency || metricsData.currency || resolveUserPricingCurrency(user)
           );
+          setPlanDiscounts(plansResult.discounts || null);
           const active = list.filter((p) => p.is_active !== false);
           const sorted = (active.length ? active : list).slice().sort(
             (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
@@ -987,6 +989,26 @@ function AgentRightPanel({
     };
   }, [hasActivePlan, planInfo?.renewsOn]);
 
+  const activePlanCycleLabel = useMemo(() => {
+    const cycle = String(planInfo?.cycle || "").toLowerCase();
+    if (cycle === "quarterly") return "Quarterly";
+    if (cycle === "yearly" || cycle === "annual") return "Yearly";
+    if (cycle === "monthly") return "Monthly";
+    return "Monthly";
+  }, [planInfo?.cycle]);
+
+  const activePlanAmountLabel = useMemo(() => {
+    if (!hasActivePlan) return null;
+    const stored = Number(planInfo?.planAmount);
+    if (Number.isFinite(stored) && stored > 0) {
+      return formatPlanAmount(stored, pricingCurrency);
+    }
+    if (unifiedPlan) {
+      return formatPlanAmount(resolvePlanBillingAmount(unifiedPlan, planInfo?.cycle || "monthly"), pricingCurrency);
+    }
+    return formatPlanAmount(cycleBillingAmount(planMonthlyBase, planInfo?.cycle || "monthly", planDiscounts), pricingCurrency);
+  }, [hasActivePlan, planInfo, unifiedPlan, pricingCurrency, planMonthlyBase, planDiscounts]);
+
   const planSummaryText = useMemo(() => {
     if (billingCycle === "monthly") return "Renews every month";
     if (billingCycle === "quarterly") return "Renews every 3 months";
@@ -1165,6 +1187,7 @@ function AgentRightPanel({
           cycle: billingCycle,
           purchasedAt: nowIso,
           renewsOn,
+          planAmount: planTotalPayable,
         };
         setPlanInfo(nextPlanInfo);
         const uid = Number(user?.id);
@@ -1544,9 +1567,20 @@ function AgentRightPanel({
         <span className="pointer-events-none absolute inset-0 bg-gradient-to-br from-sky-500/8 to-blue-500/5" aria-hidden />
         <div className="relative">
           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Current Plan</p>
-          <h3 className="mt-1.5 font-bold text-base md:text-lg bg-gradient-to-r from-sky-700 to-blue-800 bg-clip-text text-transparent tracking-tight">
-            {hasActivePlan ? String(planInfo?.plan || "basic").toUpperCase() : "BASIC"}
-          </h3>
+          {hasActivePlan ? (
+            <>
+              <h3 className="mt-1.5 font-bold text-base md:text-lg bg-gradient-to-r from-sky-700 to-blue-800 bg-clip-text text-transparent tracking-tight">
+                {activePlanCycleLabel.toUpperCase()}
+              </h3>
+              {activePlanAmountLabel ? (
+                <p className="mt-1 text-sm font-semibold text-gray-800 tabular-nums">{activePlanAmountLabel}</p>
+              ) : null}
+            </>
+          ) : (
+            <h3 className="mt-1.5 font-bold text-base md:text-lg bg-gradient-to-r from-sky-700 to-blue-800 bg-clip-text text-transparent tracking-tight">
+              Purchase plan
+            </h3>
+          )}
           {planEndingSoon ? (
             <div className="mt-3 rounded-xl border border-amber-200/90 bg-gradient-to-br from-amber-50 to-orange-50/60 px-3 py-2.5 ring-1 ring-amber-100/80">
               <p className="text-[11px] font-semibold text-amber-900 leading-snug">
@@ -1559,7 +1593,7 @@ function AgentRightPanel({
             </div>
           ) : hasActivePlan && renewDateLabel ? (
             <p className="mt-2 text-[11px] text-gray-500 leading-snug">Renews on {renewDateLabel}</p>
-          ) : (
+          ) : !hasActivePlan ? null : (
             <p className="mt-2 text-[11px] text-gray-500 leading-snug">Upgrade anytime from billing when you need higher limits.</p>
           )}
           <button
@@ -1575,7 +1609,7 @@ function AgentRightPanel({
                 : "bg-gradient-to-r from-emerald-600 to-teal-600 shadow-emerald-600/25 hover:from-emerald-500 hover:to-teal-500"
             }`}
           >
-            {planEndingSoon ? "Recharge Now" : hasActivePlan ? "Upgrade Now" : "Get Plan"}
+            {planEndingSoon ? "Recharge Now" : hasActivePlan ? "Upgrade Now" : "GET PLAN"}
           </button>
         </div>
       </div>
@@ -1840,13 +1874,20 @@ function AgentRightPanel({
                       onBillingCycleChange={setBillingCycle}
                       loading={plansLoading}
                       showGst={false}
-                      planName={unifiedPlan?.name || "Standard Project Plan"}
+                      planName={unifiedPlan?.name || "Project Plan"}
                       features={unifiedPlan?.features?.length ? unifiedPlan.features : null}
                       plan={unifiedPlan}
+                      planDiscounts={planDiscounts}
                       conversationMetrics={conversationMetrics}
                       currency={pricingCurrency}
                     >
-                      <PlanGstBreakdown monthly={planMonthlyBase} billingCycle={billingCycle} plan={unifiedPlan} currency={pricingCurrency} />
+                      <PlanGstBreakdown
+                        monthly={planMonthlyBase}
+                        billingCycle={billingCycle}
+                        plan={unifiedPlan}
+                        currency={pricingCurrency}
+                        planDiscounts={planDiscounts}
+                      />
                       <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
                         <div className="flex items-center justify-between">
                           <div>
@@ -1928,6 +1969,7 @@ function AgentRightPanel({
                       subtotal={grandTotal}
                       plan={unifiedPlan}
                       currency={pricingCurrency}
+                      planDiscounts={planDiscounts}
                     />
                     <div className="rounded-2xl border border-sky-100/90 p-4 bg-white ring-1 ring-sky-100/70 shadow-sm">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">

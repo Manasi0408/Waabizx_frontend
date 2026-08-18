@@ -209,9 +209,12 @@ export const uploadBroadcastHeaderMedia = async (file) => {
     const formData = new FormData();
     formData.append('media', file);
 
+    const headers = authHeaders();
+    delete headers['Content-Type'];
+
     const response = await fetch(`${API_URL}/broadcast/upload-header-media`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers,
       body: formData,
     });
 

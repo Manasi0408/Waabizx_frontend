@@ -35,6 +35,8 @@ export function mergeChatMessages(primary, secondary) {
           previewA.header?.url ||
           previewB.headerImageUrl ||
           previewB.header?.url ||
+          a.mediaUrl ||
+          b.mediaUrl ||
           null,
         header:
           previewA.header ||

@@ -4,6 +4,8 @@ import {
   deletePlan,
   fetchAdminConversationMetrics,
   fetchAdminPlans,
+  fetchAdminPlanDiscounts,
+  updateAdminPlanDiscounts,
   updateConversationMetrics,
   updatePlan,
 } from '../services/planService';
@@ -22,13 +24,14 @@ import {
   formatInr,
   formatUsd,
   formatPlanAmount,
+  resolveDiscountConfig,
   withDerivedPricesFromMonthly,
 } from '../utils/planPricing';
 
 const PLAN_MONTHLY_USD_DEFAULT = 10;
 
-const withDerivedPrices = (monthly) => {
-  const derived = withDerivedPricesFromMonthly(monthly);
+const withDerivedPrices = (monthly, discounts = null) => {
+  const derived = withDerivedPricesFromMonthly(monthly, discounts);
   return {
     price_monthly: derived.price_monthly,
     price_quarterly: String(derived.price_quarterly),
@@ -36,8 +39,8 @@ const withDerivedPrices = (monthly) => {
   };
 };
 
-const withDerivedUsdPrices = (monthly) => {
-  const derived = withDerivedPricesFromMonthly(monthly);
+const withDerivedUsdPrices = (monthly, discounts = null) => {
+  const derived = withDerivedPricesFromMonthly(monthly, discounts);
   return {
     price_monthly_usd: derived.price_monthly,
     price_quarterly_usd: String(derived.price_quarterly),
@@ -175,6 +178,9 @@ function SuperAdminPlansPanel() {
   const [metricsEditing, setMetricsEditing] = useState(false);
   const [metricsError, setMetricsError] = useState('');
   const [metricsSuccess, setMetricsSuccess] = useState('');
+  const [planDiscounts, setPlanDiscounts] = useState({ quarterlyPercent: 10, yearlyPercent: 15 });
+  const [discountSaving, setDiscountSaving] = useState(false);
+  const [discountSuccess, setDiscountSuccess] = useState('');
 
   const loadConversationMetrics = useCallback(async () => {
     setMetricsError('');
@@ -206,8 +212,10 @@ function SuperAdminPlansPanel() {
     setError('');
     setLoading(true);
     try {
-      const list = await fetchAdminPlans();
-      const cleaned = (Array.isArray(list) ? list : []).filter((p) => {
+      const data = await fetchAdminPlans();
+      const list = Array.isArray(data?.plans) ? data.plans : [];
+      if (data?.discounts) setPlanDiscounts(data.discounts);
+      const cleaned = list.filter((p) => {
         const slug = String(p?.slug || '').toLowerCase();
         const name = String(p?.name || '').toLowerCase();
         if (slug === 'pro' || slug === 'enterprise' || slug.includes('enterprise')) return false;
@@ -241,12 +249,12 @@ function SuperAdminPlansPanel() {
   const monthlyPrice = Number(primaryPlan?.price_monthly) || PLAN_MONTHLY_DEFAULT;
   const monthlyPriceUsd = Number(primaryPlan?.price_monthly_usd) || PLAN_MONTHLY_USD_DEFAULT;
   const cycleStats = useMemo(
-    () => buildCycleOptions(monthlyPrice, primaryPlan, 'INR'),
-    [monthlyPrice, primaryPlan]
+    () => buildCycleOptions(monthlyPrice, primaryPlan, 'INR', planDiscounts),
+    [monthlyPrice, primaryPlan, planDiscounts]
   );
   const cycleStatsUsd = useMemo(
-    () => buildCycleOptions(monthlyPriceUsd, { ...primaryPlan, price_monthly: monthlyPriceUsd }, 'USD'),
-    [monthlyPriceUsd, primaryPlan]
+    () => buildCycleOptions(monthlyPriceUsd, { ...primaryPlan, price_monthly: monthlyPriceUsd }, 'USD', planDiscounts),
+    [monthlyPriceUsd, primaryPlan, planDiscounts]
   );
 
   const stats = useMemo(() => ({
@@ -285,7 +293,7 @@ function SuperAdminPlansPanel() {
     setForm((f) => {
       const next = { ...f, price_monthly: value };
       if (f.autoDerivePrices) {
-        const derived = withDerivedPrices(value);
+        const derived = withDerivedPrices(value, planDiscounts);
         next.price_quarterly = derived.price_quarterly;
         next.price_yearly = derived.price_yearly;
       }
@@ -297,13 +305,30 @@ function SuperAdminPlansPanel() {
     setForm((f) => {
       const next = { ...f, price_monthly_usd: value };
       if (f.autoDeriveUsdPrices) {
-        const derived = withDerivedUsdPrices(value);
+        const derived = withDerivedUsdPrices(value, planDiscounts);
         next.price_quarterly_usd = derived.price_quarterly_usd;
         next.price_yearly_usd = derived.price_yearly_usd;
       }
       return next;
     });
   };
+
+  const savePlanDiscounts = async () => {
+    setDiscountSaving(true);
+    setDiscountSuccess('');
+    setError('');
+    try {
+      const saved = await updateAdminPlanDiscounts(planDiscounts);
+      setPlanDiscounts(saved);
+      setDiscountSuccess('Billing cycle offers updated.');
+    } catch (e) {
+      setError(e?.response?.data?.message || e?.message || 'Failed to save billing offers');
+    } finally {
+      setDiscountSaving(false);
+    }
+  };
+
+  const discountCfg = useMemo(() => resolveDiscountConfig(planDiscounts), [planDiscounts]);
 
   const onSave = async (e) => {
     e.preventDefault();
@@ -312,17 +337,17 @@ function SuperAdminPlansPanel() {
     setSuccess('');
     const monthly = Number(form.price_monthly) || 0;
     const quarterly = form.autoDerivePrices
-      ? computeQuarterlyFromMonthly(monthly)
+      ? computeQuarterlyFromMonthly(monthly, planDiscounts)
       : Number(form.price_quarterly) || 0;
     const yearly = form.autoDerivePrices
-      ? computeYearlyFromMonthly(monthly)
+      ? computeYearlyFromMonthly(monthly, planDiscounts)
       : Number(form.price_yearly) || 0;
     const monthlyUsd = Number(form.price_monthly_usd) || 0;
     const quarterlyUsd = form.autoDeriveUsdPrices
-      ? computeQuarterlyFromMonthly(monthlyUsd)
+      ? computeQuarterlyFromMonthly(monthlyUsd, planDiscounts)
       : Number(form.price_quarterly_usd) || 0;
     const yearlyUsd = form.autoDeriveUsdPrices
-      ? computeYearlyFromMonthly(monthlyUsd)
+      ? computeYearlyFromMonthly(monthlyUsd, planDiscounts)
       : Number(form.price_yearly_usd) || 0;
 
     const payload = {
@@ -479,6 +504,65 @@ function SuperAdminPlansPanel() {
             Add plan
           </button>
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-amber-100/90 bg-white/95 p-5 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80">
+        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">Billing cycle offers</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Dynamic quarterly &amp; yearly discounts shown on admin Get Plan and purchase screens.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 flex-1 max-w-md">
+            <label className="block">
+              <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Quarterly off (%)</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={planDiscounts.quarterlyPercent ?? 10}
+                onChange={(e) =>
+                  setPlanDiscounts((prev) => ({
+                    ...prev,
+                    quarterlyPercent: Math.min(100, Math.max(0, Number(e.target.value) || 0)),
+                  }))
+                }
+                className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2 text-sm focus:border-amber-400 focus:ring-2 focus:ring-amber-400/20 outline-none"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-bold uppercase tracking-wide text-gray-600">Yearly off (%)</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={planDiscounts.yearlyPercent ?? 15}
+                onChange={(e) =>
+                  setPlanDiscounts((prev) => ({
+                    ...prev,
+                    yearlyPercent: Math.min(100, Math.max(0, Number(e.target.value) || 0)),
+                  }))
+                }
+                className="mt-1 w-full rounded-xl border-2 border-gray-200 px-3 py-2 text-sm focus:border-amber-400 focus:ring-2 focus:ring-amber-400/20 outline-none"
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={savePlanDiscounts}
+            disabled={discountSaving}
+            className="shrink-0 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md disabled:opacity-60"
+          >
+            {discountSaving ? 'Saving…' : 'Save offers'}
+          </button>
+        </div>
+        {discountSuccess ? (
+          <p className="mt-3 text-sm text-emerald-700">{discountSuccess}</p>
+        ) : null}
+        <p className="mt-3 text-xs text-gray-500">
+          Current preview: Quarterly −{discountCfg.quarterlyPercent}%, Yearly −{discountCfg.yearlyPercent}%
+        </p>
       </section>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
@@ -776,6 +860,7 @@ function SuperAdminPlansPanel() {
               planName={primaryPlan.name}
               features={primaryPlan.features?.length ? primaryPlan.features : null}
               plan={primaryPlan}
+              planDiscounts={planDiscounts}
               conversationMetrics={previewMetrics}
               showGst
               currency="INR"
@@ -829,7 +914,7 @@ function SuperAdminPlansPanel() {
                       setForm((f) => {
                         const next = { ...f, autoDerivePrices: checked };
                         if (checked) {
-                          const derived = withDerivedPrices(f.price_monthly);
+                          const derived = withDerivedPrices(f.price_monthly, planDiscounts);
                           next.price_quarterly = derived.price_quarterly;
                           next.price_yearly = derived.price_yearly;
                         }
@@ -838,7 +923,9 @@ function SuperAdminPlansPanel() {
                     }}
                     className="rounded border-gray-300 text-sky-600 focus:ring-sky-500"
                   />
-                  <span className="text-sm text-gray-700">Auto-calculate quarterly (−10%) &amp; yearly (−15%) from monthly</span>
+                  <span className="text-sm text-gray-700">
+                    Auto-calculate quarterly (−{discountCfg.quarterlyPercent}%) &amp; yearly (−{discountCfg.yearlyPercent}%) from monthly
+                  </span>
                 </label>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -885,7 +972,7 @@ function SuperAdminPlansPanel() {
                       setForm((f) => {
                         const next = { ...f, autoDeriveUsdPrices: checked };
                         if (checked) {
-                          const derived = withDerivedUsdPrices(f.price_monthly_usd);
+                          const derived = withDerivedUsdPrices(f.price_monthly_usd, planDiscounts);
                           next.price_quarterly_usd = derived.price_quarterly_usd;
                           next.price_yearly_usd = derived.price_yearly_usd;
                         }

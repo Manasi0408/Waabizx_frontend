@@ -20,8 +20,8 @@ const CheckIcon = () => (
   </svg>
 );
 
-export function PlanBillingToggle({ monthly, billingCycle, onChange, plan = null, currency = 'INR' }) {
-  const options = buildCycleOptions(monthly, plan, currency);
+export function PlanBillingToggle({ monthly, billingCycle, onChange, plan = null, currency = 'INR', planDiscounts = null }) {
+  const options = buildCycleOptions(monthly, plan, currency, planDiscounts);
   const isUsd = !isInrCurrency(currency);
 
   return (
@@ -117,8 +117,8 @@ export function PlanGstSummary({ subtotal, title = 'Payment summary', currency =
   );
 }
 
-export function PlanGstBreakdown({ monthly, billingCycle, subtotal, plan = null, currency = 'INR' }) {
-  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan, currency);
+export function PlanGstBreakdown({ monthly, billingCycle, subtotal, plan = null, currency = 'INR', planDiscounts = null }) {
+  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan, currency, planDiscounts);
   const isUsd = !isInrCurrency(currency);
   const base = subtotal != null ? Math.max(0, Number(subtotal) || 0) : breakdown.billingAmount;
   const total = isUsd ? base : payableWithGst(base);
@@ -176,10 +176,11 @@ export default function PlanSubscriptionView({
   plan = null,
   conversationMetrics = null,
   currency = 'INR',
+  planDiscounts = null,
   children,
 }) {
-  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan, currency);
-  const cycleOptions = buildCycleOptions(monthly, plan, currency);
+  const breakdown = buildPricingBreakdown(monthly, billingCycle, plan, currency, planDiscounts);
+  const cycleOptions = buildCycleOptions(monthly, plan, currency, planDiscounts);
   const isUsd = !isInrCurrency(currency);
   const activeOption = cycleOptions.find((o) => o.cycle === billingCycle) || cycleOptions[0];
   const featureList = Array.isArray(features) && features.length
@@ -206,6 +207,7 @@ export default function PlanSubscriptionView({
             onChange={onBillingCycleChange}
             plan={plan}
             currency={currency}
+            planDiscounts={planDiscounts}
           />
         </div>
       ) : null}

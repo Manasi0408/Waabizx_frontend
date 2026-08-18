@@ -8,6 +8,8 @@ import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import FlowMediaAttachField from '../components/FlowMediaLibraryField';
+import { resolvePublicMediaUrl, toPermanentUploadPath } from '../utils/mediaUrl';
 import {
   uploadCSV,
   getBroadcastContacts,
@@ -465,7 +467,6 @@ function Broadcast() {
   
   const notificationRef = useRef(null);
   const fileInputRef = useRef(null);
-  const mediaFileInputRef = useRef(null);
 
   const previewSampleRow = useMemo(() => {
     if (audienceType === 'csv' && csvData[0]) return csvData[0];
@@ -1903,7 +1904,7 @@ function Broadcast() {
                       <div>
                         <p className="text-sm font-semibold text-gray-900">Header image *</p>
                         <p className="text-xs text-gray-600 mt-0.5">
-                          Upload the image to send with this broadcast. Size &lt; 5MB · .png or .jpeg
+                          Choose from Media Library or paste a public HTTPS URL. Size &lt; 5MB · .png or .jpeg
                         </p>
                       </div>
                       <div>
@@ -1916,8 +1917,8 @@ function Broadcast() {
                             setMediaUrl(val);
                             setHeaderMediaFile(null);
                             if (val.trim()) {
-                              setMediaPreviewUrl(val.trim());
-                            } else if (!mediaFileInputRef.current?.files?.length) {
+                              setMediaPreviewUrl(resolvePublicMediaUrl(val.trim()) || val.trim());
+                            } else {
                               setMediaPreviewUrl('');
                             }
                           }}
@@ -1925,45 +1926,22 @@ function Broadcast() {
                           className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none bg-white"
                         />
                       </div>
-                      <input
-                        ref={mediaFileInputRef}
-                        type="file"
-                        accept="image/png,image/jpeg,image/jpg,image/webp"
-                        className="hidden"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          if (file.size > 5 * 1024 * 1024) {
-                            setError('Image must be smaller than 5MB');
-                            return;
-                          }
-                          const url = URL.createObjectURL(file);
-                          setHeaderMediaFile(file);
-                          setMediaPreviewUrl(url);
-                          setMediaUrl('');
+                      <FlowMediaAttachField
+                        mediaType="IMAGE"
+                        label="Header image"
+                        mediaUrl={toPermanentUploadPath(mediaUrl) || mediaUrl.trim()}
+                        mediaFilename={
+                          headerMediaFile?.name ||
+                          (toPermanentUploadPath(mediaUrl) ? mediaUrl.split('/').pop() : '')
+                        }
+                        onChange={({ mediaUrl: storedUrl, mediaFilename }) => {
+                          const preview = resolvePublicMediaUrl(storedUrl) || storedUrl;
+                          setMediaUrl(storedUrl);
+                          setMediaPreviewUrl(preview);
+                          setHeaderMediaFile(null);
                           setError('');
                         }}
                       />
-                      <button
-                        type="button"
-                        onClick={() => mediaFileInputRef.current?.click()}
-                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-violet-700 px-4 py-3 text-sm font-semibold text-white shadow-md hover:from-violet-700 hover:to-violet-800 transition-all"
-                      >
-                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
-                          />
-                        </svg>
-                        Upload image
-                      </button>
-                      {headerMediaFile ? (
-                        <p className="text-xs font-medium text-violet-800">
-                          Selected: {headerMediaFile.name}
-                        </p>
-                      ) : null}
                     </div>
                   )}
                 </div>

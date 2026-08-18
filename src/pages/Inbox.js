@@ -212,6 +212,7 @@ function mergeInboxIntoRequesting(apiRows, inboxList) {
     if (!key || byKey.has(key)) return;
     const status = String(c.chatStatus || '').toLowerCase();
     if (status === 'intervened' || status === 'closed') return;
+    if (!c.hasCustomerReply) return;
     byKey.set(key, {
       id: c.conversationId || null,
       contactId: c.contactId ?? c.id ?? null,
@@ -1297,17 +1298,72 @@ function Inbox({ pageMode = 'inbox' }) {
 
       const handleStatusUpdate = (data) => {
         console.log('📊 Socket: message-status-update received', data);
-        setMessages(prev => prev.map(msg => 
-          msg.id === data.messageId || msg.waMessageId === data.waMessageId
-            ? {
-                ...msg,
-                status: data.status,
-                deliveredAt: data.deliveredAt,
-                readAt: data.readAt,
-                errorMessage: data.errorMessage || msg.errorMessage || null,
-              }
-            : msg
-        ));
+        setMessages(prev => prev.map(msg => {
+          const isMatch =
+            msg.id === data.messageId ||
+            msg.id === `inbox_${data.messageId}` ||
+            msg.waMessageId === data.waMessageId;
+          if (!isMatch) return msg;
+
+          const incomingPreview = data.templatePreview || data.templateSnapshot || null;
+          const existingPreview = msg.templatePreview || msg.templateSnapshot || null;
+          const preservedHeaderUrl =
+            existingPreview?.headerImageUrl ||
+            existingPreview?.header?.url ||
+            msg.mediaUrl ||
+            msg.header?.url ||
+            null;
+          const incomingHeaderUrl =
+            incomingPreview?.headerImageUrl ||
+            incomingPreview?.header?.url ||
+            data.mediaUrl ||
+            null;
+          const headerImageUrl = preservedHeaderUrl || incomingHeaderUrl || null;
+          const mergedPreview =
+            incomingPreview || existingPreview
+              ? {
+                  ...(incomingPreview && typeof incomingPreview === 'object' ? incomingPreview : {}),
+                  ...(existingPreview && typeof existingPreview === 'object' ? existingPreview : {}),
+                  ...(incomingPreview && typeof incomingPreview === 'object' ? incomingPreview : {}),
+                  body:
+                    (incomingPreview && incomingPreview.body) ||
+                    (existingPreview && existingPreview.body) ||
+                    msg.content ||
+                    '',
+                  headerImageUrl,
+                  header: headerImageUrl
+                    ? { type: 'image', url: headerImageUrl }
+                    : (incomingPreview?.header || existingPreview?.header || msg.header || null),
+                  headerFormat:
+                    (incomingPreview && incomingPreview.headerFormat) ||
+                    (existingPreview && existingPreview.headerFormat) ||
+                    (headerImageUrl ? 'IMAGE' : null),
+                  footer:
+                    (incomingPreview && incomingPreview.footer) ||
+                    (existingPreview && existingPreview.footer) ||
+                    '',
+                  buttons:
+                    (Array.isArray(incomingPreview?.buttons) && incomingPreview.buttons.length
+                      ? incomingPreview.buttons
+                      : null) ||
+                    (Array.isArray(existingPreview?.buttons) ? existingPreview.buttons : []) ||
+                    msg.buttons ||
+                    [],
+                }
+              : null;
+
+          return {
+            ...msg,
+            status: data.status,
+            deliveredAt: data.deliveredAt,
+            readAt: data.readAt,
+            errorMessage: data.errorMessage || msg.errorMessage || null,
+            mediaUrl: data.mediaUrl || msg.mediaUrl || headerImageUrl || null,
+            header: mergedPreview?.header || msg.header || (headerImageUrl ? { type: 'image', url: headerImageUrl } : null),
+            templatePreview: mergedPreview,
+            templateSnapshot: mergedPreview,
+          };
+        }));
         if (String(data?.status || '').toLowerCase() === 'failed') {
           if (data?.sentViaTemplate) return;
           const errText = String(data?.errorMessage || '').trim();
@@ -2256,6 +2312,10 @@ function Inbox({ pageMode = 'inbox' }) {
 
   const handleSendMessage = async (e, overrideText) => {
     if (e?.preventDefault) e.preventDefault();
+    if (isHistoryPage) {
+      alert('Only approved templates can be sent from History. Use Insert to choose a template.');
+      return;
+    }
     const phone = selectedContact?.phone;
     const textToSend = overrideText !== undefined ? String(overrideText || "") : String(messageText || "");
     if (!textToSend.trim() || !selectedContact || sending) return;
@@ -2768,33 +2828,27 @@ function Inbox({ pageMode = 'inbox' }) {
   };
 
   const selectInterveneItemForPreview = (item) => {
+    if (isHistoryPage && item?.mode !== 'template') {
+      alert('Only approved templates can be sent from History.');
+      return;
+    }
     const raw = typeof item === 'string' ? item : String(item?.insertValue || '');
     const resolvedText = resolveTemplatePlaceholders(raw, selectedContact) || raw || String(item?.label || '');
     if (!resolvedText && item?.mode !== 'template') return;
 
     let templatePreview = null;
-    let resolvedHeaderMediaUrl = null;
     if (item && typeof item === 'object' && item.mode === 'template') {
       const templateName = String(item.templateName || '').trim();
       const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
-      resolvedHeaderMediaUrl =
-        resolveTemplateHeaderMediaUrl(catalogHit) ||
-        resolveTemplateHeaderMediaUrl(item) ||
-        item.headerMediaUrl ||
-        null;
-      const isImageTemplate =
-        Boolean(resolvedHeaderMediaUrl) ||
-        templateHasImageHeader(catalogHit) ||
-        templateHasImageHeader(item);
       const needsHeaderMedia =
-        templateNeedsHeaderMedia(catalogHit) ||
-        templateNeedsHeaderMedia(item) ||
-        isImageTemplate;
+        templateNeedsHeaderMedia(catalogHit) || templateNeedsHeaderMedia(item);
+      const stripStoredHeaderMediaVars = (vars) => {
+        if (!vars || typeof vars !== 'object' || Array.isArray(vars)) return {};
+        const { headerMediaUrl, header_media_url, ...rest } = vars;
+        return rest;
+      };
       const imageVars = needsHeaderMedia
         ? {
-            ...(resolvedHeaderMediaUrl
-              ? { headerMediaUrl: resolvedHeaderMediaUrl, header_media_url: resolvedHeaderMediaUrl }
-              : {}),
             templateType:
               String(catalogHit?.variables?.templateType || item?.variables?.templateType || 'image')
                 .toLowerCase() || 'image',
@@ -2804,11 +2858,13 @@ function Inbox({ pageMode = 'inbox' }) {
         ? {
             ...catalogHit,
             variables: {
-              ...(catalogHit.variables &&
-              typeof catalogHit.variables === 'object' &&
-              !Array.isArray(catalogHit.variables)
-                ? catalogHit.variables
-                : {}),
+              ...stripStoredHeaderMediaVars(
+                catalogHit.variables &&
+                typeof catalogHit.variables === 'object' &&
+                !Array.isArray(catalogHit.variables)
+                  ? catalogHit.variables
+                  : {}
+              ),
               ...imageVars,
             },
           }
@@ -2816,9 +2872,11 @@ function Inbox({ pageMode = 'inbox' }) {
             name: templateName,
             content: resolvedText,
             variables: {
-              ...(item.variables && typeof item.variables === 'object' && !Array.isArray(item.variables)
-                ? item.variables
-                : {}),
+              ...stripStoredHeaderMediaVars(
+                item.variables && typeof item.variables === 'object' && !Array.isArray(item.variables)
+                  ? item.variables
+                  : {}
+              ),
               ...imageVars,
             },
             components: Array.isArray(item.components) ? item.components : undefined,
@@ -2827,8 +2885,6 @@ function Inbox({ pageMode = 'inbox' }) {
         content: resolvedText,
         templateName,
         isTemplate: true,
-        mediaUrl: resolvedHeaderMediaUrl,
-        headerImageUrl: resolvedHeaderMediaUrl,
       });
       if (templatePreview && needsHeaderMedia) {
         const fmt =
@@ -2841,12 +2897,8 @@ function Inbox({ pageMode = 'inbox' }) {
         templatePreview = {
           ...templatePreview,
           headerFormat: fmt,
-          headerImageUrl: templatePreview.headerImageUrl || resolvedHeaderMediaUrl || null,
-          header:
-            templatePreview.header ||
-            (resolvedHeaderMediaUrl
-              ? { type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase(), url: resolvedHeaderMediaUrl }
-              : { type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase() }),
+          headerImageUrl: null,
+          header: { type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase() },
         };
       }
     }
@@ -2854,7 +2906,7 @@ function Inbox({ pageMode = 'inbox' }) {
     setIntervenePreviewItem({
       ...(typeof item === 'object' && item ? item : { insertValue: raw }),
       resolvedText: resolvedText || String(item?.templateName || 'Template'),
-      headerMediaUrl: resolvedHeaderMediaUrl || item?.headerMediaUrl || null,
+      headerMediaUrl: null,
       templatePreview,
     });
   };
@@ -2873,6 +2925,10 @@ function Inbox({ pageMode = 'inbox' }) {
     const item = intervenePreviewItem;
     if (!item) return;
     try {
+      if (isHistoryPage && item?.mode !== 'template') {
+        alert('Only approved templates can be sent from History.');
+        return;
+      }
       // Template option: send as real approved template (not plain text insert).
       if (item && typeof item === 'object' && item.mode === 'template') {
         const phone = selectedContact?.phone;
@@ -2884,11 +2940,7 @@ function Inbox({ pageMode = 'inbox' }) {
         const nowIso = new Date().toISOString();
         const resolvedBody = String(item.resolvedText || resolveTemplatePlaceholders(String(item?.insertValue || ''), selectedContact));
         const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
-        const headerMediaUrl =
-          item.headerMediaUrl ||
-          resolveTemplateHeaderMediaUrl(item) ||
-          resolveTemplateHeaderMediaUrl(catalogHit) ||
-          null;
+        const headerMediaUrl = item.headerMediaUrl || null;
         const needsHeaderMedia =
           templateNeedsHeaderMedia(catalogHit) ||
           templateNeedsHeaderMedia(item) ||
@@ -3756,17 +3808,22 @@ function Inbox({ pageMode = 'inbox' }) {
   const isHistoryTab = isHistoryPage;
   const isIntervenedTab = !isHistoryPage && inboxTab === 'intervened';
   const selectedPhone = selectedContact?.phone;
-  const contactStatusLower = String(selectedContact?.chatStatus || '').toLowerCase();
+  const contactStatusLower = String(selectedContact?.chatStatus || selectedContact?.status || '').toLowerCase();
   const isIntervenedChat =
     isIntervenedTab ||
     (selectedPhone && intervenedPhones[selectedPhone]) ||
     contactStatusLower === 'intervened';
+  const isHistoryIntervened =
+    isHistoryTab &&
+    Boolean(selectedPhone) &&
+    (Boolean(intervenedPhones[selectedPhone]) || contactStatusLower === 'intervened');
   const planBlocked = planInfoLoaded && !planInfo?.active;
   const canHumanReply =
-    !isHistoryTab &&
     !planBlocked &&
     Boolean(selectedContact?.conversationId || selectedContact?.phone) &&
-    (isIntervenedChat || contactStatusLower === 'active' || inboxTab === 'active');
+    (isHistoryIntervened ||
+      (!isHistoryTab &&
+        (isIntervenedChat || contactStatusLower === 'active' || inboxTab === 'active')));
   const showAdminIntervenedActions =
     isAdminOrManager &&
     Boolean(selectedContact?.conversationId) &&
@@ -3776,11 +3833,12 @@ function Inbox({ pageMode = 'inbox' }) {
       contactStatusLower === 'active' ||
       inboxTab === 'active');
   const showInterveneBar =
-    !isHistoryTab &&
-    !isIntervenedTab &&
     selectedContact?.phone &&
     !canHumanReply &&
-    messages.some((m) => m.type === 'incoming');
+    ((isHistoryTab && !isHistoryIntervened) ||
+      (!isHistoryTab &&
+        !isIntervenedTab &&
+        messages.some((m) => m.type === 'incoming')));
 
   if (loading && !user) {
     return (
@@ -4473,7 +4531,7 @@ function Inbox({ pageMode = 'inbox' }) {
 
             {isHistoryPage && (
               <div className="px-3 py-2 border-b border-gray-200/80 bg-slate-50 text-xs text-slate-600 shrink-0">
-                Chats older than 24 hours — read only
+                Chats older than 24 hours — intervene to send approved templates
               </div>
             )}
 
@@ -4870,17 +4928,14 @@ function Inbox({ pageMode = 'inbox' }) {
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* History: read-only */}
-                {isHistoryTab && selectedContact?.phone && (
-                  <div className="bg-slate-50 border-t border-slate-200 px-6 py-4 text-center text-sm text-slate-600">
-                    This chat is in History (older than 24 hours). You can read messages only.
-                  </div>
-                )}
-
-                {/* In-chat Intervene bar — requesting / bot only (Active already allows reply) */}
+                {/* In-chat Intervene bar — requesting / bot / history */}
                 {showInterveneBar && (
                   <div className="bg-gradient-to-r from-amber-50/95 via-amber-50/80 to-orange-50/60 border-t border-amber-200/80 px-6 py-3 flex items-center justify-center gap-3 flex-wrap shadow-inner motion-enter">
-                    <span className="text-sm text-amber-900/90 font-medium">New customer message — take over the conversation</span>
+                    <span className="text-sm text-amber-900/90 font-medium">
+                      {isHistoryTab
+                        ? 'History chat — intervene to send an approved template'
+                        : 'New customer message — take over the conversation'}
+                    </span>
                     <button
                       type="button"
                       onClick={async () => {
@@ -4902,6 +4957,11 @@ function Inbox({ pageMode = 'inbox' }) {
                               } catch (e) {}
                               return next;
                             });
+                            setSelectedContact((prev) =>
+                              prev && prev.phone === phone
+                                ? { ...prev, chatStatus: 'intervened', status: 'intervened' }
+                                : prev
+                            );
                             fetchInboxList(false);
                             fetchSectionChatsRef.current?.(false);
                           } else {
@@ -4918,7 +4978,7 @@ function Inbox({ pageMode = 'inbox' }) {
                   </div>
                 )}
 
-                {!isHistoryTab && planBlocked && selectedContact?.phone && (
+                {planBlocked && selectedContact?.phone && (!isHistoryTab || isHistoryIntervened) && (
                   <div className="bg-gradient-to-r from-rose-50 via-orange-50 to-amber-50 border-t border-rose-200/80 px-6 py-4 text-center shadow-inner">
                     <p className="text-sm font-semibold text-rose-900">
                       Your plan has ended. Recharge now to send messages.
@@ -4933,14 +4993,19 @@ function Inbox({ pageMode = 'inbox' }) {
                   </div>
                 )}
 
-                {/* Message Input — Active + Intervened (AiSensy: reply after Accept) */}
-                {!isHistoryTab && (
+                {/* Message Input — Active + Intervened; History allows approved templates only after intervene */}
+                {(!isHistoryTab || isHistoryIntervened) && (
                 <div className="bg-white/95 backdrop-blur-md border-t border-sky-100/80 px-6 py-4 flex justify-center items-center flex-wrap gap-2 shadow-[0_-8px_28px_-12px_rgba(14,165,233,0.18)]">
                   {selectedContact?.phone && (
                     canHumanReply ? (
                       <form onSubmit={handleSendMessage} className="flex flex-col gap-2 flex-1 min-w-[220px] max-w-2xl">
                         <div className="relative w-full">
-                          <div className="flex items-center justify-end mb-2">
+                          <div className={`flex items-center ${isHistoryIntervened ? 'justify-between' : 'justify-end'} mb-2`}>
+                            {isHistoryIntervened && (
+                              <span className="text-xs font-medium text-sky-800/90">
+                                Send approved template only
+                              </span>
+                            )}
                             <button
                               type="button"
                               onClick={() => {
@@ -4952,10 +5017,10 @@ function Inbox({ pageMode = 'inbox' }) {
                               }}
                               disabled={loadingInterveneOptions || sending}
                               className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border-2 border-gray-200/90 rounded-xl text-xs font-semibold text-gray-800 hover:bg-sky-50/80 hover:border-sky-200/70 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-sm"
-                              title="Insert canned message or approved template"
+                              title={isHistoryIntervened ? 'Choose an approved template to send' : 'Insert canned message or approved template'}
                             >
                               <span className="text-base leading-none">📋</span>
-                              Insert
+                              {isHistoryIntervened ? 'Choose Template' : 'Insert'}
                             </button>
                           </div>
 
@@ -4966,7 +5031,11 @@ function Inbox({ pageMode = 'inbox' }) {
                             >
                               <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-sky-50/40 border-b border-gray-100 flex items-center justify-between gap-2 shrink-0">
                                 <div className="text-sm font-bold text-gray-900 tracking-tight">
-                                  {intervenePreviewItem ? 'Preview message' : 'Quick Insert'}
+                                  {intervenePreviewItem
+                                    ? 'Preview message'
+                                    : isHistoryIntervened
+                                      ? 'Approved Templates'
+                                      : 'Quick Insert'}
                                 </div>
                                 <button
                                   type="button"
@@ -5036,7 +5105,7 @@ function Inbox({ pageMode = 'inbox' }) {
                                     type="text"
                                     value={insertOptionSearch}
                                     onChange={(e) => setInsertOptionSearch(e.target.value)}
-                                    placeholder="Search canned or template by name"
+                                    placeholder={isHistoryIntervened ? 'Search template by name' : 'Search canned or template by name'}
                                     className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-sky-400/40 focus:border-sky-400 outline-none"
                                   />
                                 </div>
@@ -5054,6 +5123,7 @@ function Inbox({ pageMode = 'inbox' }) {
                                       </div>
                                     )}
 
+                                    {!isHistoryIntervened && (
                                     <div className="px-4 py-3">
                                       <div className="text-xs font-bold text-sky-700 uppercase tracking-wide mb-2">Canned Messages</div>
                                       {(() => {
@@ -5091,8 +5161,9 @@ function Inbox({ pageMode = 'inbox' }) {
                                         );
                                       })()}
                                     </div>
+                                    )}
 
-                                    <div className="border-t border-gray-100" />
+                                    {!isHistoryIntervened && <div className="border-t border-gray-100" />}
 
                                     <div className="px-4 py-3">
                                       <div className="text-xs font-bold text-sky-700 uppercase tracking-wide mb-2">Approved Templates</div>
@@ -5141,6 +5212,11 @@ function Inbox({ pageMode = 'inbox' }) {
                           )}
                         </div>
 
+                        {isHistoryIntervened ? (
+                          <p className="text-xs text-gray-500 text-center py-1">
+                            Choose an approved template above to re-engage this customer.
+                          </p>
+                        ) : (
                         <div className="flex gap-2">
                           <input
                             type="text"
@@ -5158,6 +5234,7 @@ function Inbox({ pageMode = 'inbox' }) {
                             {sending ? 'Sending...' : 'Send'}
                           </button>
                         </div>
+                        )}
                       </form>
                     ) : (
                       <button
@@ -5181,7 +5258,13 @@ function Inbox({ pageMode = 'inbox' }) {
                                 } catch (e) {}
                                 return next;
                               });
+                              setSelectedContact((prev) =>
+                                prev && prev.phone === phone
+                                  ? { ...prev, chatStatus: 'intervened', status: 'intervened' }
+                                  : prev
+                              );
                               fetchInboxList(false);
+                              fetchSectionChatsRef.current?.(false);
                             } else {
                               alert(result?.message || 'Failed to intervene');
                             }

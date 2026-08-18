@@ -1345,28 +1345,18 @@ function LiveChatPage() {
     setInsertError("");
 
     let templatePreview = null;
-    let resolvedHeaderMediaUrl = null;
     if (item.mode === "template" || item.kind === "template") {
       const templateName = String(item.templateName || "").trim();
       const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
-      resolvedHeaderMediaUrl =
-        resolveTemplateHeaderMediaUrl(catalogHit) ||
-        resolveTemplateHeaderMediaUrl(item) ||
-        item.headerMediaUrl ||
-        null;
-      const isImageTemplate =
-        Boolean(resolvedHeaderMediaUrl) ||
-        templateHasImageHeader(catalogHit) ||
-        templateHasImageHeader(item);
       const needsHeaderMedia =
-        templateNeedsHeaderMedia(catalogHit) ||
-        templateNeedsHeaderMedia(item) ||
-        isImageTemplate;
+        templateNeedsHeaderMedia(catalogHit) || templateNeedsHeaderMedia(item);
+      const stripStoredHeaderMediaVars = (vars) => {
+        if (!vars || typeof vars !== "object" || Array.isArray(vars)) return {};
+        const { headerMediaUrl, header_media_url, ...rest } = vars;
+        return rest;
+      };
       const imageVars = needsHeaderMedia
         ? {
-            ...(resolvedHeaderMediaUrl
-              ? { headerMediaUrl: resolvedHeaderMediaUrl, header_media_url: resolvedHeaderMediaUrl }
-              : {}),
             templateType:
               String(catalogHit?.variables?.templateType || item?.variables?.templateType || "image")
                 .toLowerCase() || "image",
@@ -1376,11 +1366,13 @@ function LiveChatPage() {
         ? {
             ...catalogHit,
             variables: {
-              ...(catalogHit.variables &&
-              typeof catalogHit.variables === "object" &&
-              !Array.isArray(catalogHit.variables)
-                ? catalogHit.variables
-                : {}),
+              ...stripStoredHeaderMediaVars(
+                catalogHit.variables &&
+                typeof catalogHit.variables === "object" &&
+                !Array.isArray(catalogHit.variables)
+                  ? catalogHit.variables
+                  : {}
+              ),
               ...imageVars,
             },
           }
@@ -1388,11 +1380,13 @@ function LiveChatPage() {
             name: templateName,
             content: resolvedText,
             variables: {
-              ...(item.variables &&
-              typeof item.variables === "object" &&
-              !Array.isArray(item.variables)
-                ? item.variables
-                : {}),
+              ...stripStoredHeaderMediaVars(
+                item.variables &&
+                typeof item.variables === "object" &&
+                !Array.isArray(item.variables)
+                  ? item.variables
+                  : {}
+              ),
               ...imageVars,
             },
             components: Array.isArray(item.components) ? item.components : undefined,
@@ -1401,8 +1395,6 @@ function LiveChatPage() {
         content: resolvedText,
         templateName,
         isTemplate: true,
-        mediaUrl: resolvedHeaderMediaUrl,
-        headerImageUrl: resolvedHeaderMediaUrl,
       });
       if (templatePreview && needsHeaderMedia) {
         const fmt =
@@ -1415,12 +1407,8 @@ function LiveChatPage() {
         templatePreview = {
           ...templatePreview,
           headerFormat: fmt,
-          headerImageUrl: templatePreview.headerImageUrl || resolvedHeaderMediaUrl || null,
-          header:
-            templatePreview.header ||
-            (resolvedHeaderMediaUrl
-              ? { type: fmt === "IMAGE" ? "image" : fmt.toLowerCase(), url: resolvedHeaderMediaUrl }
-              : { type: fmt === "IMAGE" ? "image" : fmt.toLowerCase() }),
+          headerImageUrl: null,
+          header: { type: fmt === "IMAGE" ? "image" : fmt.toLowerCase() },
         };
       }
     }
@@ -1429,7 +1417,7 @@ function LiveChatPage() {
       ...item,
       rawText,
       resolvedText: resolvedText || String(item.templateName || "Template"),
-      headerMediaUrl: resolvedHeaderMediaUrl || item.headerMediaUrl || null,
+      headerMediaUrl: null,
       templatePreview,
     });
   };
@@ -1461,11 +1449,7 @@ function LiveChatPage() {
 
         const resolvedBody = String(insertPreviewItem.resolvedText || "").trim();
         const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
-        const headerMediaUrl =
-          insertPreviewItem.headerMediaUrl ||
-          resolveTemplateHeaderMediaUrl(insertPreviewItem) ||
-          resolveTemplateHeaderMediaUrl(catalogHit) ||
-          null;
+        const headerMediaUrl = insertPreviewItem.headerMediaUrl || null;
         const needsHeaderMedia =
           templateNeedsHeaderMedia(catalogHit) ||
           templateNeedsHeaderMedia(insertPreviewItem) ||

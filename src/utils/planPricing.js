@@ -2,11 +2,30 @@ export const PLAN_MONTHLY_DEFAULT = 750;
 export const QUARTERLY_DISCOUNT = 0.1;
 export const YEARLY_DISCOUNT = 0.15;
 
-export const PLAN_DISCOUNT_LABEL = {
-  monthly: '',
-  quarterly: '10% Off',
-  yearly: '15% Off',
+/** Resolve admin-configurable billing cycle discount percentages. */
+export const resolveDiscountConfig = (discounts) => {
+  const q = Number(discounts?.quarterlyPercent);
+  const y = Number(discounts?.yearlyPercent);
+  const quarterlyPercent = Number.isFinite(q) ? Math.min(100, Math.max(0, q)) : QUARTERLY_DISCOUNT * 100;
+  const yearlyPercent = Number.isFinite(y) ? Math.min(100, Math.max(0, y)) : YEARLY_DISCOUNT * 100;
+  return {
+    quarterlyPercent,
+    yearlyPercent,
+    quarterlyRate: quarterlyPercent / 100,
+    yearlyRate: yearlyPercent / 100,
+  };
 };
+
+export const buildPlanDiscountLabels = (discounts) => {
+  const cfg = resolveDiscountConfig(discounts);
+  return {
+    monthly: '',
+    quarterly: cfg.quarterlyPercent > 0 ? `${cfg.quarterlyPercent}% Off` : '',
+    yearly: cfg.yearlyPercent > 0 ? `${cfg.yearlyPercent}% Off` : '',
+  };
+};
+
+export const PLAN_DISCOUNT_LABEL = buildPlanDiscountLabels();
 
 export const PLAN_HIGHLIGHTS = [
   'Unlimited Agents',
@@ -143,30 +162,33 @@ export function getBillingCategoryLabel(category, metrics = CONVERSATION_METRICS
   return match?.label || 'Marketing';
 }
 
-export const discountedMonthlyRate = (monthly, cycle) => {
+export const discountedMonthlyRate = (monthly, cycle, discounts = null) => {
   const m = Math.max(0, Number(monthly) || 0);
-  if (cycle === 'quarterly') return Math.round(m * (1 - QUARTERLY_DISCOUNT) * 100) / 100;
-  if (cycle === 'yearly') return Math.round(m * (1 - YEARLY_DISCOUNT) * 100) / 100;
+  const cfg = resolveDiscountConfig(discounts);
+  if (cycle === 'quarterly') return Math.round(m * (1 - cfg.quarterlyRate) * 100) / 100;
+  if (cycle === 'yearly') return Math.round(m * (1 - cfg.yearlyRate) * 100) / 100;
   return m;
 };
 
-export const cycleBillingAmount = (monthly, cycle) => {
+export const cycleBillingAmount = (monthly, cycle, discounts = null) => {
   const m = Math.max(0, Number(monthly) || 0);
-  if (cycle === 'quarterly') return Math.round(discountedMonthlyRate(m, 'quarterly') * 3 * 100) / 100;
-  if (cycle === 'yearly') return Math.round(discountedMonthlyRate(m, 'yearly') * 12 * 100) / 100;
+  if (cycle === 'quarterly') return Math.round(discountedMonthlyRate(m, 'quarterly', discounts) * 3 * 100) / 100;
+  if (cycle === 'yearly') return Math.round(discountedMonthlyRate(m, 'yearly', discounts) * 12 * 100) / 100;
   return m;
 };
 
-export const computeQuarterlyFromMonthly = (monthly) => cycleBillingAmount(monthly, 'quarterly');
-export const computeYearlyFromMonthly = (monthly) => cycleBillingAmount(monthly, 'yearly');
+export const computeQuarterlyFromMonthly = (monthly, discounts = null) =>
+  cycleBillingAmount(monthly, 'quarterly', discounts);
+export const computeYearlyFromMonthly = (monthly, discounts = null) =>
+  cycleBillingAmount(monthly, 'yearly', discounts);
 
-export const withDerivedPricesFromMonthly = (monthly) => {
+export const withDerivedPricesFromMonthly = (monthly, discounts = null) => {
   const m = String(monthly ?? '');
   const monthlyNum = Number(m) || 0;
   return {
     price_monthly: m,
-    price_quarterly: computeQuarterlyFromMonthly(monthlyNum),
-    price_yearly: computeYearlyFromMonthly(monthlyNum),
+    price_quarterly: computeQuarterlyFromMonthly(monthlyNum, discounts),
+    price_yearly: computeYearlyFromMonthly(monthlyNum, discounts),
   };
 };
 
@@ -198,13 +220,15 @@ export const resolvePlanBillingAmount = (plan, cycle) => {
   return cycleBillingAmount(monthly, cycle);
 };
 
-export const buildCycleOptions = (monthly, plan = null, currency = 'INR') => {
+export const buildCycleOptions = (monthly, plan = null, currency = 'INR', discounts = null) => {
   const isUsd = !isInrCurrency(currency);
   const fmt = (v) => (isUsd ? `$${formatUsd(v)}` : `Rs. ${formatInr(v)}`);
   const baseMonthly = Math.max(0, Number(monthly) || Number(plan?.price_monthly) || PLAN_MONTHLY_DEFAULT);
+  const discountLabels = buildPlanDiscountLabels(discounts);
+  const cfg = resolveDiscountConfig(discounts);
   return ['monthly', 'quarterly', 'yearly'].map((cycle) => {
-    const billingAmount = cycleBillingAmount(baseMonthly, cycle);
-    const discountedMonthly = discountedMonthlyRate(baseMonthly, cycle);
+    const billingAmount = cycleBillingAmount(baseMonthly, cycle, discounts);
+    const discountedMonthly = discountedMonthlyRate(baseMonthly, cycle, discounts);
     const savings =
       cycle === 'monthly'
         ? 0
@@ -212,9 +236,9 @@ export const buildCycleOptions = (monthly, plan = null, currency = 'INR') => {
 
     let billingNote = 'Billed monthly recurring base subscription.';
     if (cycle === 'quarterly') {
-      billingNote = `Billed ${fmt(billingAmount)} quarterly (−10% Applied)`;
+      billingNote = `Billed ${fmt(billingAmount)} quarterly${cfg.quarterlyPercent > 0 ? ` (−${cfg.quarterlyPercent}% Applied)` : ''}`;
     } else if (cycle === 'yearly') {
-      billingNote = `Billed ${fmt(billingAmount)} annually (−15% Applied)`;
+      billingNote = `Billed ${fmt(billingAmount)} annually${cfg.yearlyPercent > 0 ? ` (−${cfg.yearlyPercent}% Applied)` : ''}`;
     }
 
     return {
@@ -223,7 +247,7 @@ export const buildCycleOptions = (monthly, plan = null, currency = 'INR') => {
       billingAmount,
       discountedMonthly,
       savings,
-      discountLabel: PLAN_DISCOUNT_LABEL[cycle],
+      discountLabel: discountLabels[cycle],
       periodLabel: cycle === 'monthly' ? 'month' : cycle === 'quarterly' ? 'quarter' : 'year',
       months: cycle === 'monthly' ? 1 : cycle === 'quarterly' ? 3 : 12,
       perProjectLabel: `${fmt(discountedMonthly)} /project /mo`,
@@ -233,13 +257,14 @@ export const buildCycleOptions = (monthly, plan = null, currency = 'INR') => {
   });
 };
 
-export const buildPricingBreakdown = (monthly, cycle, plan = null, currency = 'INR') => {
+export const buildPricingBreakdown = (monthly, cycle, plan = null, currency = 'INR', discounts = null) => {
   const isUsd = !isInrCurrency(currency);
   const fmt = (v) => (isUsd ? `$${formatUsd(v)}` : `Rs. ${formatInr(v)}`);
   const baseMonthly = Math.max(0, Number(monthly) || Number(plan?.price_monthly) || PLAN_MONTHLY_DEFAULT);
-  const billingAmount = cycleBillingAmount(baseMonthly, cycle);
+  const billingAmount = cycleBillingAmount(baseMonthly, cycle, discounts);
   const gst = isUsd ? 0 : gstAmount(billingAmount);
   const total = isUsd ? billingAmount : payableWithGst(billingAmount);
+  const cfg = resolveDiscountConfig(discounts);
 
   if (cycle === 'monthly') {
     return {
@@ -257,7 +282,7 @@ export const buildPricingBreakdown = (monthly, cycle, plan = null, currency = 'I
   }
 
   if (cycle === 'quarterly') {
-    const discounted = discountedMonthlyRate(baseMonthly, 'quarterly');
+    const discounted = discountedMonthlyRate(baseMonthly, 'quarterly', discounts);
     return {
       baseMonthly,
       discountedMonthly: discounted,
@@ -267,15 +292,15 @@ export const buildPricingBreakdown = (monthly, cycle, plan = null, currency = 'I
       currency: isUsd ? 'USD' : 'INR',
       lines: [
         { label: 'Monthly base price', value: baseMonthly },
-        { label: 'After 10% discount', value: discounted, highlight: true },
+        { label: `After ${cfg.quarterlyPercent}% discount`, value: discounted, highlight: true },
         { label: 'Quarterly total (× 3 months)', value: billingAmount },
         ...(isUsd ? [] : [{ label: 'GST (18%)', value: gst, muted: true }]),
       ],
-      summary: `Billed ${fmt(billingAmount)} quarterly (−10% Applied)`,
+      summary: `Billed ${fmt(billingAmount)} quarterly${cfg.quarterlyPercent > 0 ? ` (−${cfg.quarterlyPercent}% Applied)` : ''}`,
     };
   }
 
-  const discounted = discountedMonthlyRate(baseMonthly, 'yearly');
+  const discounted = discountedMonthlyRate(baseMonthly, 'yearly', discounts);
   return {
     baseMonthly,
     discountedMonthly: discounted,
@@ -285,10 +310,10 @@ export const buildPricingBreakdown = (monthly, cycle, plan = null, currency = 'I
     currency: isUsd ? 'USD' : 'INR',
     lines: [
       { label: 'Monthly base price', value: baseMonthly },
-      { label: 'After 15% discount', value: discounted, highlight: true },
+      { label: `After ${cfg.yearlyPercent}% discount`, value: discounted, highlight: true },
       { label: 'Yearly total (× 12 months)', value: billingAmount },
       ...(isUsd ? [] : [{ label: 'GST (18%)', value: gst, muted: true }]),
     ],
-    summary: `Billed ${fmt(billingAmount)} annually (−15% Applied)`,
+    summary: `Billed ${fmt(billingAmount)} annually${cfg.yearlyPercent > 0 ? ` (−${cfg.yearlyPercent}% Applied)` : ''}`,
   };
 };

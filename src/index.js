@@ -5,8 +5,10 @@ import App from './App';
 import reportWebVitals from './reportWebVitals';
 import { ThemeProvider } from './context/ThemeContext';
 import { applyThemeClass, getStoredTheme } from './theme/themeStorage';
+import { installSessionExpiryHandlers } from './services/sessionExpiryService';
 
 applyThemeClass(getStoredTheme());
+installSessionExpiryHandlers();
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(

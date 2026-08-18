@@ -1,6 +1,7 @@
 import React from 'react';
 import MessageBubble from './MessageBubble';
 import { formatWhatsAppBody } from '../../utils/whatsappTemplatePreview';
+import { resolvePublicMediaUrl } from '../../utils/mediaUrl';
 
 function extractOutgoingButtons(message) {
   const interactive = message?.interactive || message?.payload?.interactive;
@@ -19,7 +20,7 @@ function extractOutgoingButtons(message) {
 }
 
 /** Incoming button reply OR outgoing interactive button card */
-export default function InteractiveMessage({ message, align, formatTime, status }) {
+export default function InteractiveMessage({ message, align, formatTime, status, apiBase }) {
   const isOutgoing = message?.type === 'outgoing' || message?.sender === 'agent';
   const outgoingButtons = isOutgoing ? extractOutgoingButtons(message) : [];
   const bodyText = String(
@@ -28,12 +29,50 @@ export default function InteractiveMessage({ message, align, formatTime, status 
       message?.payload?.interactive?.body?.text ||
       ''
   ).trim();
+  const headerType = String(
+    message?.interactive?.header?.type ||
+      message?.payload?.interactive?.header?.type ||
+      'image'
+  ).toLowerCase();
+  const headerImageUrl =
+    message?.mediaUrl ||
+    message?.interactive?.header?.image?.link ||
+    message?.payload?.interactive?.header?.image?.link ||
+    message?.interactive?.header?.video?.link ||
+    message?.payload?.interactive?.header?.video?.link ||
+    null;
+  const resolvedHeaderSrc = headerImageUrl
+    ? resolvePublicMediaUrl(headerImageUrl, apiBase)
+    : '';
 
   if (isOutgoing && outgoingButtons.length > 0) {
     return (
       <div className={`flex mb-3 ${align === 'right' || isOutgoing ? 'justify-end' : 'justify-start'}`}>
         <div className="max-w-[min(100%,320px)] sm:max-w-sm w-full">
           <div className="overflow-hidden rounded-[7px] bg-white shadow-[0_1px_0.5px_rgba(11,20,26,0.13)]">
+            {resolvedHeaderSrc && (headerType === 'image' || headerType === 'video') ? (
+              headerType === 'video' ? (
+                <video
+                  src={resolvedHeaderSrc}
+                  className="w-full max-h-72 object-cover block bg-gray-100"
+                  controls
+                  muted
+                  playsInline
+                />
+              ) : (
+                <div className="w-full bg-gray-100">
+                  <img
+                    src={resolvedHeaderSrc}
+                    alt=""
+                    className="w-full max-h-72 object-cover block"
+                    onClick={() => window.open(resolvedHeaderSrc, '_blank')}
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                    }}
+                  />
+                </div>
+              )
+            ) : null}
             {bodyText ? (
               <div className="px-3.5 py-2.5">
                 <p className="text-[13px] leading-[1.45] text-gray-900 whitespace-pre-wrap break-words">

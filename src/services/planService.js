@@ -8,12 +8,26 @@ export const fetchActivePlans = async () => {
     plans,
     country: data.country || 'IN',
     currency: data.currency || 'INR',
+    discounts: data.discounts || null,
   };
 };
 
 export const fetchAdminPlans = async () => {
   const res = await axios.get('/admin/plans');
-  return Array.isArray(res?.data?.plans) ? res.data.plans : [];
+  return {
+    plans: Array.isArray(res?.data?.plans) ? res.data.plans : [],
+    discounts: res?.data?.discounts || null,
+  };
+};
+
+export const fetchAdminPlanDiscounts = async () => {
+  const res = await axios.get('/admin/plan-discounts');
+  return res?.data?.discounts || { quarterlyPercent: 10, yearlyPercent: 15 };
+};
+
+export const updateAdminPlanDiscounts = async (payload) => {
+  const res = await axios.put('/admin/plan-discounts', payload);
+  return res?.data?.discounts || payload;
 };
 
 export const createPlan = async (payload) => {

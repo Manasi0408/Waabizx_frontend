@@ -1,4 +1,8 @@
 import axios from "axios";
+import {
+  handleSessionExpired,
+  shouldHandleSessionExpired,
+} from "../services/sessionExpiryService";
 
 const instance = axios.create({
   // baseURL: "https://wabizx.techwhizzc.com/api"
@@ -11,6 +15,7 @@ instance.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  config.__hadAuthToken = Boolean(token);
   try {
     const raw = localStorage.getItem("selectedProject");
     if (raw) {
@@ -23,5 +28,18 @@ instance.interceptors.request.use((config) => {
   } catch (_) {}
   return config;
 });
+
+instance.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status;
+    const url = error?.config?.url || error?.config?.baseURL || "";
+    const hadAuth = Boolean(error?.config?.__hadAuthToken);
+    if (status === 401 && shouldHandleSessionExpired(url, hadAuth)) {
+      handleSessionExpired();
+    }
+    return Promise.reject(error);
+  }
+);
 
 export default instance;

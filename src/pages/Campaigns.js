@@ -11,13 +11,15 @@ import {
   pauseCampaign,
   resumeCampaign,
   getCampaignById,
-  getCampaignAudience
+  getCampaignAudience,
+  getCampaignRetryPrefill
 } from '../services/campaignService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
-import { uploadCSV } from '../services/broadcastService';
+import { uploadCSV, uploadBroadcastHeaderMedia } from '../services/broadcastService';
+import { getTemplates, getTemplateById, getMetaTemplateDetails } from '../services/templateService';
 import {
   estimateCampaignMessageCost,
   formatInr,
@@ -26,7 +28,128 @@ import {
 } from '../utils/planPricing';
 import PlanLimitModal from '../components/PlanLimitModal';
 import { extractPlanLimitError, assertCanAddResource } from '../services/planLimitService';
+import FlowMediaAttachField from '../components/FlowMediaLibraryField';
+import { resolvePublicMediaUrl, toPermanentUploadPath } from '../utils/mediaUrl';
 // Campaign creation now uses parse-only CSV upload (no heavy contact loading)
+
+function campaignNeedsHeaderMedia(format) {
+  const f = String(format || '').toUpperCase();
+  return ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(f);
+}
+
+function getTemplateHeaderFormat(template) {
+  const components = Array.isArray(template?.components) ? template.components : [];
+  const header = components.find((c) => String(c.type || '').toUpperCase() === 'HEADER');
+  if (header?.format) return String(header.format).toUpperCase();
+  const templateType = String(template?.variables?.templateType || '').toLowerCase();
+  if (templateType === 'image') return 'IMAGE';
+  if (templateType === 'video') return 'VIDEO';
+  if (templateType === 'document') return 'DOCUMENT';
+  return null;
+}
+
+const RECHURN_STATUS_META = {
+  sent: { label: 'Sent', title: 'Rebroadcast to sent recipients' },
+  delivered: { label: 'Delivered', title: 'Rebroadcast to delivered recipients' },
+  read: { label: 'Read', title: 'Rebroadcast to read recipients' },
+  failed: { label: 'Failed', title: 'Rebroadcast to failed recipients' },
+};
+
+async function prepareImageHeaderForUpload(file) {
+  const mime = String(file.type || '').toLowerCase();
+  const name = String(file.name || '');
+  const isJpegOrPng =
+    mime === 'image/jpeg' ||
+    mime === 'image/jpg' ||
+    mime === 'image/png' ||
+    /\.(jpe?g|png)$/i.test(name);
+  if (isJpegOrPng || typeof createImageBitmap !== 'function') return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      bitmap.close?.();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+    if (!blob) return file;
+    const baseName = name.replace(/\.[^.]+$/, '') || 'header-image';
+    return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: file.lastModified });
+  } catch {
+    return file;
+  }
+}
+
+async function resolveRetryTemplate(template) {
+  if (!template) return null;
+
+  let resolved = { ...template };
+  if (!Array.isArray(resolved.components) || !resolved.components.length) {
+    const fromVars = resolved.variables?.components;
+    if (Array.isArray(fromVars) && fromVars.length) {
+      resolved.components = fromVars;
+    }
+  }
+
+  if (resolved.id) {
+    try {
+      const full = await getTemplateById(resolved.id);
+      if (full) {
+        resolved = {
+          ...resolved,
+          ...full,
+          variables:
+            typeof full.variables === 'object' && !Array.isArray(full.variables)
+              ? { ...(resolved.variables || {}), ...full.variables }
+              : resolved.variables,
+          components: full.components || full.variables?.components || resolved.components,
+          metaTemplateId: full.metaTemplateId || resolved.metaTemplateId,
+        };
+      }
+    } catch (_) {
+      /* optional */
+    }
+  }
+
+  const metaId = resolved.metaTemplateId;
+  if (metaId) {
+    try {
+      const details = await getMetaTemplateDetails(metaId);
+      if (details?.components?.length) {
+        const header = details.components.find((c) => String(c.type || '').toUpperCase() === 'HEADER');
+        const format = String(header?.format || '').toUpperCase();
+        const templateType =
+          format === 'IMAGE' ? 'image' : format === 'VIDEO' ? 'video' : format === 'DOCUMENT' ? 'document' : 'text';
+        resolved = {
+          ...resolved,
+          language: details.language || resolved.language,
+          components: details.components,
+          content:
+            details.components.find((c) => String(c.type || '').toUpperCase() === 'BODY')?.text ||
+            resolved.content,
+          variables: {
+            ...(typeof resolved.variables === 'object' && !Array.isArray(resolved.variables)
+              ? resolved.variables
+              : {}),
+            templateType,
+            language: details.language || resolved.variables?.language,
+            components: details.components,
+          },
+        };
+      }
+    } catch (_) {
+      /* optional */
+    }
+  }
+
+  return resolved;
+}
 
 function Campaigns() {
   const navigate = useNavigate();
@@ -44,6 +167,18 @@ function Campaigns() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [showAudienceModal, setShowAudienceModal] = useState(false);
+  const [showRetryModal, setShowRetryModal] = useState(false);
+  const [retryPrefill, setRetryPrefill] = useState(null);
+  const [retryStatus, setRetryStatus] = useState('failed');
+  const [loadingRetryPrefill, setLoadingRetryPrefill] = useState(false);
+  const [isRetryCreate, setIsRetryCreate] = useState(false);
+  const [retryTemplates, setRetryTemplates] = useState([]);
+  const [loadingRetryTemplates, setLoadingRetryTemplates] = useState(false);
+  const [loadingRetryTemplateDetails, setLoadingRetryTemplateDetails] = useState(false);
+  const [headerMediaUploading, setHeaderMediaUploading] = useState(false);
+  const [headerMediaUploadError, setHeaderMediaUploadError] = useState('');
+  const [headerMediaFile, setHeaderMediaFile] = useState(null);
+  const [headerMediaPreviewUrl, setHeaderMediaPreviewUrl] = useState('');
   const [selectedCampaign, setSelectedCampaign] = useState(null);
   const [campaignDetails, setCampaignDetails] = useState(null);
   const [audienceLogs, setAudienceLogs] = useState([]);
@@ -53,6 +188,10 @@ function Campaigns() {
     template_name: '',
     template_language: 'en_US',
     schedule_time: null,
+    header_media_url: null,
+    template_header_format: null,
+    needs_header_media: false,
+    variable_mapping: null,
     audience: [{ phone: '', var1: '', var2: '', var3: '', var4: '', var5: '' }]
   });
   const [saving, setSaving] = useState(false);
@@ -153,6 +292,13 @@ function Campaigns() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.status, filters.type, filters.page]);
 
+  useEffect(() => {
+    if (showCreateModal && !retryTemplates.length) {
+      fetchRetryTemplates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showCreateModal]);
+
   // Close dropdowns when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -225,11 +371,33 @@ function Campaigns() {
         return;
       }
 
+      const needsHeaderMedia =
+        campaignNeedsHeaderMedia(formData.template_header_format) ||
+        Boolean(formData.needs_header_media);
+
+      let headerMediaUrl = formData.header_media_url || null;
+      if (headerMediaFile && !headerMediaUrl) {
+        const uploadFile =
+          campaignNeedsHeaderMedia(formData.template_header_format) &&
+          !String(headerMediaFile.type || '').startsWith('video/') &&
+          formData.template_header_format !== 'DOCUMENT'
+            ? await prepareImageHeaderForUpload(headerMediaFile)
+            : headerMediaFile;
+        const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
+        headerMediaUrl = uploaded.url;
+      } else if (needsHeaderMedia && !headerMediaUrl) {
+        setError('Upload header image/media before creating this campaign.');
+        setSaving(false);
+        return;
+      }
+
       await createCampaign({
         name: formData.name,
         template_name: formData.template_name,
         template_language: formData.template_language,
         schedule_time: formData.schedule_time || null,
+        header_media_url: headerMediaUrl,
+        variable_mapping: formData.variable_mapping || null,
         audience: validAudience.map(a => ({
           phone: a.phone.trim(),
           var1: a.var1 || null,
@@ -239,13 +407,20 @@ function Campaigns() {
           var5: a.var5 || null
         }))
       });
-      setSuccess('Campaign created successfully!');
+      setSuccess(isRetryCreate ? 'Retry campaign created successfully!' : 'Campaign created successfully!');
       setShowCreateModal(false);
+      setIsRetryCreate(false);
+      setHeaderMediaFile(null);
+      setHeaderMediaPreviewUrl('');
       setFormData({
         name: '',
         template_name: '',
         template_language: 'en_US',
         schedule_time: null,
+        header_media_url: null,
+        template_header_format: null,
+        needs_header_media: false,
+        variable_mapping: null,
         audience: [{ phone: '', var1: '', var2: '', var3: '', var4: '', var5: '' }]
       });
       fetchCampaigns();
@@ -381,6 +556,120 @@ function Campaigns() {
     }
   };
 
+  const handleClickRechurn = async (campaign, status) => {
+    const countKey = status === 'failed' ? 'failed' : status;
+    const count = parseInt(campaign[countKey], 10) || 0;
+    if (count <= 0) return;
+
+    setError('');
+    setLoadingRetryPrefill(true);
+    setSelectedCampaign(campaign);
+    setRetryStatus(status);
+    setRetryPrefill(null);
+    setShowRetryModal(true);
+
+    try {
+      const prefill = await getCampaignRetryPrefill(campaign.id, status);
+      setRetryPrefill(prefill);
+    } catch (err) {
+      setError(err.message || 'Failed to load recipients');
+      setShowRetryModal(false);
+    } finally {
+      setLoadingRetryPrefill(false);
+    }
+  };
+
+  const fetchRetryTemplates = async () => {
+    setLoadingRetryTemplates(true);
+    try {
+      const data = await getTemplates({ limit: 200 });
+      const list = (data.templates || []).filter((t) => {
+        const st = String(t.status || '').toLowerCase();
+        const ms = String(t.metaStatus || '').toUpperCase();
+        return st === 'approved' || ms === 'APPROVED';
+      });
+      setRetryTemplates(list);
+    } catch (err) {
+      console.error('Error loading templates for rebroadcast:', err);
+      setRetryTemplates([]);
+    } finally {
+      setLoadingRetryTemplates(false);
+    }
+  };
+
+  const handleRetryTemplateSelect = async (templateName) => {
+    const template = retryTemplates.find((t) => t.name === templateName);
+    setHeaderMediaFile(null);
+    setHeaderMediaPreviewUrl('');
+    setHeaderMediaUploadError('');
+
+    if (!template) {
+      setFormData((prev) => ({
+        ...prev,
+        template_name: templateName,
+        template_language: 'en_US',
+        template_header_format: null,
+        needs_header_media: false,
+        header_media_url: null,
+      }));
+      return;
+    }
+
+    setLoadingRetryTemplateDetails(true);
+    try {
+      const resolved = await resolveRetryTemplate(template);
+      const headerFormat = getTemplateHeaderFormat(resolved || template);
+      const lang =
+        resolved?.language ||
+        template.language ||
+        (typeof template.variables === 'object' && !Array.isArray(template.variables)
+          ? template.variables.language
+          : null) ||
+        'en_US';
+
+      setFormData((prev) => ({
+        ...prev,
+        template_name: template.name,
+        template_language: lang,
+        template_header_format: headerFormat,
+        needs_header_media: campaignNeedsHeaderMedia(headerFormat),
+        header_media_url: null,
+      }));
+    } finally {
+      setLoadingRetryTemplateDetails(false);
+    }
+  };
+
+  const handleConfirmRetryCreate = async () => {
+    if (!retryPrefill) return;
+
+    setHeaderMediaFile(null);
+    setHeaderMediaPreviewUrl('');
+    setFormData({
+      name: retryPrefill.name || `${retryPrefill.sourceCampaignName || 'Campaign'} (${retryStatus} retry)`,
+      template_name: '',
+      template_language: 'en_US',
+      schedule_time: null,
+      header_media_url: null,
+      template_header_format: null,
+      needs_header_media: false,
+      variable_mapping: null,
+      audience: (retryPrefill.audience || []).map((row) => ({
+        phone: row.phone || '',
+        var1: row.var1 || '',
+        var2: row.var2 || '',
+        var3: row.var3 || '',
+        var4: row.var4 || '',
+        var5: row.var5 || '',
+      })),
+    });
+    setIsRetryCreate(true);
+    setShowRetryModal(false);
+    setShowCreateModal(true);
+    setRetryPrefill(null);
+    await fetchRetryTemplates();
+  };
+
   const addAudienceMember = () => {
     setFormData({
       ...formData,
@@ -397,6 +686,37 @@ function Campaigns() {
     const newAudience = [...formData.audience];
     newAudience[index] = { ...newAudience[index], [field]: value };
     setFormData({ ...formData, audience: newAudience });
+  };
+
+  const handleHeaderMediaLibraryChange = ({ mediaUrl: storedUrl, mediaFilename }) => {
+    const previewUrl = resolvePublicMediaUrl(storedUrl) || storedUrl;
+    setHeaderMediaFile(null);
+    setHeaderMediaPreviewUrl(previewUrl);
+    setHeaderMediaUploadError('');
+    setFormData((prev) => ({ ...prev, header_media_url: storedUrl }));
+  };
+
+  const resetCreateModalState = () => {
+    setShowCreateModal(false);
+    setIsRetryCreate(false);
+    setRetryStatus('failed');
+    setRetryTemplates([]);
+    setHeaderMediaUploadError('');
+    setHeaderMediaUploading(false);
+    setHeaderMediaFile(null);
+    setHeaderMediaPreviewUrl('');
+    setFormData({
+      name: '',
+      template_name: '',
+      template_language: 'en_US',
+      schedule_time: null,
+      header_media_url: null,
+      template_header_format: null,
+      needs_header_media: false,
+      variable_mapping: null,
+      audience: [{ phone: '', var1: '', var2: '', var3: '', var4: '', var5: '' }],
+    });
+    setError('');
   };
 
   // Handle CSV upload for audience (same as Broadcast)
@@ -766,32 +1086,52 @@ function Campaigns() {
                             </span>
                           </div>
                           <div className="flex flex-1 flex-wrap items-stretch gap-1.5 sm:min-w-[min(100%,280px)] lg:min-w-0">
-                            <div className="flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex-none sm:min-w-[4.5rem]">
-                              <span className="text-[9px] font-medium uppercase text-gray-500">Sent</span>
-                              <span className="text-sm font-semibold tabular-nums text-gray-900">
-                                {parseInt(campaign.sent, 10) || 0}
-                              </span>
-                            </div>
-                            <div className="flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex-none sm:min-w-[4.5rem]">
-                              <span className="text-[8px] font-medium uppercase leading-tight text-gray-500 sm:text-[9px]">
-                                Delivered
-                              </span>
-                              <span className="text-sm font-semibold tabular-nums text-gray-900">
-                                {parseInt(campaign.delivered, 10) || 0}
-                              </span>
-                            </div>
-                            <div className="flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex-none sm:min-w-[4.5rem]">
-                              <span className="text-[9px] font-medium uppercase text-gray-500">Read</span>
-                              <span className="text-sm font-semibold tabular-nums text-gray-700">
-                                {parseInt(campaign.read, 10) || 0}
-                              </span>
-                            </div>
-                            <div className="flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border border-red-100/80 bg-red-50/80 px-2 py-1 sm:flex-none sm:min-w-[4.5rem]">
+                            {['sent', 'delivered', 'read'].map((statusKey) => {
+                              const meta = RECHURN_STATUS_META[statusKey];
+                              const count = parseInt(campaign[statusKey], 10) || 0;
+                              const clickable = count > 0;
+                              return (
+                                <button
+                                  key={statusKey}
+                                  type="button"
+                                  onClick={() => handleClickRechurn(campaign, statusKey)}
+                                  disabled={!clickable}
+                                  className={`flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border px-2 py-1 text-left sm:flex-none sm:min-w-[4.5rem] ${
+                                    clickable
+                                      ? 'cursor-pointer border-gray-200 bg-gray-50/90 hover:bg-sky-50/90 hover:border-sky-200 transition-colors'
+                                      : 'cursor-default border-gray-100 bg-gray-50/90'
+                                  }`}
+                                  title={clickable ? meta.title : undefined}
+                                >
+                                  <span className="text-[8px] font-medium uppercase leading-tight text-gray-500 sm:text-[9px]">
+                                    {meta.label}
+                                  </span>
+                                  <span className="text-sm font-semibold tabular-nums text-gray-900">
+                                    {count}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                            <button
+                              type="button"
+                              onClick={() => handleClickRechurn(campaign, 'failed')}
+                              disabled={(parseInt(campaign.failed, 10) || 0) <= 0}
+                              className={`flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border border-red-100/80 bg-red-50/80 px-2 py-1 text-left sm:flex-none sm:min-w-[4.5rem] ${
+                                (parseInt(campaign.failed, 10) || 0) > 0
+                                  ? 'cursor-pointer hover:bg-red-100/90 hover:border-red-200 transition-colors'
+                                  : 'cursor-default'
+                              }`}
+                              title={
+                                (parseInt(campaign.failed, 10) || 0) > 0
+                                  ? RECHURN_STATUS_META.failed.title
+                                  : undefined
+                              }
+                            >
                               <span className="text-[9px] font-medium uppercase text-red-600/90">Failed</span>
                               <span className="text-sm font-semibold tabular-nums text-red-600">
                                 {parseInt(campaign.failed, 10) || 0}
                               </span>
-                            </div>
+                            </button>
                           </div>
                         </div>
 
@@ -924,16 +1264,20 @@ function Campaigns() {
             <div className="p-5 md:p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 via-sky-50/50 to-sky-50/30">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-xl md:text-2xl font-bold text-gray-900 tracking-tight">Create New Campaign</h3>
-                  <p className="text-sm text-gray-600 mt-1">Template, schedule, and audience in one flow</p>
+                  <h3 className="text-xl md:text-2xl font-bold text-gray-900 tracking-tight">
+                    {isRetryCreate
+                      ? `Rebroadcast to ${RECHURN_STATUS_META[retryStatus]?.label || 'Selected'} Recipients`
+                      : 'Create New Campaign'}
+                  </h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {isRetryCreate
+                      ? 'Choose an approved template and create a new broadcast for the selected recipient group'
+                      : 'Template, schedule, and audience in one flow'}
+                  </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowCreateModal(false);
-                    setFormData({ name: '', description: '', type: 'broadcast', message: '', scheduledAt: '' });
-                    setError('');
-                  }}
+                  onClick={resetCreateModalState}
                   className="shrink-0 text-gray-400 hover:text-gray-700 rounded-xl p-2 transition-all duration-200 hover:bg-white/90 active:scale-95 ring-1 ring-transparent hover:ring-gray-200/80"
                   aria-label="Close"
                 >
@@ -959,16 +1303,60 @@ function Campaigns() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template Name *</label>
-                    <input
-                      type="text"
-                      value={formData.template_name}
-                      onChange={(e) => setFormData({ ...formData, template_name: e.target.value })}
-                      required
-                      className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
-                      placeholder="e.g., hello_world"
-                    />
-                    <p className="mt-1.5 text-xs text-gray-500 leading-relaxed">Use an approved template name from Meta</p>
+                    <label className="block text-sm font-semibold text-gray-800 mb-2">Template *</label>
+                    {isRetryCreate ? (
+                      <>
+                        <select
+                          value={formData.template_name}
+                          onChange={(e) => handleRetryTemplateSelect(e.target.value)}
+                          required
+                          disabled={loadingRetryTemplates || loadingRetryTemplateDetails}
+                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer disabled:opacity-60"
+                        >
+                          <option value="">
+                            {loadingRetryTemplates
+                              ? 'Loading templates…'
+                              : loadingRetryTemplateDetails
+                                ? 'Loading template details…'
+                                : 'Select approved template'}
+                          </option>
+                          {retryTemplates.map((t) => (
+                            <option key={t.id || t.name} value={t.name}>
+                              {t.name}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="mt-1.5 text-xs text-gray-500 leading-relaxed">
+                          Pick any approved template for this rebroadcast
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <select
+                          value={formData.template_name}
+                          onChange={(e) => handleRetryTemplateSelect(e.target.value)}
+                          required
+                          disabled={loadingRetryTemplates || loadingRetryTemplateDetails}
+                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm font-medium cursor-pointer disabled:opacity-60"
+                        >
+                          <option value="">
+                            {loadingRetryTemplates
+                              ? 'Loading templates…'
+                              : loadingRetryTemplateDetails
+                                ? 'Loading template details…'
+                                : 'Select approved template'}
+                          </option>
+                          {retryTemplates.map((t) => (
+                            <option key={t.id || t.name} value={t.name}>
+                              {t.name}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="mt-1.5 text-xs text-gray-500 leading-relaxed">
+                          Pick an approved template — header media library appears when required
+                        </p>
+                      </>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-semibold text-gray-800 mb-2">Template Language *</label>
@@ -997,6 +1385,54 @@ function Campaigns() {
                     className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
                   />
                 </div>
+                {(isRetryCreate && formData.needs_header_media) ||
+                campaignNeedsHeaderMedia(formData.template_header_format) ? (
+                  <div className="rounded-xl border border-amber-200/90 bg-amber-50/40 p-4 space-y-3">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-800 mb-1">
+                        Header media *
+                      </label>
+                      <p className="text-xs text-amber-900/80 leading-relaxed">
+                        {isRetryCreate
+                          ? 'This template requires header media. Choose from Media Library before creating the broadcast.'
+                          : 'This template requires header media. Choose from Media Library before creating the campaign.'}
+                      </p>
+                    </div>
+                    <FlowMediaAttachField
+                      mediaType={
+                        formData.template_header_format === 'VIDEO'
+                          ? 'VIDEO'
+                          : formData.template_header_format === 'DOCUMENT'
+                            ? 'DOCUMENT'
+                            : 'IMAGE'
+                      }
+                      label="Header media"
+                      mediaUrl={toPermanentUploadPath(formData.header_media_url) || formData.header_media_url || ''}
+                      mediaFilename={
+                        headerMediaFile?.name ||
+                        (formData.header_media_url ? String(formData.header_media_url).split('/').pop() : '')
+                      }
+                      onChange={handleHeaderMediaLibraryChange}
+                    />
+                    {formData.header_media_url && !headerMediaUploading && (
+                      <span className="text-xs font-medium text-green-700">Media selected and ready</span>
+                    )}
+                    {headerMediaUploadError && (
+                      <p className="text-xs font-medium text-red-600">{headerMediaUploadError}</p>
+                    )}
+                    {headerMediaPreviewUrl && (
+                      <div className="rounded-xl border border-gray-200 overflow-hidden bg-white max-w-xs">
+                        {formData.template_header_format === 'VIDEO' ? (
+                          <video src={headerMediaPreviewUrl} controls className="w-full max-h-40 object-cover" />
+                        ) : formData.template_header_format === 'DOCUMENT' ? (
+                          <div className="p-4 text-sm text-gray-600">Document: {String(formData.header_media_url).split('/').pop()}</div>
+                        ) : (
+                          <img src={headerMediaPreviewUrl} alt="Header preview" className="w-full max-h-40 object-cover" />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </div>
 
               <div className="rounded-2xl border border-gray-100/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-gray-100/70 space-y-4">
@@ -1129,13 +1565,70 @@ function Campaigns() {
                 </button>
                 <button
                   type="submit"
-                  disabled={saving}
+                  disabled={saving || headerMediaUploading || loadingRetryTemplateDetails}
                   className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
                 >
-                  {saving ? 'Creating...' : 'Create Campaign'}
+                  {saving ? 'Creating...' : isRetryCreate ? 'Create Broadcast Again' : 'Create Campaign'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Rebroadcast Recipients Modal */}
+      {showRetryModal && selectedCampaign && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-md w-full ring-1 ring-black/5">
+            <div className="p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-2">
+                {RECHURN_STATUS_META[retryStatus]?.label || 'Recipient'} Rebroadcast
+              </h3>
+              {loadingRetryPrefill ? (
+                <div className="py-8 text-center">
+                  <div className="animate-spin rounded-full h-10 w-10 border-2 border-sky-200 border-t-sky-600 mx-auto" />
+                  <p className="mt-4 text-gray-600 text-sm">Loading recipients…</p>
+                </div>
+              ) : retryPrefill ? (
+                <>
+                  <p className="text-gray-600 mb-4">
+                    <span className={`font-semibold ${retryStatus === 'failed' ? 'text-red-600' : 'text-sky-700'}`}>
+                      {retryPrefill.recipientCount ?? retryPrefill.failedCount}
+                    </span>{' '}
+                    {RECHURN_STATUS_META[retryStatus]?.label?.toLowerCase() || retryStatus} recipient
+                    {(retryPrefill.recipientCount ?? retryPrefill.failedCount) !== 1 ? 's' : ''} from{' '}
+                    <span className="font-medium text-gray-800">"{retryPrefill.sourceCampaignName}"</span>.
+                  </p>
+                  <p className="text-sm text-gray-500 mb-6">
+                    Create a new broadcast campaign for those numbers. You will choose the template on the next step.
+                  </p>
+                  <div className="rounded-xl border border-gray-100 bg-gray-50/80 p-3 mb-6 text-sm text-gray-700 space-y-1">
+                    <p><span className="font-medium">Recipients:</span> {retryPrefill.recipientCount ?? retryPrefill.failedCount}</p>
+                    <p><span className="font-medium">Group:</span> {RECHURN_STATUS_META[retryStatus]?.label || retryStatus}</p>
+                  </div>
+                  <div className="flex items-center justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowRetryModal(false);
+                        setRetryPrefill(null);
+                        setSelectedCampaign(null);
+                      }}
+                      className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmRetryCreate}
+                      className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98]"
+                    >
+                      Create Broadcast Again
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
           </div>
         </div>
       )}

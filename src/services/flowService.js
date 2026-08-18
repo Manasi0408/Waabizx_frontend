@@ -96,17 +96,36 @@ export const deleteFlowMedia = async (urls = []) => {
   const token = getToken();
   if (!token) throw new Error("No token found");
 
-  const resp = await fetch(`${API_URL}/flows/media-library`, {
-    method: "DELETE",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ urls }),
+  const normalizedUrls = (Array.isArray(urls) ? urls : [])
+    .map((url) => String(url || "").trim())
+    .filter(Boolean);
+  if (!normalizedUrls.length) throw new Error("No media selected");
+
+  const tryDelete = async (method, url, body) => {
+    const resp = await fetch(url, {
+      method,
+      headers: authHeaders(body ? { "Content-Type": "application/json" } : {}),
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    let parsed = {};
+    try {
+      parsed = await resp.json();
+    } catch (_) {
+      parsed = {};
+    }
+
+    return { resp, parsed };
+  };
+
+  let { resp, parsed } = await tryDelete("DELETE", `${API_URL}/flows/media-library`, {
+    urls: normalizedUrls,
   });
 
-  let parsed = {};
-  try {
-    parsed = await resp.json();
-  } catch (_) {
-    parsed = {};
+  if (!resp.ok || !parsed.success) {
+    ({ resp, parsed } = await tryDelete("POST", `${API_URL}/flows/media-library/delete`, {
+      urls: normalizedUrls,
+    }));
   }
 
   if (!resp.ok || !parsed.success) {

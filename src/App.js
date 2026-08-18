@@ -70,6 +70,7 @@ import {
   normalizeRole,
   readStoredUser,
 } from './utils/managerAccess';
+import SessionExpiryGuard from './components/SessionExpiryGuard';
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -1779,6 +1780,7 @@ function App() {
 
   return (
     <Router>
+      <SessionExpiryGuard />
       <Routes>
 
         <Route

@@ -1,6 +1,19 @@
-import React, { useRef, useState } from "react";
+import React, { useRef, useState, useEffect, useMemo } from "react";
 import { resolvePublicMediaUrl } from "../utils/mediaUrl";
 import { uploadBroadcastHeaderMedia } from "../services/broadcastService";
+
+function resolveHeaderPreviewSrc(preview, apiBase, localSrc = "") {
+  if (localSrc) return localSrc;
+  const candidates = [preview?.headerImageUrl, preview?.header?.url].filter(Boolean);
+  for (const candidate of candidates) {
+    const raw = String(candidate).trim();
+    if (!raw || raw.startsWith("blob:")) continue;
+    const resolved = resolvePublicMediaUrl(raw, apiBase);
+    if (resolved) return resolved;
+    if (/^https?:\/\//i.test(raw) && !/^\d+::/.test(raw)) return raw;
+  }
+  return "";
+}
 
 /** WhatsApp template headers need JPEG/PNG — convert other image types in the browser before upload. */
 async function prepareImageHeaderForUpload(file) {
@@ -49,17 +62,37 @@ export default function InsertMessagePreview({
   onHeaderMediaChange,
 }) {
   const fileInputRef = useRef(null);
+  const objectUrlRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [uploadedPreviewSrc, setUploadedPreviewSrc] = useState("");
+
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setUploadedPreviewSrc("");
+    setUploadError("");
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+  }, [templateName]);
 
   const headerText = String(preview?.headerText || "").trim();
   const headerFormat = String(preview?.headerFormat || "").toUpperCase();
   const footer = String(preview?.footer || "").trim();
   const buttons = Array.isArray(preview?.buttons) ? preview.buttons : [];
   const body = String(preview?.body || bodyText || "").trim();
-  const resolvedImage = resolvePublicMediaUrl(
-    preview?.headerImageUrl || preview?.header?.url || "",
-    apiBase
+  const resolvedImage = useMemo(
+    () => resolveHeaderPreviewSrc(preview, apiBase, uploadedPreviewSrc),
+    [preview, apiBase, uploadedPreviewSrc]
   );
 
   const mediaFormat =
@@ -98,10 +131,26 @@ export default function InsertMessagePreview({
         mediaFormat === "IMAGE" || mediaFormat === "" || preview?.header?.type === "image"
           ? await prepareImageHeaderForUpload(file)
           : file;
+
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+      const objectUrl = URL.createObjectURL(uploadFile);
+      objectUrlRef.current = objectUrl;
+      setUploadedPreviewSrc(objectUrl);
+
       const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
       const url = uploaded?.url || uploaded?.publicUrl || uploaded?.headerMediaUrl || null;
       if (!url) throw new Error("Upload succeeded but no media URL was returned");
       onHeaderMediaChange(url, { templateName, fileName: file.name });
+
+      const serverPreview = resolvePublicMediaUrl(url, apiBase) || url;
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+      setUploadedPreviewSrc(serverPreview);
     } catch (err) {
       setUploadError(err?.message || "Failed to upload header media");
     } finally {
@@ -132,9 +181,14 @@ export default function InsertMessagePreview({
                   alt=""
                   className="w-full max-h-44 object-cover"
                   onError={(e) => {
-                    e.currentTarget.style.display = "none";
                     const fallback = e.currentTarget.nextElementSibling;
+                    e.currentTarget.style.display = "none";
                     if (fallback) fallback.classList.remove("hidden");
+                  }}
+                  onLoad={(e) => {
+                    e.currentTarget.style.display = "";
+                    const fallback = e.currentTarget.nextElementSibling;
+                    if (fallback) fallback.classList.add("hidden");
                   }}
                 />
                 <div className="hidden w-full px-3 py-8 text-center bg-gradient-to-b from-gray-100 to-gray-50 text-[10px] font-semibold uppercase tracking-widest text-gray-500">

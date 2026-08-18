@@ -114,6 +114,7 @@ export const getConversationQuota = async (accountId) => {
     planInfo: data.planInfo ?? null,
     wabaTier: data.wabaTier ?? null,
     wabaTierLabel: data.wabaTierLabel ?? null,
+    messagingLimitDisplay: data.messagingLimitDisplay ?? null,
     wabaThroughputLevel: data.wabaThroughputLevel ?? null,
     wabaQualityRating: data.wabaQualityRating ?? null,
     tierDailyLimit: data.tierDailyLimit ?? data.limit ?? 0,

@@ -363,3 +363,34 @@ export const getCampaignAudience = async (campaignId) => {
   }
 };
 
+// Audience data for rebroadcasting campaign recipients by status (failed, sent, delivered, read)
+export const getCampaignRetryPrefill = async (campaignId, status = 'failed') => {
+  try {
+    const token = getToken();
+    if (!token) {
+      throw new Error('No token found');
+    }
+
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+
+    const response = await fetch(`${API_URL}/campaigns/${campaignId}/retry-prefill?${params.toString()}`, {
+      method: 'GET',
+      headers: buildAuthHeaders(),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || data.message || 'Failed to load retry data');
+    }
+
+    if (data.success) {
+      return data;
+    }
+
+    throw new Error(data.message || 'Failed to load retry data');
+  } catch (error) {
+    throw error;
+  }
+};

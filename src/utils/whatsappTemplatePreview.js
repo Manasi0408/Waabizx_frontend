@@ -386,20 +386,22 @@ export function resolveMessageTemplatePreview(message, templateCatalog) {
 /** Resolve template header image for display — public URL or authenticated media proxy. */
 export function resolveTemplateHeaderDisplayUrl(message, preview, apiBase) {
   const candidates = [
-    preview?.headerImageUrl,
-    preview?.header?.url,
-    message?.headerImageUrl,
-    message?.header?.url,
     message?.mediaUrl,
     message?.templatePreview?.headerImageUrl,
-    message?.templatePreview?.header?.url,
     message?.templateSnapshot?.headerImageUrl,
+    message?.headerImageUrl,
+    message?.header?.url,
+    preview?.headerImageUrl,
+    preview?.header?.url,
+    message?.templatePreview?.header?.url,
     message?.templateSnapshot?.header?.url,
   ];
 
   for (const candidate of candidates) {
-    const pub = resolvePublicMediaUrl(candidate, apiBase);
+    const pub = resolveDisplayableHeaderMediaUrl(candidate);
     if (pub) return pub;
+    const resolved = resolvePublicMediaUrl(candidate, apiBase);
+    if (resolved) return resolved;
   }
 
   const payload = message?.payload;

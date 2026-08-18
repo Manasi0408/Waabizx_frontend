@@ -82,7 +82,6 @@ function SuperAdminLeadsPanel() {
         lead.country,
         lead.industry,
         lead.heard_about,
-        lead.dialx_interest,
         lead.company_size,
         lead.subject,
         lead.message,
@@ -237,7 +236,6 @@ function SuperAdminLeadsPanel() {
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Country</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Industry</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Heard about</th>
-                    <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">DialX interest</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Message</th>
                     <th className="px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-gray-500">Submitted</th>
                   </tr>
@@ -258,7 +256,6 @@ function SuperAdminLeadsPanel() {
                       <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{lead.country || '—'}</td>
                       <td className="px-4 py-3 text-gray-700">{lead.industry || '—'}</td>
                       <td className="px-4 py-3 text-gray-700">{lead.heard_about || '—'}</td>
-                      <td className="px-4 py-3 text-gray-700">{lead.dialx_interest || '—'}</td>
                       <td className="px-4 py-3 text-gray-600 max-w-[220px]">{truncate(lead.message)}</td>
                       <td className="px-4 py-3 text-gray-500 whitespace-nowrap text-xs">{formatDate(lead.createdAt)}</td>
                     </tr>
@@ -313,11 +310,6 @@ function SuperAdminLeadsPanel() {
                       {lead.heard_about ? (
                         <div>
                           <span className="font-semibold text-gray-500">Heard about:</span> {lead.heard_about}
-                        </div>
-                      ) : null}
-                      {lead.dialx_interest ? (
-                        <div>
-                          <span className="font-semibold text-gray-500">DialX interest:</span> {lead.dialx_interest}
                         </div>
                       ) : null}
                       <div>
@@ -378,7 +370,6 @@ function SuperAdminLeadsPanel() {
                 <DetailField label="Country" value={selectedLead.country} />
                 <DetailField label="Industry" value={selectedLead.industry} />
                 <DetailField label="Heard about us" value={selectedLead.heard_about} />
-                <DetailField label="DialX interest" value={selectedLead.dialx_interest} />
               </div>
               <div className="mt-3">
                 <DetailField label="Message" value={selectedLead.message} multiline />

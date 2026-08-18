@@ -58,6 +58,7 @@ function Dashboard() {
     planInfo: null,
     wabaTier: null,
     wabaTierLabel: null,
+    messagingLimitDisplay: null,
     wabaThroughputLevel: null,
     wabaQualityRating: null,
     tierDailyLimit: 0,
@@ -973,12 +974,20 @@ function Dashboard() {
                   <div className="text-[11px] font-semibold text-fuchsia-700 uppercase tracking-wide">WABA tier</div>
                   <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-fuchsia-100 text-fuchsia-700 text-sm">⬆</span>
                 </div>
-                <div className="mt-2 text-xl md:text-2xl font-bold text-slate-900">
-                  {loadingQuota ? '...' : (conversationQuota.wabaTierLabel || '—')}
+                <div className="mt-2 text-xl md:text-2xl font-bold text-slate-900 tabular-nums">
+                  {loadingQuota
+                    ? '...'
+                    : conversationQuota.messagingLimitDisplay ||
+                      (conversationQuota.tierDailyLimit > 0
+                        ? Number(conversationQuota.tierDailyLimit).toLocaleString('en-IN')
+                        : null) ||
+                      conversationQuota.wabaTierLabel ||
+                      '—'}
                 </div>
                 <p className="mt-2 text-[11px] text-slate-500 leading-snug">
-                  {conversationQuota.tierSource === 'meta_graph'
-                    ? `Meta Graph · ${conversationQuota.wabaThroughputLevel || 'throughput n/a'} · ${conversationQuota.wabaQualityRating || 'quality n/a'}`
+                  {conversationQuota.tierSource === 'meta_graph' ||
+                  conversationQuota.messagingLimitDisplay
+                    ? 'Business-initiated conversations in a rolling 24-hour period (from Meta messaging limits).'
                     : 'Link WhatsApp to load tier from Meta'}
                 </p>
               </div>
@@ -990,7 +999,7 @@ function Dashboard() {
                 <div className="mt-2 text-2xl md:text-3xl font-bold text-slate-900 tabular-nums">
                   {loadingQuota ? '...' : <CountUp value={Number(conversationQuota.messagesSentToday || 0)} />}
                 </div>
-                <p className="mt-2 text-[11px] text-slate-500 leading-snug">Every outbound send (inbox, live chat, campaigns). Resets at midnight (server time).</p>
+                <p className="mt-2 text-[11px] text-slate-500 leading-snug">Template messages sent today (campaigns, inbox, live chat). Resets at midnight (server time).</p>
               </div>
               <div className="motion-hover-lift rounded-2xl border border-emerald-200/80 bg-white/95 backdrop-blur-sm p-5 ring-1 ring-emerald-200/60 shadow-md shadow-emerald-100/60">
                 <div className="flex items-center justify-between">

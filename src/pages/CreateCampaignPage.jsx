@@ -11,6 +11,8 @@ import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
+import FlowMediaAttachField from '../components/FlowMediaLibraryField';
+import { resolvePublicMediaUrl, toPermanentUploadPath } from '../utils/mediaUrl';
 import PlanLimitModal from '../components/PlanLimitModal';
 import { extractPlanLimitError, assertCanAddResource } from '../services/planLimitService';
 
@@ -617,6 +619,7 @@ export default function CreateCampaignPage() {
   const [templateVarMap, setTemplateVarMap] = useState({});
   const [templateVarCustom, setTemplateVarCustom] = useState({});
   const [mediaFile, setMediaFile] = useState(null);
+  const [headerMediaUrl, setHeaderMediaUrl] = useState('');
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
   const [resolvingTemplate, setResolvingTemplate] = useState(false);
 
@@ -785,8 +788,20 @@ export default function CreateCampaignPage() {
     setTemplateVarCustom({});
     setTemplateLanguage(selectedTemplate.language || 'en_US');
     setMediaFile(null);
+    setHeaderMediaUrl('');
     setMediaPreviewUrl('');
   }, [selectedTemplate, csvColumns, columnMapping]);
+
+  const handleHeaderMediaLibraryChange = ({ mediaUrl: storedUrl }) => {
+    const previewUrl = resolvePublicMediaUrl(storedUrl) || storedUrl;
+    setMediaFile(null);
+    setHeaderMediaUrl(storedUrl);
+    setMediaPreviewUrl(previewUrl);
+  };
+
+  const selectedHeaderFormat = selectedTemplate
+    ? getTemplatePreviewParts(selectedTemplate)?.headerFormat
+    : null;
 
   const handleCsvUpload = async (file) => {
     if (!file) return;
@@ -884,8 +899,8 @@ export default function CreateCampaignPage() {
         setError('Fix template variable mapping before continuing');
         return;
       }
-      if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !mediaPreviewUrl) {
-        setError('This template needs a header image or video. Upload media to continue.');
+      if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !headerMediaUrl) {
+        setError('This template needs a header image or video. Choose media from the library to continue.');
         return;
       }
       setStep(4);
@@ -912,8 +927,8 @@ export default function CreateCampaignPage() {
       setError('No valid audience rows');
       return;
     }
-    if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !mediaPreviewUrl) {
-      setError('This template needs a header image or video. Upload media before sending.');
+    if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !headerMediaUrl) {
+      setError('This template needs a header image or video. Choose media from the library before sending.');
       return;
     }
     setBusy(true);
@@ -926,12 +941,14 @@ export default function CreateCampaignPage() {
         return;
       }
 
-      let headerMediaUrl = null;
+      let resolvedHeaderMediaUrl = null;
       if (mediaFile) {
         const uploaded = await uploadBroadcastHeaderMedia(mediaFile);
-        headerMediaUrl = uploaded.url;
+        resolvedHeaderMediaUrl = uploaded.url;
+      } else if (headerMediaUrl) {
+        resolvedHeaderMediaUrl = headerMediaUrl;
       } else if (mediaPreviewUrl && !String(mediaPreviewUrl).startsWith('blob:')) {
-        headerMediaUrl = mediaPreviewUrl;
+        resolvedHeaderMediaUrl = mediaPreviewUrl;
       }
 
       const variable_mapping = buildVariableMapping(templateVarMap, templateVarCustom);
@@ -942,7 +959,7 @@ export default function CreateCampaignPage() {
         schedule_time: scheduleEnabled ? new Date(Date.now() + 3600000).toISOString() : null,
         audience,
         variable_mapping,
-        header_media_url: headerMediaUrl,
+        header_media_url: resolvedHeaderMediaUrl,
       });
       const campaignId = data.campaignId || data.campaign?.id;
       if (!campaignId) throw new Error('Campaign created but id missing');
@@ -1263,29 +1280,28 @@ export default function CreateCampaignPage() {
                         </div>
                       )}
                       {selectedTemplate && templateHasMedia(selectedTemplate) && (
-                        <div className="mt-6">
-                          <label className="block text-sm font-semibold text-gray-800 mb-2">
-                            Upload header {String(getTemplatePreviewParts(selectedTemplate).headerFormat || 'media').toLowerCase()}
+                        <div className="mt-6 rounded-xl border border-amber-200/90 bg-amber-50/40 p-4 space-y-3">
+                          <label className="block text-sm font-semibold text-gray-800">
+                            Header {String(selectedHeaderFormat || 'media').toLowerCase()} *
                           </label>
-                          <p className="text-xs text-gray-500 mb-2">
-                            Required for this template. Preview updates after you choose a file.
+                          <p className="text-xs text-amber-900/80">
+                            Required for this template. Choose from Media Library — browse, upload, or delete files.
                           </p>
-                          <input
-                            type="file"
-                            accept="image/*,video/*"
-                            onChange={(e) => {
-                              const f = e.target.files?.[0];
-                              setMediaFile(f || null);
-                              if (f) {
-                                setMediaPreviewUrl(URL.createObjectURL(f));
-                              } else {
-                                setMediaPreviewUrl('');
-                              }
-                            }}
-                            className="block w-full text-sm"
+                          <FlowMediaAttachField
+                            mediaType={
+                              selectedHeaderFormat === 'VIDEO'
+                                ? 'VIDEO'
+                                : selectedHeaderFormat === 'DOCUMENT'
+                                  ? 'DOCUMENT'
+                                  : 'IMAGE'
+                            }
+                            label="Header media"
+                            mediaUrl={toPermanentUploadPath(headerMediaUrl) || headerMediaUrl}
+                            mediaFilename={headerMediaUrl ? String(headerMediaUrl).split('/').pop() : ''}
+                            onChange={handleHeaderMediaLibraryChange}
                           />
-                          {mediaPreviewUrl && (
-                            <p className="mt-2 text-xs text-green-700 font-medium">Header media ready for preview</p>
+                          {headerMediaUrl && (
+                            <p className="text-xs text-green-700 font-medium">Header media ready for preview</p>
                           )}
                         </div>
                       )}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import BrandLogoMark from '../components/BrandLogoMark';
 import ReactFlow, {
   addEdge,
@@ -275,7 +276,10 @@ function FlowMediaLibraryModal({
     setDeleting(true);
     setError("");
     try {
-      await deleteFlowMedia([...selectedUrls]);
+      const paths = [...selectedUrls]
+        .map((url) => normalizeStoredFlowMediaPath(url) || String(url || "").trim())
+        .filter(Boolean);
+      await deleteFlowMedia(paths);
       setSelectedUrls(new Set());
       const payload = await getFlowMediaLibrary("ALL");
       setAllItems(Array.isArray(payload.media) ? payload.media : []);
@@ -296,21 +300,28 @@ function FlowMediaLibraryModal({
 
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-[1700] bg-black/45 flex items-center justify-center p-3 sm:p-5">
-      <div className="w-full max-w-[920px] h-[min(92vh,720px)] bg-white rounded-lg shadow-2xl flex flex-col overflow-hidden border border-gray-200">
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 md:p-8">
+      <div className="w-full max-w-6xl h-[min(94vh,880px)] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-slate-200/90 ring-1 ring-black/5">
         {/* Header */}
-        <div className="shrink-0 flex items-center justify-between gap-4 px-5 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-3 min-w-0 flex-wrap">
-            <h2 className="text-lg font-semibold text-gray-900">Media Library</h2>
-            <span className="text-sm text-gray-500">
-              {formatStorageMb(storageUsedBytes)} used of {formatStorageMb(storageLimitBytes)}
-            </span>
+        <div className="shrink-0 flex items-center justify-between gap-4 px-6 py-5 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+          <div className="flex items-center gap-4 min-w-0 flex-wrap">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#1e3a5f] text-white shadow-md shadow-slate-900/15">
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-xl font-bold text-slate-900 tracking-tight">Media Library</h2>
+              <p className="mt-0.5 text-sm text-slate-500">
+                {formatStorageMb(storageUsedBytes)} used of {formatStorageMb(storageLimitBytes)}
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="shrink-0 w-8 h-8 flex items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-800 text-xl leading-none"
+            className="shrink-0 w-10 h-10 flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-800 text-2xl leading-none transition-colors"
             aria-label="Close"
           >
             ×
@@ -318,7 +329,7 @@ function FlowMediaLibraryModal({
         </div>
 
         {/* Search + actions */}
-        <div className="shrink-0 flex flex-col sm:flex-row sm:items-center gap-3 px-5 py-3 border-b border-gray-100">
+        <div className="shrink-0 flex flex-col sm:flex-row sm:items-center gap-3 px-6 py-4 border-b border-slate-100 bg-white">
           <div className="relative flex-1 min-w-0">
             <svg
               className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none"
@@ -333,8 +344,8 @@ function FlowMediaLibraryModal({
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search media"
-              className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-sky-300/50 focus:border-sky-400"
+              placeholder="Search by filename..."
+              className="w-full pl-9 pr-3 py-2.5 text-sm border border-slate-200 rounded-xl bg-slate-50/70 focus:outline-none focus:ring-2 focus:ring-sky-300/50 focus:border-sky-400 focus:bg-white"
             />
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -352,7 +363,7 @@ function FlowMediaLibraryModal({
               type="button"
               disabled={uploading}
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-[#1e3a5f] text-white text-sm font-medium hover:bg-[#162d4a] disabled:opacity-60 transition-colors"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#1e3a5f] text-white text-sm font-semibold hover:bg-[#162d4a] disabled:opacity-60 transition-colors shadow-sm"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
@@ -363,7 +374,7 @@ function FlowMediaLibraryModal({
               type="button"
               disabled={!selectedUrls.size || deleting}
               onClick={handleDeleteSelected}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-gray-200 bg-white text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -374,7 +385,7 @@ function FlowMediaLibraryModal({
         </div>
 
         {/* Tabs */}
-        <div className="shrink-0 flex items-center gap-6 px-5 border-b border-gray-200 overflow-x-auto">
+        <div className="shrink-0 flex items-center gap-8 px-6 border-b border-slate-200 overflow-x-auto bg-white">
           {MEDIA_LIBRARY_TABS.map((tab) => {
             const active = activeTab === tab.id;
             const count = counts[tab.id] ?? 0;
@@ -386,9 +397,9 @@ function FlowMediaLibraryModal({
                   setActiveTab(tab.id);
                   setSelectedUrls(new Set());
                 }}
-                className={`shrink-0 py-3 text-sm font-medium border-b-2 transition-colors ${active
+                className={`shrink-0 py-3.5 text-sm font-semibold border-b-2 transition-colors ${active
                     ? "border-[#1e3a5f] text-[#1e3a5f]"
-                    : "border-transparent text-gray-500 hover:text-gray-800"
+                    : "border-transparent text-slate-500 hover:text-slate-800"
                   }`}
               >
                 {tab.label} ({count})
@@ -398,48 +409,48 @@ function FlowMediaLibraryModal({
         </div>
 
         {/* Grid */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 bg-slate-50/40">
           {error ? (
-            <div className="py-12 text-center text-sm text-red-600">{error}</div>
+            <div className="py-16 text-center text-sm text-red-600">{error}</div>
           ) : loading ? (
-            <div className="py-12 text-center text-sm text-gray-500">Loading media library...</div>
+            <div className="py-16 text-center text-sm text-slate-500">Loading media library...</div>
           ) : filteredItems.length === 0 ? (
-            <div className="py-12 text-center text-sm text-gray-500">
+            <div className="py-16 text-center text-sm text-slate-500">
               No {MEDIA_LIBRARY_TABS.find((t) => t.id === activeTab)?.label?.toLowerCase() || "media"} found.
               Use Upload to add files.
             </div>
           ) : (
             <>
-              <div className="text-sm font-medium text-gray-800 mb-3">
+              <div className="text-sm font-semibold text-slate-800 mb-4">
                 Recently used ({filteredItems.length})
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                 {filteredItems.map((item) => {
                   const previewUrl = resolveFlowMediaPreviewUrl(item.publicUrl || item.url);
                   const itemType = normalizeFlowMediaType(item.mediaType || activeTab);
                   const isSelected = selectedUrls.has(item.url);
                   const displayName = item.filename || "Media";
                   const shortName =
-                    displayName.length > 16 ? `${displayName.slice(0, 14)}...` : displayName;
+                    displayName.length > 22 ? `${displayName.slice(0, 20)}...` : displayName;
 
                   return (
                     <div key={item.url} className="group relative">
-                      <label className="absolute top-2 left-2 z-10 flex items-center justify-center">
+                      <label className="absolute top-2.5 left-2.5 z-10 flex items-center justify-center">
                         <input
                           type="checkbox"
                           checked={isSelected}
                           onChange={(e) => toggleSelected(item.url, e.target.checked)}
-                          className="w-4 h-4 rounded border-gray-300 text-sky-600 focus:ring-sky-500 cursor-pointer"
+                          className="w-4 h-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 cursor-pointer bg-white/95"
                           onClick={(e) => e.stopPropagation()}
                         />
                       </label>
                       <button
                         type="button"
                         onClick={() => onSelect(item)}
-                        className={`w-full rounded-md border bg-white overflow-hidden text-left transition-all hover:shadow-md ${isSelected ? "border-sky-500 ring-2 ring-sky-200" : "border-gray-200 hover:border-gray-300"
+                        className={`w-full rounded-xl border bg-white overflow-hidden text-left transition-all hover:shadow-lg hover:-translate-y-0.5 ${isSelected ? "border-sky-500 ring-2 ring-sky-200 shadow-md" : "border-slate-200 hover:border-slate-300"
                           }`}
                       >
-                        <div className="aspect-[4/3] bg-gray-100 flex items-center justify-center overflow-hidden">
+                        <div className="aspect-square bg-slate-100 flex items-center justify-center overflow-hidden">
                           {itemType === "VIDEO" ? (
                             previewUrl ? (
                               <video src={previewUrl} className="w-full h-full object-cover" muted playsInline />
@@ -461,8 +472,8 @@ function FlowMediaLibraryModal({
                             <span className="text-3xl text-gray-300">🖼</span>
                           )}
                         </div>
-                        <div className="px-2 py-2 border-t border-gray-100">
-                          <p className="text-xs text-gray-700 truncate text-center" title={displayName}>
+                        <div className="px-2.5 py-2.5 border-t border-slate-100 bg-white">
+                          <p className="text-xs font-medium text-slate-700 truncate text-center" title={displayName}>
                             {shortName}
                           </p>
                         </div>
@@ -475,7 +486,8 @@ function FlowMediaLibraryModal({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

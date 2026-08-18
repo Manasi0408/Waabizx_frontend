@@ -24,6 +24,25 @@ function isTemplateMarkerContent(text) {
   return /^Template:\s*\S+/i.test(value) || /^\[Template\]\s*\S+/i.test(value);
 }
 
+function extractTrailingImageFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  const lines = raw.split('\n');
+  const lastLine = String(lines[lines.length - 1] || '').trim();
+  const urlMatch = lastLine.match(/^https?:\/\/\S+$/i);
+  if (!urlMatch) return null;
+
+  const url = urlMatch[0];
+  const isImage =
+    /\.(jpe?g|png|webp|gif|bmp)(\?|#|$)/i.test(url) ||
+    /\/(?:api\/)?uploads\//i.test(url);
+  if (!isImage) return null;
+
+  const caption = lines.slice(0, -1).join('\n').replace(/\n+$/, '').trim();
+  return { url, caption };
+}
+
 function resolveDirection(raw) {
   const d = String(raw?.direction || raw?.type || raw?.sender || '').toLowerCase();
   if (d === 'incoming' || d === 'inbound' || d === 'customer') return 'incoming';
@@ -96,8 +115,8 @@ export function normalizeMessage(raw, source = 'unknown') {
 
   const payload = parsePayload(raw.payload) || parsePayload(raw.rawPayload) || raw.payload || null;
   const direction = resolveDirection(raw);
-  const messageType = resolveMessageType(raw, payload);
-  const content = extractContent(raw, payload, messageType);
+  let messageType = resolveMessageType(raw, payload);
+  let content = extractContent(raw, payload, messageType);
 
   let templatePreview = raw.templatePreview || null;
   if (typeof templatePreview === 'string') {
@@ -138,7 +157,7 @@ export function normalizeMessage(raw, source = 'unknown') {
   const apiBase =
     process.env.REACT_APP_API_URL?.replace(/\/api\/?$/i, '') || 'https://api.waabizx.com';
 
-  const resolvedMediaUrl = (() => {
+  let resolvedMediaUrl = (() => {
     const direct = raw.mediaUrl || raw.url;
     if (direct) {
       const pub = resolvePublicMediaUrl(direct, apiBase);
@@ -157,6 +176,34 @@ export function normalizeMessage(raw, source = 'unknown') {
       apiBase
     );
   })();
+
+  if (messageType === 'text' && !resolvedMediaUrl) {
+    const trailingImage = extractTrailingImageFromText(content);
+    if (trailingImage) {
+      resolvedMediaUrl =
+        resolvePublicMediaUrl(trailingImage.url, apiBase) || trailingImage.url;
+      content = trailingImage.caption;
+      messageType = 'image';
+    }
+  }
+
+  if (!resolvedMediaUrl && payload) {
+    const payloadLink =
+      payload?.image?.link ||
+      payload?.video?.link ||
+      payload?.interactive?.header?.image?.link ||
+      payload?.interactive?.header?.video?.link ||
+      null;
+    if (payloadLink) {
+      resolvedMediaUrl = resolvePublicMediaUrl(payloadLink, apiBase) || payloadLink;
+      if (messageType === 'text' && payload?.type) {
+        const payloadType = String(payload.type).toLowerCase();
+        if (payloadType === 'image' || payloadType === 'video') {
+          messageType = payloadType;
+        }
+      }
+    }
+  }
 
   return {
     id: raw.id != null ? raw.id : `msg_${Date.now()}`,
