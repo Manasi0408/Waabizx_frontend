@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import BrandLogoMark from '../components/BrandLogoMark';
+import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 import ReactFlow, {
   addEdge,
   Background,
@@ -97,10 +98,7 @@ function syncButtonsData(buttonsList) {
 
 const FLOW_PUBLIC_BASE = (
   process.env.REACT_APP_PUBLIC_API_URL ||
-  //   String(process.env.REACT_APP_API_URL || "https://wabizx.techwhizzc.com/api").replace(/\/api\/?$/, "") ||
-  //   "https://wabizx.techwhizzc.com"
-  String(process.env.REACT_APP_API_URL || "https://api.waabizx.com/api").replace(/\/api\/?$/, "") ||
-  "https://api.waabizx.com"
+  getApiUrl().replace(/\/api\/?$/, "")
 ).replace(/\/$/, "");
 
 function resolveFlowMediaPreviewUrl(url) {

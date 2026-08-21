@@ -1,3 +1,5 @@
+import { getApiOrigin } from './apiBase';
+
 function normalizeApiBase(apiBase) {
   let base = String(apiBase || '')
     .trim()
@@ -5,14 +7,12 @@ function normalizeApiBase(apiBase) {
     .replace(/\/api$/i, '');
   // SPA host does not serve /uploads — Express API does
   if (!base || /^https?:\/\/app\.waabizx\.com$/i.test(base)) {
-    base = 'https://api.waabizx.com';
+    base = getApiOrigin();
   }
   return base;
 }
 
-const DEFAULT_API_BASE = normalizeApiBase(
-  process.env.REACT_APP_API_URL || 'https://api.waabizx.com'
-);
+const DEFAULT_API_BASE = normalizeApiBase(getApiOrigin());
 
 /** Canonical disk path `/uploads/...` from any upload URL. */
 export function toPermanentUploadPath(url) {

@@ -1,5 +1,6 @@
-// const API_URL = 'https://wabizx.techwhizzc.com';
-const API_URL = 'https://api.waabizx.com';
+import { getApiOrigin } from '../utils/apiBase';
+
+const API_URL = getApiOrigin();
 
 // Get token from localStorage
 const getToken = () => {

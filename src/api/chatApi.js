@@ -1,7 +1,8 @@
+import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 // const API = "https://wabizx.techwhizzc.com/api/chat";
 // const API_BASE = "https://wabizx.techwhizzc.com/api";
-const API = "https://api.waabizx.com/api/chat";
-const API_BASE = "https://api.waabizx.com/api";
+const API = `${getApiUrl()}/chat`;
+const API_BASE = getApiUrl();
 
 const getAuthHeaders = () => {
   const token = localStorage.getItem("token");

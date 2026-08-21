@@ -71,3 +71,28 @@ export const updateConversationMetrics = async (payload) => {
     rates: res?.data?.rates && typeof res.data.rates === 'object' ? res.data.rates : {},
   };
 };
+
+export const fetchAdminWhatsappPricing = async () => {
+  const res = await axios.get('/admin/whatsapp-pricing');
+  return {
+    countries: Array.isArray(res?.data?.countries) ? res.data.countries : [],
+    categories: Array.isArray(res?.data?.categories) ? res.data.categories : [],
+    fxRates: res?.data?.fxRates && typeof res.data.fxRates === 'object' ? res.data.fxRates : {},
+    exchangeRates: Array.isArray(res?.data?.exchangeRates) ? res.data.exchangeRates : [],
+  };
+};
+
+export const updateAdminWhatsappPricing = async (payload) => {
+  const res = await axios.put('/admin/whatsapp-pricing', payload);
+  return {
+    countries: Array.isArray(res?.data?.countries) ? res.data.countries : [],
+    categories: Array.isArray(res?.data?.categories) ? res.data.categories : [],
+    fxRates: res?.data?.fxRates && typeof res.data.fxRates === 'object' ? res.data.fxRates : {},
+    exchangeRates: Array.isArray(res?.data?.exchangeRates) ? res.data.exchangeRates : [],
+  };
+};
+
+export const testWccPrice = async ({ countryCode, category = 'UTILITY', walletCurrency = 'INR' }) => {
+  const res = await axios.post('/wcc/test-price', { countryCode, category, walletCurrency });
+  return res.data;
+};

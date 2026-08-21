@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { formatWhatsAppBody, resolveTemplateHeaderDisplayUrl } from '../utils/whatsappTemplatePreview';
 import { useMediaSrc } from './Chat/useMediaSrc';
+import { getApiOrigin } from '../utils/apiBase';
 
 /**
  * WhatsApp-style template message card — matches Meta template layout:
@@ -12,8 +13,7 @@ export default function WhatsAppMessageBubble({
   align = 'left',
   formatTime,
   status,
-  // apiBase = 'https://wabizx.techwhizzc.com/',
-  apiBase = 'https://api.waabizx.com/',
+  apiBase = `${getApiOrigin()}/`,
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   const isOutgoing = message?.type === 'outgoing' || message?.sender === 'agent';

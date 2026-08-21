@@ -75,6 +75,19 @@ const FONT_SIZE_OPTIONS = [
   { label: '36', value: '36px' },
 ];
 
+const ITALIC_FONT_VALUE = '__italic__';
+
+const FONT_FAMILY_OPTIONS = [
+  { label: 'Inter', value: "'Inter', sans-serif" },
+  { label: 'Lato', value: "'Lato', sans-serif" },
+  { label: 'Poppins', value: "'Poppins', sans-serif" },
+  { label: 'Roboto', value: "'Roboto', sans-serif" },
+  { label: 'Italic', value: ITALIC_FONT_VALUE },
+];
+
+const BLOG_EDITOR_GOOGLE_FONTS_HREF =
+  'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Roboto:wght@400;500;700&display=swap';
+
 function AlignIcon({ type }) {
   const lines = {
     left: ['w-full', 'w-4/5', 'w-full', 'w-3/5'],
@@ -104,6 +117,32 @@ const BLOCK_TAGS = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI'
 const EMPTY_EDITOR_HTML = '<p><br></p>';
 const TABLE_WRAP_CLASS = 'blog-editor-table-wrap';
 const TABLE_REMOVE_CLASS = 'blog-editor-table-remove';
+
+async function uploadBlogInlineImage(file) {
+  const fd = new FormData();
+  fd.append('image', file);
+  const res = await axios.post('/blogs/inline-image', fd);
+  return res?.data?.url || res?.data?.image_url || '';
+}
+
+async function persistBlobImagesInDetails(html) {
+  const raw = String(html || '');
+  if (!raw.includes('blob:')) return raw;
+  const doc = new DOMParser().parseFromString(raw, 'text/html');
+  const imgs = [...doc.querySelectorAll('img[src^="blob:"]')];
+  for (const img of imgs) {
+    try {
+      const blob = await fetch(img.getAttribute('src')).then((response) => response.blob());
+      const ext = blob.type === 'image/png' ? '.png' : blob.type === 'image/webp' ? '.webp' : '.jpg';
+      const file = new File([blob], `inline-${Date.now()}${ext}`, { type: blob.type || 'image/jpeg' });
+      const url = await uploadBlogInlineImage(file);
+      if (url) img.setAttribute('src', url);
+    } catch (_) {
+      // Keep existing src if upload fails.
+    }
+  }
+  return doc.body.innerHTML;
+}
 
 function createTableElement(rows, cols) {
   const table = document.createElement('table');
@@ -222,8 +261,21 @@ function ensureEditorHasBlock(editor) {
 
 function RichTextEditor({ value, onChange }) {
   const editorRef = useRef(null);
+  const imageInputRef = useRef(null);
   const lastHtmlRef = useRef('');
   const savedSelectionRef = useRef(null);
+  const uploadingImageRef = useRef(false);
+
+  useEffect(() => {
+    const linkId = 'blog-editor-google-fonts';
+    if (!document.getElementById(linkId)) {
+      const link = document.createElement('link');
+      link.id = linkId;
+      link.rel = 'stylesheet';
+      link.href = BLOG_EDITOR_GOOGLE_FONTS_HREF;
+      document.head.appendChild(link);
+    }
+  }, []);
 
   useEffect(() => {
     const el = editorRef.current;
@@ -404,6 +456,44 @@ function RichTextEditor({ value, onChange }) {
     });
   };
 
+  const applyFontFamily = (fontFamily) => {
+    if (!fontFamily) return;
+    if (fontFamily === ITALIC_FONT_VALUE) {
+      withEditorSelection((editor) => {
+        const sel = window.getSelection();
+        if (!sel?.rangeCount) return;
+        const range = sel.getRangeAt(0);
+        exec('styleWithCSS', true);
+        if (!exec('italic')) {
+          if (!range.collapsed) {
+            wrapSelectionInline((node) => {
+              node.style.fontStyle = 'italic';
+            });
+          } else {
+            const block = getBlockElement(range.startContainer, editor) || ensureEditorHasBlock(editor);
+            if (block) block.style.fontStyle = 'italic';
+          }
+        }
+      });
+      return;
+    }
+    withEditorSelection((editor) => {
+      const sel = window.getSelection();
+      if (!sel?.rangeCount) return;
+      const range = sel.getRangeAt(0);
+
+      if (!range.collapsed) {
+        wrapSelectionInline((node) => {
+          node.style.fontFamily = fontFamily;
+        });
+        return;
+      }
+
+      const block = getBlockElement(range.startContainer, editor) || ensureEditorHasBlock(editor);
+      if (block) block.style.fontFamily = fontFamily;
+    });
+  };
+
   const applyLineSpacing = (lineHeight) => {
     if (!lineHeight) return;
     withEditorSelection((editor) => {
@@ -450,6 +540,70 @@ function RichTextEditor({ value, onChange }) {
 
   const [textColor, setTextColor] = useState('#111827');
   const [highlightColor, setHighlightColor] = useState('#fef08a');
+
+  const insertImageAtSelection = (url) => {
+    if (!url) return;
+    withEditorSelection((editor) => {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = '';
+      img.style.maxWidth = '100%';
+      img.style.height = 'auto';
+      img.style.borderRadius = '8px';
+
+      const sel = window.getSelection();
+      if (sel?.rangeCount && editor.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(img);
+        const spacer = document.createElement('p');
+        spacer.innerHTML = '<br>';
+        img.after(spacer);
+      } else {
+        editor.appendChild(img);
+        const spacer = document.createElement('p');
+        spacer.innerHTML = '<br>';
+        editor.appendChild(spacer);
+      }
+    });
+  };
+
+  const handleInlineImageUpload = async (file) => {
+    if (!file || uploadingImageRef.current) return;
+    uploadingImageRef.current = true;
+    try {
+      const url = await uploadBlogInlineImage(file);
+      insertImageAtSelection(url);
+    } catch (err) {
+      window.alert(err?.response?.data?.message || err?.message || 'Failed to upload image');
+    } finally {
+      uploadingImageRef.current = false;
+    }
+  };
+
+  const handleImagePick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    await handleInlineImageUpload(file);
+  };
+
+  const handlePaste = async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items?.length) return;
+    for (const item of items) {
+      if (!String(item.type || '').startsWith('image/')) continue;
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (file) await handleInlineImageUpload(file);
+      return;
+    }
+  };
+
+  const openImagePicker = () => {
+    saveSelection();
+    imageInputRef.current?.click();
+  };
 
   const insertTable = () => {
     const rowsRaw = window.prompt('How many rows?', '3');
@@ -609,6 +763,34 @@ function RichTextEditor({ value, onChange }) {
           ))}
         </select>
 
+        <select
+          className={`${selectClass} max-w-[96px]`}
+          defaultValue=""
+          onMouseDown={saveSelectionForSelect}
+          onFocus={saveSelectionForSelect}
+          onChange={handleSelectChange((e) => {
+            if (e.target.value) applyFontFamily(e.target.value);
+          })}
+          title="Font family"
+        >
+          <option value="" disabled>
+            Font
+          </option>
+          {FONT_FAMILY_OPTIONS.map((item) => (
+            <option
+              key={item.label}
+              value={item.value}
+              style={
+                item.value === ITALIC_FONT_VALUE
+                  ? { fontStyle: 'italic' }
+                  : { fontFamily: item.value }
+              }
+            >
+              {item.label}
+            </option>
+          ))}
+        </select>
+
         <button
           type="button"
           className={btnClass}
@@ -708,6 +890,17 @@ function RichTextEditor({ value, onChange }) {
         <button type="button" className={btnClass} onMouseDown={toolbarAction(insertTable)} title="Insert table">
           Table
         </button>
+
+        <button type="button" className={btnClass} onMouseDown={toolbarAction(openImagePicker)} title="Insert image">
+          Image
+        </button>
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/gif,image/webp"
+          className="hidden"
+          onChange={handleImagePick}
+        />
       </div>
       <div
         ref={editorRef}
@@ -718,6 +911,7 @@ function RichTextEditor({ value, onChange }) {
         className={editorBodyClass}
         onInput={emitChange}
         onBlur={emitChange}
+        onPaste={handlePaste}
         onClick={handleEditorClick}
         onMouseDown={handleEditorMouseDown}
         onFocus={handleEditorFocus}
@@ -857,6 +1051,7 @@ function SuperAdminBlogsPanel() {
     setError('');
     setSuccess('');
     try {
+      const normalizedDetails = await persistBlobImagesInDetails(form.details || '');
       const payload = {
         title: form.title.trim(),
         blog_date: form.blog_date,
@@ -864,7 +1059,7 @@ function SuperAdminBlogsPanel() {
         meta_title: form.meta_title.trim(),
         meta_description: form.meta_description.trim(),
         meta_keywords: form.meta_keywords.trim(),
-        details: form.details || '',
+        details: normalizedDetails,
         is_active: form.is_active,
       };
 

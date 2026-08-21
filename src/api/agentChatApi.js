@@ -1,5 +1,6 @@
+import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 // const BASE_URL = "https://wabizx.techwhizzc.com/api/agent/chat";
-const BASE_URL = "https://api.waabizx.com/api/agent/chat";
+const BASE_URL = `${getApiUrl()}/agent/chat`;
 
 export const getActiveChats = async () => {
   const res = await fetch(`${BASE_URL}/active`);

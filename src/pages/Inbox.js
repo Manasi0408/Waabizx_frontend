@@ -33,9 +33,9 @@ import {
   templateNeedsHeaderMedia,
 } from '../utils/whatsappTemplatePreview';
 import { mergeChatMessages, messagesMatchForDedupe, messageHasTemplateCard, dedupeChatMessages } from '../utils/mergeChatMessages';
+import { getApiOrigin } from '../utils/apiBase';
 
-// const API_BASE = 'https://wabizx.techwhizzc.com/';
-const API_BASE = 'https://api.waabizx.com/';
+const API_BASE = `${getApiOrigin()}/`;
 const INTERVENED_STORAGE_KEY = 'inboxIntervenedPhones';
 
 const normalizePhoneKey = (phone) => String(phone || '').replace(/\D/g, '');
@@ -574,15 +574,19 @@ function Inbox({ pageMode = 'inbox' }) {
     let cancelled = false;
     (async () => {
       try {
-        const [localRes, metaRes] = await Promise.all([
-          getTemplates({ page: 1, limit: 500, status: 'approved' }),
-          axios.get('/templates/meta'),
-        ]);
+        const localRes = await getTemplates({ page: 1, limit: 500, status: 'approved' });
+        let metaTemplates = [];
+        try {
+          const metaRes = await axios.get('/templates/meta');
+          metaTemplates = Array.isArray(metaRes?.data?.templates) ? metaRes.data.templates : [];
+        } catch (_) {
+          /* WhatsApp may not be linked yet for this project */
+        }
         const map = new Map();
         (localRes?.templates || []).forEach((t) => {
           if (t?.name) map.set(normalizeTemplateKey(t.name), t);
         });
-        (metaRes?.data?.templates || []).forEach((t) => {
+        metaTemplates.forEach((t) => {
           if (!t?.name) return;
           const key = normalizeTemplateKey(t.name);
           const existing = map.get(key);
@@ -631,7 +635,13 @@ function Inbox({ pageMode = 'inbox' }) {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    interveneOptionsLoadedRef.current = false;
+    setInterveneTemplateOptions([]);
+    setInterveneCannedOptions([]);
+  }, [activeProjectId]);
 
   const chatFetchWithProject = useCallback(async (path) => {
     const token = localStorage.getItem('token');
@@ -2948,7 +2958,7 @@ function Inbox({ pageMode = 'inbox' }) {
           templateHasImageHeader(item) ||
           String(item.templatePreview?.headerFormat || '').toUpperCase() === 'IMAGE';
         if (needsHeaderMedia && !headerMediaUrl) {
-          throw new Error('Upload a header image before sending this template.');
+          throw new Error('Choose header media from Media Library before sending this template.');
         }
 
         setInterveneQuickPickerOpen(false);
@@ -3066,14 +3076,12 @@ function Inbox({ pageMode = 'inbox' }) {
       setLoadingInterveneOptions(true);
       setInterveneOptionsError("");
 
-      const phone = selectedContact?.phone;
-      if (!phone) return;
-
-      const [cannedRes, localApprovedRes, metaRes] = await Promise.all([
+      const [cannedRes, localApprovedRes, metaResult] = await Promise.all([
         axios.get("/canned-messages"),
         getTemplates({ status: "approved", limit: 200 }),
-        axios.get("/templates/meta"),
+        axios.get("/templates/meta").catch(() => ({ data: { templates: [] } })),
       ]);
+      const metaRes = metaResult;
 
       const cannedMessages = Array.isArray(cannedRes?.data?.messages) ? cannedRes.data.messages : [];
       setInterveneCannedOptions(
@@ -3162,22 +3170,17 @@ function Inbox({ pageMode = 'inbox' }) {
   };
 
   useEffect(() => {
-    const phone = selectedContact?.phone;
-    const isIntervened =
-      !!phone &&
-      (intervenedPhones[phone] ||
-        String(selectedContact?.chatStatus || '').toLowerCase() === 'intervened');
-    if (!phone || !isIntervened) return;
-    if (interveneOptionsLoadedRef.current) return;
+    if (!interveneQuickPickerOpen) return;
     fetchInterveneInsertOptions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContact, intervenedPhones]);
+  }, [interveneQuickPickerOpen, activeProjectId]);
 
   useEffect(() => {
     if (!interveneQuickPickerOpen) return;
     const onDocMouseDown = (e) => {
       const el = interveneQuickPickerRef.current;
       if (!el) return;
+      if (e.target?.closest?.('[data-flow-media-library]')) return;
       if (!el.contains(e.target)) {
         closeIntervenePicker();
       }

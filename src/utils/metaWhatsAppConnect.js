@@ -1,6 +1,6 @@
+import { getApiOrigin } from './apiBase';
 export const META_SDK_VERSION = "v23.0";
 
-// const DEFAULT_META_CALLBACK = "https://wabizx.techwhizzc.com/meta/callback";
 const DEFAULT_META_CALLBACK = "https://api.waabizx.com/meta/callback";
 
 /** Never use stale ngrok tunnels — Meta OAuth callback must hit the live production host. */
@@ -133,7 +133,7 @@ export function resolveMetaAppOrigin() {
     return new URL(META_EMBEDDED_REDIRECT_URI).origin;
   } catch (_) {
     // return "https://wabizx.techwhizzc.com";
-    return "https://api.waabizx.com";
+    return getApiOrigin();
   }
 }
 

@@ -1,7 +1,13 @@
 import React from 'react';
 
-export default function SessionExpiredModal({ open, onClose }) {
+export default function SessionExpiredModal({ open, onClose, reason = 'expired' }) {
   if (!open) return null;
+
+  const loggedInElsewhere = reason === 'elsewhere';
+  const title = loggedInElsewhere ? 'Signed in on another device' : 'Session expired';
+  const body = loggedInElsewhere
+    ? 'This account was used to sign in somewhere else. For security, you have been signed out here. Please login again to continue on this device.'
+    : 'Your login session is no longer valid. Please login again to continue.';
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
@@ -12,15 +18,13 @@ export default function SessionExpiredModal({ open, onClose }) {
               !
             </div>
             <div>
-              <h3 className="text-base font-bold text-gray-900">Session expired</h3>
-              <p className="mt-1 text-xs text-gray-500">Your login session is no longer valid</p>
+              <h3 className="text-base font-bold text-gray-900">{title}</h3>
+              <p className="mt-1 text-xs text-gray-500">Please sign in again to continue</p>
             </div>
           </div>
         </div>
         <div className="px-5 py-4">
-          <p className="text-sm leading-relaxed text-gray-700">
-            Session is expired. Please login again to continue.
-          </p>
+          <p className="text-sm leading-relaxed text-gray-700">{body}</p>
         </div>
         <div className="flex justify-end border-t border-gray-100 bg-gray-50/70 px-5 py-4">
           <button

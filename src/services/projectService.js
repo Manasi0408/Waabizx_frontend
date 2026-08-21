@@ -1,7 +1,6 @@
-const API_URL = process.env.REACT_APP_API_URL
-  ? `${process.env.REACT_APP_API_URL.replace(/\/$/, '')}/api`
-  // : 'https://wabizx.techwhizzc.com/api';
-  : 'https://api.waabizx.com/api';
+import { getApiUrl } from '../utils/apiBase';
+
+const API_URL = getApiUrl();
 
 const getToken = () => localStorage.getItem('token');
 

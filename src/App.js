@@ -2127,7 +2127,11 @@ function App() {
         />
         <Route
           path="/project-dashboard"
-          element={<AdminDashboardRoute />}
+          element={
+            <ProtectedRoute>
+              <AdminDashboardRoute />
+            </ProtectedRoute>
+          }
         />
         <Route
           path="/agent-dashboard"

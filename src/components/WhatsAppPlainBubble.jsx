@@ -1,6 +1,7 @@
 import React from 'react';
 import { formatWhatsAppBody } from '../utils/whatsappTemplatePreview';
 import { resolvePublicMediaUrl } from '../utils/mediaUrl';
+import { getApiOrigin } from '../utils/apiBase';
 
 const MEDIA_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
@@ -34,8 +35,7 @@ export default function WhatsAppPlainBubble({
   align = 'left',
   formatTime,
   status,
-  // apiBase = 'https://wabizx.techwhizzc.com/',
-  apiBase = 'https://api.waabizx.com/',
+  apiBase = `${getApiOrigin()}/`,
   onButtonClick,
 }) {
   const isOutgoing = message?.type === 'outgoing' || message?.sender === 'agent';

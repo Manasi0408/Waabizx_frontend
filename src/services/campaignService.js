@@ -1,5 +1,6 @@
+import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 // const API_URL = 'https://wabizx.techwhizzc.com/api';
-const API_URL = 'https://api.waabizx.com/api';
+const API_URL = getApiUrl();
 
 // Get token from localStorage
 const getToken = () => {
@@ -390,6 +391,69 @@ export const getCampaignRetryPrefill = async (campaignId, status = 'failed') => 
     }
 
     throw new Error(data.message || 'Failed to load retry data');
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const estimateCampaignCost = async ({ phones = [], audience = [], category = 'marketing', campaignId = null } = {}) => {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('No token found');
+
+    const response = await fetch(`${API_URL}/campaigns/estimate-cost`, {
+      method: 'POST',
+      headers: buildAuthHeaders(),
+      body: JSON.stringify({
+        phones,
+        audience,
+        category,
+        campaignId,
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok || data.success === false) {
+      throw new Error(data.message || data.error || 'Failed to estimate campaign cost');
+    }
+    return data;
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const calculateCampaignCost = async ({
+  contacts = [],
+  audience = [],
+  phones = [],
+  category = 'marketing',
+  currency = 'INR',
+} = {}) => {
+  try {
+    const token = getToken();
+    if (!token) throw new Error('No token found');
+
+    const contactList = contacts.length
+      ? contacts
+      : audience.length
+        ? audience
+        : phones.map((phone) => ({ phone }));
+
+    const response = await fetch(`${API_URL}/campaigns/calculate-cost`, {
+      method: 'POST',
+      headers: buildAuthHeaders(),
+      body: JSON.stringify({
+        contacts: contactList,
+        category,
+        currency,
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok || data.success === false) {
+      throw new Error(data.message || data.error || 'Failed to calculate campaign cost');
+    }
+    return data;
   } catch (error) {
     throw error;
   }

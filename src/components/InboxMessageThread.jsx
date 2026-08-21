@@ -1,8 +1,8 @@
 import React from 'react';
 import ChatMessageItem from './ChatMessageItem';
+import { getApiOrigin } from '../utils/apiBase';
 
-// export const INBOX_API_BASE = 'https://wabizx.techwhizzc.com/';
-export const INBOX_API_BASE = 'https://api.waabizx.com/';
+export const INBOX_API_BASE = `${getApiOrigin()}/`;
 
 export function personalizeSystemText(text, userName) {
   const raw = String(userName || "").trim();

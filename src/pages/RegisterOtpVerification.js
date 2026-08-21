@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import BrandLogoMark, { BrandLogoWatermark } from '../components/BrandLogoMark';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { resendRegisterOtp, verifyRegisterOtp } from '../services/authService';
+import { resendRegisterOtp, verifyRegisterOtp, logout, markAuthSessionIssued } from '../services/authService';
 import ThemeToggle from '../components/ThemeToggle';
 
 const inputClass =
@@ -51,6 +51,19 @@ function RegisterOtpVerification() {
     try {
       const response = await verifyRegisterOtp(email, otp);
       if (response.success) {
+        try {
+          localStorage.removeItem('selectedProject');
+        } catch (_) {
+          /* ignore */
+        }
+
+        if (response.token && response.user) {
+          markAuthSessionIssued();
+          navigate('/project-dashboard', { replace: true });
+          return;
+        }
+
+        logout();
         navigate('/login', { state: { email, registered: true } });
       }
     } catch (err) {

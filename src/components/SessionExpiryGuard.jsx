@@ -4,16 +4,23 @@ import SessionExpiredModal from './SessionExpiredModal';
 import {
   SESSION_EXPIRED_EVENT_NAME,
   consumeSessionExpiredFlag,
+  consumeSessionExpiredReason,
 } from '../services/sessionExpiryService';
 
 export default function SessionExpiryGuard() {
   const navigate = useNavigate();
   const location = useLocation();
   const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('expired');
+
+  const openSessionModal = () => {
+    setReason(consumeSessionExpiredReason());
+    setOpen(true);
+  };
 
   useEffect(() => {
     if (consumeSessionExpiredFlag()) {
-      setOpen(true);
+      openSessionModal();
       if (!location.pathname.startsWith('/login')) {
         navigate('/login', { replace: true });
       }
@@ -23,7 +30,7 @@ export default function SessionExpiryGuard() {
 
   useEffect(() => {
     const onSessionExpired = () => {
-      setOpen(true);
+      openSessionModal();
       if (!window.location.pathname.startsWith('/login')) {
         navigate('/login', { replace: true });
       }
@@ -37,6 +44,7 @@ export default function SessionExpiryGuard() {
     <SessionExpiredModal
       open={open}
       onClose={() => setOpen(false)}
+      reason={reason}
     />
   );
 }

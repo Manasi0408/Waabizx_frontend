@@ -6,6 +6,7 @@ import AdminHeaderProjectSwitch from "../components/AdminHeaderProjectSwitch";
 import HeaderRightActions from "../components/HeaderRightActions";
 import { readSessionUser } from "../services/authService";
 import { getDispositionOptions, getDispositionLabel } from "../constants/resolveDispositions";
+import { getApiUrl } from '../utils/apiBase';
 
 function getSelectedProjectId() {
   try {
@@ -30,8 +31,8 @@ function buildAuthHeaders({ json = true } = {}) {
 
 export default function ReportsComingSoonPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  // const API_URL = "https://wabizx.techwhizzc.com/api";
-  const API_URL = "https://api.waabizx.com/api";
+
+  const API_URL = getApiUrl();
 
   const user = readSessionUser();
 

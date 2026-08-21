@@ -13,11 +13,9 @@ import FlowMessage from './FlowMessage';
 import StickerMessage from './StickerMessage';
 import LocationMessage from './LocationMessage';
 import ContactMessage from './ContactMessage';
+import { getApiOrigin } from '../../utils/apiBase';
 
-const DEFAULT_API_BASE =
-  process.env.REACT_APP_API_URL?.replace(/\/api\/?$/i, '') ||
-  // 'https://wabizx.techwhizzc.com';
-  'https://api.waabizx.com';
+const DEFAULT_API_BASE = getApiOrigin();
 
 /**
  * AiSensy-style message renderer — switch on normalized message type.

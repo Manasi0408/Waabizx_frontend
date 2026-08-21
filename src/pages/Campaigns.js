@@ -55,6 +55,44 @@ const RECHURN_STATUS_META = {
   failed: { label: 'Failed', title: 'Rebroadcast to failed recipients' },
 };
 
+function buildRetryAudienceColumns(audience = [], variableMapping = null) {
+  const rows = Array.isArray(audience) ? audience : [];
+  const mapping =
+    variableMapping && typeof variableMapping === 'object' && !Array.isArray(variableMapping)
+      ? variableMapping
+      : {};
+  const columns = [{ key: 'phone', label: 'Phone' }];
+  for (let i = 1; i <= 5; i += 1) {
+    const varKey = `var${i}`;
+    const hasValue = rows.some((row) => String(row?.[varKey] ?? '').trim() !== '');
+    if (!hasValue) continue;
+    const mapped =
+      mapping[String(i)] ||
+      mapping[i] ||
+      mapping[`{{${i}}}`];
+    columns.push({
+      key: varKey,
+      label: mapped ? String(mapped).replace(/_/g, ' ') : `Field ${i}`,
+    });
+  }
+  return columns;
+}
+
+function exportRetryAudienceCsv(audience = [], columns = [], filename = 'rebroadcast-recipients.csv') {
+  const rows = Array.isArray(audience) ? audience : [];
+  const cols = columns.length ? columns : buildRetryAudienceColumns(rows);
+  const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const header = cols.map((col) => escapeCell(col.label)).join(',');
+  const body = rows.map((row) => cols.map((col) => escapeCell(row[col.key])).join(',')).join('\n');
+  const blob = new Blob([`${header}\n${body}`], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 async function prepareImageHeaderForUpload(file) {
   const mime = String(file.type || '').toLowerCase();
   const name = String(file.name || '');
@@ -653,7 +691,7 @@ function Campaigns() {
       header_media_url: null,
       template_header_format: null,
       needs_header_media: false,
-      variable_mapping: null,
+      variable_mapping: retryPrefill.variable_mapping || null,
       audience: (retryPrefill.audience || []).map((row) => ({
         phone: row.phone || '',
         var1: row.var1 || '',
@@ -731,6 +769,10 @@ function Campaigns() {
       const columns = result.columns || [];
       const phoneCol = columns.find(c => /phone/i.test(c)) || columns[0];
       const varCols = columns.filter(c => c !== phoneCol);
+      const variable_mapping = {};
+      varCols.slice(0, 5).forEach((col, i) => {
+        variable_mapping[String(i + 1)] = col;
+      });
       const audience = rows.map(row => {
         const member = {
           phone: row.phone || row[phoneCol] || '',
@@ -741,7 +783,7 @@ function Campaigns() {
         });
         return member;
       });
-      setFormData(prev => ({ ...prev, audience }));
+      setFormData(prev => ({ ...prev, audience, variable_mapping: Object.keys(variable_mapping).length ? variable_mapping : prev.variable_mapping }));
       setSuccess(`CSV uploaded: ${audience.length} recipients added`);
       setTimeout(() => setSuccess(''), 3000);
     } catch (err) {
@@ -1579,8 +1621,8 @@ function Campaigns() {
       {/* Rebroadcast Recipients Modal */}
       {showRetryModal && selectedCampaign && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-md w-full ring-1 ring-black/5">
-            <div className="p-6">
+          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-4xl w-full max-h-[90vh] flex flex-col ring-1 ring-black/5">
+            <div className="p-6 overflow-hidden flex flex-col min-h-0">
               <h3 className="text-xl font-bold text-gray-900 mb-2">
                 {RECHURN_STATUS_META[retryStatus]?.label || 'Recipient'} Rebroadcast
               </h3>
@@ -1599,32 +1641,69 @@ function Campaigns() {
                     {(retryPrefill.recipientCount ?? retryPrefill.failedCount) !== 1 ? 's' : ''} from{' '}
                     <span className="font-medium text-gray-800">"{retryPrefill.sourceCampaignName}"</span>.
                   </p>
-                  <p className="text-sm text-gray-500 mb-6">
-                    Create a new broadcast campaign for those numbers. You will choose the template on the next step.
+                  <p className="text-sm text-gray-500 mb-4">
+                    Review recipient details below (same fields as your CSV). Export if needed, then create the broadcast again.
                   </p>
-                  <div className="rounded-xl border border-gray-100 bg-gray-50/80 p-3 mb-6 text-sm text-gray-700 space-y-1">
-                    <p><span className="font-medium">Recipients:</span> {retryPrefill.recipientCount ?? retryPrefill.failedCount}</p>
-                    <p><span className="font-medium">Group:</span> {RECHURN_STATUS_META[retryStatus]?.label || retryStatus}</p>
+                  <div className="rounded-xl border border-gray-200 bg-gray-50/80 mb-4 overflow-hidden flex flex-col min-h-0 max-h-[50vh]">
+                    <div className="overflow-auto">
+                      <table className="min-w-full text-sm text-left">
+                        <thead className="bg-gray-100/90 sticky top-0 z-[1]">
+                          <tr>
+                            {buildRetryAudienceColumns(retryPrefill.audience, retryPrefill.variable_mapping).map((col) => (
+                              <th key={col.key} className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap border-b border-gray-200 capitalize">
+                                {col.label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(retryPrefill.audience || []).map((row, idx) => (
+                            <tr key={`${row.phone}-${idx}`} className="border-b border-gray-100 last:border-0 odd:bg-white even:bg-gray-50/50">
+                              {buildRetryAudienceColumns(retryPrefill.audience, retryPrefill.variable_mapping).map((col) => (
+                                <td key={col.key} className="px-3 py-2 text-gray-800 whitespace-nowrap">
+                                  {row[col.key] != null && String(row[col.key]).trim() !== '' ? String(row[col.key]) : '—'}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                  <div className="flex items-center justify-end gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <button
                       type="button"
-                      onClick={() => {
-                        setShowRetryModal(false);
-                        setRetryPrefill(null);
-                        setSelectedCampaign(null);
-                      }}
-                      className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
+                      onClick={() =>
+                        exportRetryAudienceCsv(
+                          retryPrefill.audience,
+                          buildRetryAudienceColumns(retryPrefill.audience, retryPrefill.variable_mapping),
+                          `${(retryPrefill.sourceCampaignName || 'campaign').replace(/[^\w.-]+/g, '_')}-${retryStatus}-recipients.csv`
+                        )
+                      }
+                      className="px-4 py-2.5 border-2 border-sky-200 rounded-xl text-sky-700 text-sm font-semibold hover:bg-sky-50 transition-all duration-200 active:scale-[0.98]"
                     >
-                      Cancel
+                      Export CSV
                     </button>
-                    <button
-                      type="button"
-                      onClick={handleConfirmRetryCreate}
-                      className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98]"
-                    >
-                      Create Broadcast Again
-                    </button>
+                    <div className="flex items-center gap-3 ml-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowRetryModal(false);
+                          setRetryPrefill(null);
+                          setSelectedCampaign(null);
+                        }}
+                        className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmRetryCreate}
+                        className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold hover:bg-sky-700 shadow-md shadow-sky-600/25 transition-all duration-200 hover:shadow-lg active:scale-[0.98]"
+                      >
+                        Create Broadcast Again
+                      </button>
+                    </div>
                   </div>
                 </>
               ) : null}

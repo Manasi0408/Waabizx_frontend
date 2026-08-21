@@ -2,15 +2,20 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import axios from "../api/axios";
+import { readSessionUser } from "../services/authService";
 import { fetchActivePlans, fetchConversationMetrics } from "../services/planService";
 import PlanSubscriptionView, { PlanGstBreakdown } from "./PlanSubscriptionView";
+import { getApiOrigin } from '../utils/apiBase';
 import {
   PLAN_MONTHLY_DEFAULT,
   buildConversationMetrics,
+  CONVERSATION_METRICS,
+  formatConversationRateText,
   cycleBillingAmount,
   computeQuarterlyFromMonthly,
   computeYearlyFromMonthly,
   formatInr,
+  formatUsd,
   formatPlanAmount,
   isInrCurrency,
   gstAmount,
@@ -209,16 +214,7 @@ const extractWhatsappDisplayName = (payload) => {
   ).trim();
 };
 
-const getApiOrigin = () => {
-  const base = String(
-    process.env.REACT_APP_API_URL || "https://api.waabizx.com"
-  )
-    .trim()
-    .replace(/\/$/, "");
-  return base.replace(/\/api$/i, "") || "https://api.waabizx.com";
-};
-
-/** Build display URL: uploads/123.png → https://api.waabizx.com/uploads/123.png */
+/** Build display URL: uploads/123.png → {apiOrigin}/uploads/123.png */
 const toLogoSrc = (logo) => {
   const value = logo != null ? String(logo).trim() : "";
   if (!value) return "";
@@ -280,8 +276,111 @@ const resolveProjectLogo = (project, profile) => {
   return "";
 };
 
-const resolveUserPricingCurrency = (u) =>
-  String(u?.currency || "").toUpperCase() === "USD" ? "USD" : "INR";
+const normalizeAccountMobileDigits = (u) => {
+  let digits = String(u?.mobileNumber || u?.mobile_number || u?.phoneNumber || "").replace(/\D/g, "");
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  return digits;
+};
+
+const isIndianUserAccount = (u) => {
+  const country = String(u?.country || "").trim().toUpperCase();
+  if (country === "IN" || country === "IND" || country === "INDIA") return true;
+  if (String(u?.currency || "").toUpperCase() === "INR") return true;
+
+  const ccDigits = String(u?.countryCode || u?.country_code || "").replace(/\D/g, "");
+  const mobileDigits = normalizeAccountMobileDigits(u);
+
+  if (ccDigits === "91" && mobileDigits.length >= 10) return true;
+  if (/^\d{10}$/.test(mobileDigits)) return true;
+
+  return false;
+};
+
+const isInternationalUserAccount = (u) => {
+  const country = String(u?.country || "").trim().toUpperCase();
+  if (country && country !== "IN" && country !== "IND" && country !== "INDIA") return true;
+
+  const ccRaw = String(u?.countryCode || u?.country_code || "").trim();
+  const ccDigits = ccRaw.replace(/\D/g, "");
+  if (ccRaw && ccDigits !== "91") return true;
+
+  return false;
+};
+
+const resolveUserPricingCurrency = (u, apiCurrency = null) => {
+  if (isIndianUserAccount(u)) return "INR";
+  if (isInternationalUserAccount(u)) return "USD";
+
+  const currency = String(u?.currency || "").toUpperCase();
+  if (currency === "INR") return "INR";
+  if (currency === "USD") return "USD";
+
+  return "INR";
+};
+
+const normalizeCatalogPlanForCurrency = (plan, currency, discounts = null) => {
+  if (!plan) return null;
+  const isUsd = !isInrCurrency(currency);
+  if (isUsd) {
+    const monthly = Number(plan.price_monthly_usd) || Number(plan.price_monthly) || 10;
+    const quarterly =
+      Number(plan.price_quarterly_usd) ||
+      Number(plan.price_quarterly) ||
+      computeQuarterlyFromMonthly(monthly, discounts);
+    const yearly =
+      Number(plan.price_yearly_usd) ||
+      Number(plan.price_yearly) ||
+      computeYearlyFromMonthly(monthly, discounts);
+    return {
+      ...plan,
+      currency: "USD",
+      price_monthly: monthly,
+      price_quarterly: quarterly,
+      price_yearly: yearly,
+    };
+  }
+
+  const monthlyUsd = Number(plan.price_monthly_usd) || 0;
+  let monthly = Number(plan.price_monthly) || PLAN_MONTHLY_DEFAULT;
+  const planTaggedUsd = String(plan.currency || "").toUpperCase() === "USD";
+  const looksLikeUsdMonthly =
+    monthly > 0 && monthly < 100 && (planTaggedUsd || (monthlyUsd > 0 && Math.abs(monthlyUsd - monthly) < 0.01));
+  if (looksLikeUsdMonthly) {
+    monthly = PLAN_MONTHLY_DEFAULT;
+  }
+
+  const quarterlyRaw = Number(plan.price_quarterly) || 0;
+  const yearlyRaw = Number(plan.price_yearly) || 0;
+  const quarterly =
+    quarterlyRaw >= 100 && !looksLikeUsdMonthly
+      ? quarterlyRaw
+      : computeQuarterlyFromMonthly(monthly, discounts);
+  const yearly =
+    yearlyRaw >= 100 && !looksLikeUsdMonthly
+      ? yearlyRaw
+      : computeYearlyFromMonthly(monthly, discounts);
+
+  return {
+    ...plan,
+    currency: "INR",
+    price_monthly: monthly,
+    price_quarterly: quarterly,
+    price_yearly: yearly,
+  };
+};
+
+const buildMetricsForCurrency = (metrics, rates, currency) => {
+  if (isInrCurrency(currency)) {
+    return buildConversationMetrics(metrics, rates);
+  }
+  return CONVERSATION_METRICS.map((metric) => ({
+    key: metric.key,
+    label: metric.label,
+    rate: Number(metric.rate_usd ?? metric.rate) || 0,
+    text: formatConversationRateText(metric.rate_usd ?? metric.rate, "USD"),
+  }));
+};
 
 function AgentRightPanel({
   user = null,
@@ -293,8 +392,8 @@ function AgentRightPanel({
 }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:5000";
-  const API_URL = `${API_BASE.replace(/\/$/, "")}`;
+  const API_BASE = getApiOrigin();
+  const API_URL = API_BASE;
   const [metaOnboardingLive, setMetaOnboardingLive] = useState(() =>
     readMetaLiveFromStorage(
       (() => {
@@ -392,7 +491,11 @@ function AgentRightPanel({
   const [logoRemoved, setLogoRemoved] = useState(false);
   const [accountSaving, setAccountSaving] = useState(false);
   const [planInfo, setPlanInfo] = useState(null);
-  const [pricingCurrency, setPricingCurrency] = useState(() => resolveUserPricingCurrency(user));
+  const pricingUser = useMemo(
+    () => ({ ...(readSessionUser() || {}), ...(user || {}) }),
+    [user]
+  );
+  const [pricingCurrency, setPricingCurrency] = useState(() => resolveUserPricingCurrency(pricingUser));
   const [planDiscounts, setPlanDiscounts] = useState(null);
 
   const [planStep, setPlanStep] = useState(1);
@@ -402,8 +505,16 @@ function AgentRightPanel({
   const [agentSeatCount, setAgentSeatCount] = useState(0);
 
   useEffect(() => {
-    setPricingCurrency(resolveUserPricingCurrency(user));
-  }, [user?.currency]);
+    setPricingCurrency(resolveUserPricingCurrency(pricingUser));
+  }, [
+    pricingUser?.currency,
+    pricingUser?.country,
+    pricingUser?.countryCode,
+    pricingUser?.country_code,
+    pricingUser?.mobileNumber,
+    pricingUser?.mobile_number,
+    pricingUser?.phoneNumber,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -416,9 +527,11 @@ function AgentRightPanel({
         ]);
         if (!cancelled) {
           const list = Array.isArray(plansResult?.plans) ? plansResult.plans : [];
-          setPricingCurrency(
-            plansResult.currency || metricsData.currency || resolveUserPricingCurrency(user)
+          const resolvedCurrency = resolveUserPricingCurrency(
+            pricingUser,
+            plansResult.currency || metricsData.currency
           );
+          setPricingCurrency(resolvedCurrency);
           setPlanDiscounts(plansResult.discounts || null);
           const active = list.filter((p) => p.is_active !== false);
           const sorted = (active.length ? active : list).slice().sort(
@@ -426,7 +539,9 @@ function AgentRightPanel({
           );
           const primary = sorted[0];
           setCatalogPlans(primary ? [primary] : buildFallbackCatalog());
-          setConversationMetrics(buildConversationMetrics(metricsData.metrics, metricsData.rates));
+          setConversationMetrics(
+            buildMetricsForCurrency(metricsData.metrics, metricsData.rates, resolvedCurrency)
+          );
         }
       } catch {
         if (!cancelled) setCatalogPlans(buildFallbackCatalog());
@@ -437,7 +552,7 @@ function AgentRightPanel({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pricingUser?.id, pricingUser?.country, pricingUser?.mobileNumber, pricingUser?.mobile_number, pricingUser?.currency]);
 
   useEffect(() => {
     const selectedProjectId = Number(selectedProject?.id);
@@ -928,10 +1043,10 @@ function AgentRightPanel({
     const sorted = (active.length ? active : catalogPlans).slice().sort(
       (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
     );
-    const plan = sorted[0];
+    const plan = normalizeCatalogPlanForCurrency(sorted[0], pricingCurrency, planDiscounts);
     const monthly = Number(plan?.price_monthly) || PLAN_MONTHLY_PRICE;
     return { ...plan, monthly };
-  }, [catalogPlans]);
+  }, [catalogPlans, pricingCurrency, planDiscounts]);
 
   const planMonthlyBase = unifiedPlan?.monthly ?? PLAN_MONTHLY_PRICE;
 
@@ -951,15 +1066,17 @@ function AgentRightPanel({
   const addonPrice = (flowBuilderEnabled ? flowBuilderPrice : 0) + agentSeatCount * agentSeatPrice;
   const grandTotal = basePlanPrice + addonPrice;
   const isUsdPricing = !isInrCurrency(pricingCurrency);
-  const planGst = isUsdPricing ? 0 : wccGstAmount(grandTotal);
+  const showIndianGst = isIndianUserAccount(pricingUser) && isInrCurrency(pricingCurrency);
+  const planGst = showIndianGst ? wccGstAmount(grandTotal) : 0;
   const planTotalPayable = resolvePayableAmount(grandTotal, pricingCurrency);
-  const planStep1Gst = isUsdPricing ? 0 : wccGstAmount(basePlanPrice);
+  const planStep1Gst = showIndianGst ? wccGstAmount(basePlanPrice) : 0;
   const planStep1Payable = resolvePayableAmount(basePlanPrice, pricingCurrency);
   const wccBalance =
     conversationQuota != null && !loadingQuota ? Number(conversationQuota.wccCredits ?? 0) : null;
   const wccBaseAmount = Math.max(0, Number(wccAmount) || 0);
-  const wccGst = wccGstAmount(wccBaseAmount);
-  const wccTotalPayable = wccPayableTotal(wccBaseAmount);
+  const wccGst = showIndianGst ? wccGstAmount(wccBaseAmount) : 0;
+  const wccTotalPayable = resolvePayableAmount(wccBaseAmount, pricingCurrency);
+  const wccCurrencySymbol = isUsdPricing ? '$' : '₹';
   const wccPurchaseDisabled = paymentLoading || wccBaseAmount < 100;
   const hasActivePlan = Boolean(planInfo?.active);
   const renewDateLabel = planInfo?.renewsOn
@@ -1732,7 +1849,7 @@ function AgentRightPanel({
                   <p className="text-xs text-gray-500 mt-1">Minimum amount of 100 credits is allowed.</p>
 
                   <div className="mt-3 flex items-center">
-                    <span className="px-3 py-2.5 border-2 border-r-0 border-sky-200 rounded-l-xl bg-sky-50 text-sky-700 font-semibold text-sm">₹</span>
+                    <span className="px-3 py-2.5 border-2 border-r-0 border-sky-200 rounded-l-xl bg-sky-50 text-sky-700 font-semibold text-sm">{wccCurrencySymbol}</span>
                     <input
                       type="number"
                       value={wccAmount}
@@ -1769,18 +1886,24 @@ function AgentRightPanel({
                   <div className="mt-4 rounded-xl border border-sky-100/90 bg-sky-50/40 px-3 py-3 space-y-2 text-sm">
                     <div className="flex items-center justify-between gap-2 text-gray-700">
                       <span>WCC amount</span>
-                      <span className="font-semibold tabular-nums">₹ {formatInr(wccBaseAmount)}</span>
+                      <span className="font-semibold tabular-nums">{formatPlanAmount(wccBaseAmount, pricingCurrency)}</span>
                     </div>
-                    <div className="flex items-center justify-between gap-2 text-gray-600">
-                      <span>GST (18%)</span>
-                      <span className="font-semibold tabular-nums">₹ {formatInr(wccGst)}</span>
-                    </div>
+                    {showIndianGst ? (
+                      <div className="flex items-center justify-between gap-2 text-gray-600">
+                        <span>GST (18%)</span>
+                        <span className="font-semibold tabular-nums">{formatPlanAmount(wccGst, pricingCurrency)}</span>
+                      </div>
+                    ) : null}
                     <div className="flex items-center justify-between gap-2 pt-2 border-t border-sky-200/80 text-gray-900">
-                      <span className="font-semibold">Total payable (incl. GST)</span>
-                      <span className="font-bold text-emerald-700 tabular-nums">₹ {formatInr(wccTotalPayable)}</span>
+                      <span className="font-semibold">
+                        {showIndianGst ? 'Total payable (incl. GST)' : 'Total payable'}
+                      </span>
+                      <span className="font-bold text-emerald-700 tabular-nums">{formatPlanAmount(wccTotalPayable, pricingCurrency)}</span>
                     </div>
                     <p className="text-[11px] text-gray-500 leading-snug">
-                      You will receive {formatInr(wccBaseAmount)} WCC credits. Payment is charged inclusive of 18% GST.
+                      {showIndianGst
+                        ? `You will receive ${formatInr(wccBaseAmount)} WCC credits. Payment is charged inclusive of 18% GST.`
+                        : `You will receive ${formatUsd(wccBaseAmount)} WCC credits.`}
                     </p>
                   </div>
 
@@ -1790,7 +1913,7 @@ function AgentRightPanel({
                     disabled={wccPurchaseDisabled}
                     className="mt-4 w-full px-4 py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 shadow-lg shadow-emerald-600/30 hover:from-emerald-500 hover:to-teal-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {paymentLoading ? "Opening…" : `Purchase Now — ₹ ${formatInr(wccTotalPayable)}`}
+                    {paymentLoading ? "Opening…" : `Purchase Now — ${formatPlanAmount(wccTotalPayable, pricingCurrency)}`}
                   </button>
                 </div>
 
@@ -1809,7 +1932,7 @@ function AgentRightPanel({
                   <div className="mt-4">
                     <label className="block text-sm font-semibold text-gray-800">Enter auto-recharge amount</label>
                     <div className="mt-2 flex items-center">
-                      <span className="px-3 py-2.5 border-2 border-r-0 border-gray-200 rounded-l-xl bg-gray-50/80 text-gray-700 font-semibold text-sm">₹</span>
+                      <span className="px-3 py-2.5 border-2 border-r-0 border-gray-200 rounded-l-xl bg-gray-50/80 text-gray-700 font-semibold text-sm">{wccCurrencySymbol}</span>
                       <input
                         type="number"
                         value={autoRechargeAmount}
@@ -1898,7 +2021,7 @@ function AgentRightPanel({
                             {formatPlanAmount(planStep1Payable, pricingCurrency)}
                           </p>
                         </div>
-                        {isInrCurrency(pricingCurrency) ? (
+                        {showIndianGst ? (
                           <p className="text-[11px] text-gray-500 mt-1">
                             Incl. GST {formatPlanAmount(planStep1Gst, pricingCurrency)} on plan {formatPlanAmount(basePlanPrice, pricingCurrency)}
                           </p>
@@ -1994,7 +2117,7 @@ function AgentRightPanel({
                           </span>
                         </p>
                       </div>
-                      {isInrCurrency(pricingCurrency) ? (
+                      {showIndianGst ? (
                         <p className="text-[11px] text-gray-500 mb-3">
                           Incl. GST {formatPlanAmount(planGst, pricingCurrency)} on subtotal{" "}
                           {formatPlanAmount(grandTotal, pricingCurrency)}

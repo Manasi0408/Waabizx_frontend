@@ -32,6 +32,37 @@ function mediaTypeFromFile(file) {
   return "IMAGE";
 }
 
+async function prepareImageHeaderForUpload(file) {
+  const mime = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "");
+  const isJpegOrPng =
+    mime === "image/jpeg" ||
+    mime === "image/jpg" ||
+    mime === "image/png" ||
+    /\.(jpe?g|png)$/i.test(name);
+  if (isJpegOrPng || typeof createImageBitmap !== "function") return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close?.();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+    if (!blob) return file;
+    const baseName = name.replace(/\.[^.]+$/, "") || "header-image";
+    return new File([blob], `${baseName}.jpg`, { type: "image/jpeg", lastModified: file.lastModified });
+  } catch {
+    return file;
+  }
+}
+
 function toStoredFlowMediaUrl(url) {
   return normalizeStoredFlowMediaPath(url);
 }
@@ -175,7 +206,10 @@ function FlowMediaLibraryModal({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[9999] bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 md:p-8">
+    <div
+      data-flow-media-library="true"
+      className="fixed inset-0 z-[9999] bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 md:p-8"
+    >
       <div className="w-full max-w-6xl h-[min(94vh,880px)] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-slate-200/90 ring-1 ring-black/5">
         <div className="shrink-0 flex items-center justify-between gap-4 px-6 py-5 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
           <div className="flex items-center gap-4 min-w-0 flex-wrap">
@@ -371,12 +405,19 @@ export default function FlowMediaAttachField({
   compact = false,
   label = "Attach media",
   hint = "Opens Media Library — browse, upload, or delete files",
+  autoOpen = false,
 }) {
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [error, setError] = useState("");
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
+
+  useEffect(() => {
+    if (autoOpen && !uploading) {
+      setLibraryOpen(true);
+    }
+  }, [autoOpen, uploading]);
 
   const openLibrary = () => {
     if (!uploading) setLibraryOpen(true);
@@ -404,11 +445,14 @@ export default function FlowMediaAttachField({
     setUploadPct(0);
     setError("");
     try {
-      const result = await uploadFlowMedia(file, {
+      const detectedType = mediaTypeFromFile(file);
+      const uploadFile =
+        detectedType === "IMAGE" ? await prepareImageHeaderForUpload(file) : file;
+      const result = await uploadFlowMedia(uploadFile, {
         onProgress: (pct) => setUploadPct(pct),
       });
       const stored = toStoredFlowMediaUrl(result.storedPath || result.url);
-      applyMediaSelection(stored, result.filename || file.name, result.mediaType || mediaTypeFromFile(file));
+      applyMediaSelection(stored, result.filename || uploadFile.name, result.mediaType || detectedType);
       setLibraryRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e?.message || "Failed to upload file");

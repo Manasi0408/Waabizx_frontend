@@ -70,6 +70,17 @@ function formatPhoneDisplay(phone) {
   return digits ? `+${digits}` : raw;
 }
 
+const readSelectedProjectId = () => {
+  try {
+    const raw = localStorage.getItem("selectedProject");
+    if (!raw) return "";
+    const id = JSON.parse(raw)?.id;
+    return id != null && String(id).trim() !== "" ? String(id) : "";
+  } catch {
+    return "";
+  }
+};
+
 function getAgentInitials(nameOrEmail) {
   const raw = String(nameOrEmail || "").trim();
   if (!raw) return "A";
@@ -294,6 +305,7 @@ function LiveChatPage() {
   const [selectedDisposition, setSelectedDisposition] = useState(null);
   const [resolvedConvIds, setResolvedConvIds] = useState(() => new Set());
   const [templateCatalog, setTemplateCatalog] = useState(() => new Map());
+  const [activeProjectId, setActiveProjectId] = useState(readSelectedProjectId);
   const [searchQuery, setSearchQuery] = useState("");
   const [intervenedPhones, setIntervenedPhones] = useState({});
   const [intervenedFilterOpen, setIntervenedFilterOpen] = useState(false);
@@ -544,15 +556,19 @@ function LiveChatPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [localRes, metaRes] = await Promise.all([
-          getTemplates({ page: 1, limit: 500, status: "approved" }),
-          axios.get("/templates/meta"),
-        ]);
+        const localRes = await getTemplates({ page: 1, limit: 500, status: "approved" });
+        let metaTemplates = [];
+        try {
+          const metaRes = await axios.get("/templates/meta");
+          metaTemplates = Array.isArray(metaRes?.data?.templates) ? metaRes.data.templates : [];
+        } catch (_) {
+          /* WhatsApp may not be linked yet */
+        }
         const map = new Map();
         (localRes?.templates || []).forEach((t) => {
           if (t?.name) map.set(normalizeTemplateKey(t.name), t);
         });
-        (metaRes?.data?.templates || []).forEach((t) => {
+        metaTemplates.forEach((t) => {
           if (!t?.name) return;
           const key = normalizeTemplateKey(t.name);
           const existing = map.get(key);
@@ -601,7 +617,26 @@ function LiveChatPage() {
       }
     })();
     return () => { cancelled = true; };
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    const syncProject = () => {
+      const next = readSelectedProjectId();
+      setActiveProjectId((prev) => (prev !== next ? next : prev));
+    };
+    const timer = setInterval(syncProject, 800);
+    window.addEventListener("storage", syncProject);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("storage", syncProject);
+    };
   }, []);
+
+  useEffect(() => {
+    insertLoadedRef.current = false;
+    setInsertTemplateOptions([]);
+    setInsertCannedOptions([]);
+  }, [activeProjectId]);
 
   const roleLower = (role || "").toLowerCase();
   const isAgent = roleLower === "agent";
@@ -1158,7 +1193,7 @@ function LiveChatPage() {
   };
 
   const loadInsertOptions = async () => {
-    if (!canHumanReply || insertLoadedRef.current) return;
+    if (!canHumanReply) return;
     setInsertLoading(true);
     setInsertError("");
 
@@ -1166,7 +1201,7 @@ function LiveChatPage() {
       const [cannedRes, localTemplatesRes, metaTemplatesRes] = await Promise.all([
         axios.get("/canned-messages"),
         axios.get("/templates", { params: { page: 1, limit: 200, status: "approved" } }),
-        axios.get("/templates/meta"),
+        axios.get("/templates/meta").catch(() => ({ data: { templates: [] } })),
       ]);
 
       const cannedMessages = Array.isArray(cannedRes?.data?.messages)
@@ -1457,7 +1492,7 @@ function LiveChatPage() {
           templateHasImageHeader(insertPreviewItem) ||
           String(insertPreviewItem.templatePreview?.headerFormat || "").toUpperCase() === "IMAGE";
         if (needsHeaderMedia && !headerMediaUrl) {
-          throw new Error("Upload a header image before sending this template.");
+          throw new Error("Choose header media from Media Library before sending this template.");
         }
         const isImageTemplate = needsHeaderMedia;
         const imageVars = isImageTemplate
@@ -1595,6 +1630,7 @@ function LiveChatPage() {
     const onDocMouseDown = (e) => {
       const el = insertPopoverRef.current;
       if (!el) return;
+      if (e.target?.closest?.('[data-flow-media-library]')) return;
       if (!el.contains(e.target)) closeInsertPopover();
     };
     document.addEventListener("mousedown", onDocMouseDown);
@@ -1602,10 +1638,10 @@ function LiveChatPage() {
   }, [insertOpen]);
 
   useEffect(() => {
-    if (!canHumanReply) return;
+    if (!insertOpen) return;
     loadInsertOptions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canHumanReply]);
+  }, [insertOpen, activeProjectId]);
 
   // Keep chat pinned to latest message like /inbox.
   useEffect(() => {

@@ -207,16 +207,21 @@ export const resolvePayableAmount = (base, currency = 'INR') => {
 };
 
 /** Billing totals prefer stored cycle prices, else monthly + cycle discount (−10% / −15%). */
-export const resolvePlanBillingAmount = (plan, cycle) => {
+export const resolvePlanBillingAmount = (plan, cycle, currency = 'INR') => {
+  const isUsd = !isInrCurrency(currency);
   if (cycle === 'quarterly') {
-    const quarterly = Number(plan?.price_quarterly);
+    const quarterly = Number(isUsd ? plan?.price_quarterly_usd : plan?.price_quarterly);
     if (Number.isFinite(quarterly) && quarterly > 0) return quarterly;
   }
   if (cycle === 'yearly') {
-    const yearly = Number(plan?.price_yearly);
+    const yearly = Number(isUsd ? plan?.price_yearly_usd : plan?.price_yearly);
     if (Number.isFinite(yearly) && yearly > 0) return yearly;
   }
-  const monthly = Math.max(0, Number(plan?.price_monthly) || PLAN_MONTHLY_DEFAULT);
+  const monthly = Math.max(
+    0,
+    Number(isUsd ? plan?.price_monthly_usd : plan?.price_monthly) ||
+      (isUsd ? 10 : PLAN_MONTHLY_DEFAULT)
+  );
   return cycleBillingAmount(monthly, cycle);
 };
 
@@ -227,12 +232,19 @@ export const buildCycleOptions = (monthly, plan = null, currency = 'INR', discou
   const discountLabels = buildPlanDiscountLabels(discounts);
   const cfg = resolveDiscountConfig(discounts);
   return ['monthly', 'quarterly', 'yearly'].map((cycle) => {
-    const billingAmount = cycleBillingAmount(baseMonthly, cycle, discounts);
-    const discountedMonthly = discountedMonthlyRate(baseMonthly, cycle, discounts);
+    const months = cycle === 'monthly' ? 1 : cycle === 'quarterly' ? 3 : 12;
+    const billingAmount = plan
+      ? resolvePlanBillingAmount(plan, cycle, currency)
+      : cycleBillingAmount(baseMonthly, cycle, discounts);
+    const discountedMonthly = Math.round((billingAmount / months) * 100) / 100;
+    const baseMonthlyForSavings = Math.max(
+      0,
+      Number(isUsd ? plan?.price_monthly_usd : plan?.price_monthly) || baseMonthly
+    );
     const savings =
       cycle === 'monthly'
         ? 0
-        : Math.round((baseMonthly - discountedMonthly) * (cycle === 'quarterly' ? 3 : 12) * 100) / 100;
+        : Math.round((baseMonthlyForSavings - discountedMonthly) * months * 100) / 100;
 
     let billingNote = 'Billed monthly recurring base subscription.';
     if (cycle === 'quarterly') {

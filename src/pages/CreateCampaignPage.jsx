@@ -4,8 +4,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { getProfile, isAuthenticated, logout, readSessionUser } from '../services/authService';
 import { getTemplates, getMetaTemplates, getMetaTemplateDetails, getTemplateById } from '../services/templateService';
 import { getConversationQuota } from '../services/dashboardService';
-import { sendTemplateMessage } from '../services/messageService';
-import { startCampaign } from '../services/campaignService';
+import { startCampaign, calculateCampaignCost } from '../services/campaignService';
 import { uploadBroadcastHeaderMedia } from '../services/broadcastService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
@@ -16,15 +15,95 @@ import { resolvePublicMediaUrl, toPermanentUploadPath } from '../utils/mediaUrl'
 import PlanLimitModal from '../components/PlanLimitModal';
 import { extractPlanLimitError, assertCanAddResource } from '../services/planLimitService';
 
-const API_BASE = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
-const MSG_COST_RUPEES = 0.396;
+import { getApiOrigin } from '../utils/apiBase';
+
+const API_BASE = getApiOrigin();
+
+function resolveTemplateBillingCategory(template) {
+  const meta = String(template?.metaCategory || template?.category || '').trim().toUpperCase();
+  if (meta === 'AUTHENTICATION') return 'authentication';
+  if (meta === 'UTILITY') return 'utility';
+  if (meta === 'SERVICE') return 'service';
+  return 'marketing';
+}
 const STEPS = [
   { id: 1, label: 'Campaign Name' },
   { id: 2, label: 'Upload CSV' },
   { id: 3, label: 'Create Message' },
-  { id: 4, label: 'Test Campaign' },
+  { id: 4, label: 'Schedule' },
   { id: 5, label: 'Preview & Send' },
 ];
+
+const SCHEDULE_MAX_MONTHS = 2;
+
+function maxScheduleDateTimeLocal() {
+  const d = new Date();
+  d.setMonth(d.getMonth() + SCHEDULE_MAX_MONTHS);
+  return d.toISOString().slice(0, 16);
+}
+
+function minScheduleDateTimeLocal() {
+  return new Date().toISOString().slice(0, 16);
+}
+
+async function prepareImageHeaderForUpload(file) {
+  const mime = String(file.type || '').toLowerCase();
+  const name = String(file.name || '');
+  const isJpegOrPng =
+    mime === 'image/jpeg' ||
+    mime === 'image/jpg' ||
+    mime === 'image/png' ||
+    /\.(jpe?g|png)$/i.test(name);
+  if (isJpegOrPng || typeof createImageBitmap !== 'function') return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      bitmap.close?.();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+    if (!blob) return file;
+    const baseName = name.replace(/\.[^.]+$/, '') || 'header-image';
+    return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: file.lastModified });
+  } catch {
+    return file;
+  }
+}
+
+function resolveStoredHeaderMediaUrl(...candidates) {
+  for (const candidate of candidates) {
+    const stored = toPermanentUploadPath(candidate);
+    if (stored) return stored;
+  }
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value && !value.startsWith('blob:') && value.startsWith('/uploads/')) return value;
+  }
+  return null;
+}
+
+async function resolveCampaignHeaderMediaForSend({ mediaFile, headerMediaUrl, mediaPreviewUrl, headerFormat }) {
+  if (mediaFile) {
+    const uploadFile =
+      headerFormat !== 'VIDEO' && headerFormat !== 'DOCUMENT'
+        ? await prepareImageHeaderForUpload(mediaFile)
+        : mediaFile;
+    const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
+    return (
+      resolveStoredHeaderMediaUrl(uploaded.storedPath, uploaded.url) ||
+      uploaded.url ||
+      null
+    );
+  }
+  return resolveStoredHeaderMediaUrl(headerMediaUrl, mediaPreviewUrl);
+}
 
 const MAP_ATTR_OPTIONS = [
   { value: '', label: '— Skip —' },
@@ -430,19 +509,6 @@ function validateTemplateVariables(template, templateVarMap, templateVarCustom, 
   return { valid: Object.keys(errors).length === 0, errors };
 }
 
-function normalizeTestPhone(countryCode, phone) {
-  let digits = digitsOnly(`${countryCode || ''}${phone || ''}`);
-  const cc = digitsOnly(countryCode);
-  if (cc && digits.startsWith(cc) && digits.length > cc.length + 9) {
-    /* already includes country code */
-  } else if (digits.length === 10 && (cc === '91' || countryCode === '+91')) {
-    digits = `91${digits}`;
-  } else if (digits.length === 10) {
-    digits = `${cc || '91'}${digits}`;
-  }
-  return digits;
-}
-
 async function uploadBroadcastCsv(file) {
   const formData = new FormData();
   formData.append('csvFile', file);
@@ -623,14 +689,15 @@ export default function CreateCampaignPage() {
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
   const [resolvingTemplate, setResolvingTemplate] = useState(false);
 
-  const [testName, setTestName] = useState('');
-  const [testPhone, setTestPhone] = useState('');
-  const [testCountry, setTestCountry] = useState('+91');
-
-  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState('');
   const [excludeOptedOut, setExcludeOptedOut] = useState(true);
   const [wccCredits, setWccCredits] = useState(null);
   const [planLimitModal, setPlanLimitModal] = useState(null);
+  const [costEstimate, setCostEstimate] = useState(null);
+  const [costBreakdown, setCostBreakdown] = useState([]);
+  const [costCategory, setCostCategory] = useState('');
+  const [remainingBalance, setRemainingBalance] = useState(null);
+  const [costLoading, setCostLoading] = useState(false);
 
   const handleSelectTemplate = async (t) => {
     setSelectedTemplate(t);
@@ -667,12 +734,10 @@ export default function CreateCampaignPage() {
     const nameCol = Object.keys(columnMapping).find((k) => columnMapping[k] === 'name');
     const phoneCol = Object.keys(columnMapping).find((k) => columnMapping[k] === 'phone');
     return {
-      name: testName.trim() || (nameCol && firstRow[nameCol] != null ? String(firstRow[nameCol]) : 'Alex'),
-      phone:
-        normalizeTestPhone(testCountry, testPhone) ||
-        (phoneCol && firstRow[phoneCol] != null ? digitsOnly(firstRow[phoneCol]) : '9876543210'),
+      name: nameCol && firstRow[nameCol] != null ? String(firstRow[nameCol]) : 'Alex',
+      phone: phoneCol && firstRow[phoneCol] != null ? digitsOnly(firstRow[phoneCol]) : '9876543210',
     };
-  }, [csvRows, columnMapping, testName, testPhone, testCountry]);
+  }, [csvRows, columnMapping]);
 
   const step3Validation = useMemo(
     () => validateTemplateVariables(selectedTemplate, templateVarMap, templateVarCustom, columnMapping, csvRows),
@@ -682,11 +747,52 @@ export default function CreateCampaignPage() {
   const step3Valid = !!selectedTemplate && step3Validation.valid;
 
   const audienceCount = csvRows.length;
-  const estimatedCost = useMemo(
-    () => Math.round(audienceCount * MSG_COST_RUPEES * 100) / 100,
-    [audienceCount]
-  );
-  const wccSufficient = wccCredits == null ? true : Number(wccCredits) >= estimatedCost;
+  const estimatedCost = costEstimate != null ? Number(costEstimate) : 0;
+  const wccSufficient = costEstimate == null ? true : Number(wccCredits ?? 0) >= estimatedCost;
+
+  useEffect(() => {
+    if (!csvRows.length || !selectedTemplate) {
+      setCostEstimate(null);
+      setCostBreakdown([]);
+      setCostCategory('');
+      setRemainingBalance(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setCostLoading(true);
+      try {
+        const audience = buildAudienceRows(csvRows, columnMapping, templateVarMap, templateVarCustom);
+        const data = await calculateCampaignCost({
+          contacts: audience,
+          category: resolveTemplateBillingCategory(selectedTemplate),
+          currency: 'INR',
+        });
+        if (!cancelled) {
+          setCostEstimate(Number(data.totalAmount) || 0);
+          setCostBreakdown(Array.isArray(data.countries) ? data.countries : []);
+          setCostCategory(String(data.category || resolveTemplateBillingCategory(selectedTemplate) || ''));
+          if (data.balance != null) setWccCredits(Number(data.balance));
+          if (data.remainingBalance != null) setRemainingBalance(Number(data.remainingBalance));
+        }
+      } catch (_) {
+        if (!cancelled) {
+          setCostEstimate(null);
+          setCostBreakdown([]);
+          setCostCategory('');
+          setRemainingBalance(null);
+        }
+      } finally {
+        if (!cancelled) setCostLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [csvRows, columnMapping, templateVarMap, templateVarCustom, selectedTemplate]);
+
+  const scheduledDate = scheduleTime ? new Date(scheduleTime) : null;
+  const isFutureSchedule = Boolean(scheduledDate && scheduledDate.getTime() > Date.now());
 
   const filteredTemplates = useMemo(() => {
     const q = templateSearch.trim().toLowerCase();
@@ -793,9 +899,10 @@ export default function CreateCampaignPage() {
   }, [selectedTemplate, csvColumns, columnMapping]);
 
   const handleHeaderMediaLibraryChange = ({ mediaUrl: storedUrl }) => {
-    const previewUrl = resolvePublicMediaUrl(storedUrl) || storedUrl;
+    const stored = toPermanentUploadPath(storedUrl) || storedUrl;
+    const previewUrl = resolvePublicMediaUrl(stored) || storedUrl;
     setMediaFile(null);
-    setHeaderMediaUrl(storedUrl);
+    setHeaderMediaUrl(stored);
     setMediaPreviewUrl(previewUrl);
   };
 
@@ -821,54 +928,6 @@ export default function CreateCampaignPage() {
       setError(e.message || 'CSV upload failed');
     } finally {
       setUploadingCsv(false);
-    }
-  };
-
-  const buildTestParams = () => {
-    const phoneDigits = normalizeTestPhone(testCountry, testPhone);
-    const firstRow = csvRows[0] || {};
-    const fallback = {
-      name: testName.trim() || previewFallback.name,
-      phone: phoneDigits || previewFallback.phone,
-    };
-    return templateVariables.map((n) => {
-      const key = String(n);
-      const custom = String(templateVarCustom[key] ?? '').trim();
-      if (custom) return custom;
-      const field = templateVarMap[key];
-      if (field === 'name') return fallback.name || 'Test User';
-      if (field === 'phone') return fallback.phone || '9999999999';
-      const fromRow = resolveVarFromField(field, firstRow, columnMapping, fallback);
-      return fromRow || fallback.name || 'Sample';
-    });
-  };
-
-  const handleTestSend = async () => {
-    const phone = normalizeTestPhone(testCountry, testPhone);
-    if (!testPhone.trim() || phone.length < 10) {
-      setError('Enter a valid WhatsApp number for test');
-      return;
-    }
-    if (!selectedTemplate) {
-      setError('Select a template first');
-      return;
-    }
-    setBusy(true);
-    setError('');
-    setSuccess('');
-    try {
-      await sendTemplateMessage(
-        phone,
-        selectedTemplate.name,
-        templateLanguage,
-        buildTestParams()
-      );
-      setSuccess('Test template sent successfully');
-      setTimeout(() => setSuccess(''), 3000);
-    } catch (e) {
-      setError(e.message || 'Failed to send test message');
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -899,7 +958,13 @@ export default function CreateCampaignPage() {
         setError('Fix template variable mapping before continuing');
         return;
       }
-      if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !headerMediaUrl) {
+      if (
+        selectedTemplate &&
+        templateHasMedia(selectedTemplate) &&
+        !mediaFile &&
+        !headerMediaUrl &&
+        !(mediaPreviewUrl && resolveStoredHeaderMediaUrl(mediaPreviewUrl))
+      ) {
         setError('This template needs a header image or video. Choose media from the library to continue.');
         return;
       }
@@ -907,6 +972,23 @@ export default function CreateCampaignPage() {
       return;
     }
     if (step === 4) {
+      if (scheduleTime) {
+        const picked = new Date(scheduleTime);
+        if (Number.isNaN(picked.getTime())) {
+          setError('Enter a valid schedule date and time');
+          return;
+        }
+        if (picked.getTime() <= Date.now()) {
+          setError('Schedule time must be in the future');
+          return;
+        }
+        const maxSchedule = new Date();
+        maxSchedule.setMonth(maxSchedule.getMonth() + SCHEDULE_MAX_MONTHS);
+        if (picked.getTime() > maxSchedule.getTime()) {
+          setError(`Schedule campaign up to ${SCHEDULE_MAX_MONTHS} months from today`);
+          return;
+        }
+      }
       setStep(5);
       return;
     }
@@ -927,7 +1009,13 @@ export default function CreateCampaignPage() {
       setError('No valid audience rows');
       return;
     }
-    if (selectedTemplate && templateHasMedia(selectedTemplate) && !mediaFile && !headerMediaUrl) {
+    if (
+      selectedTemplate &&
+      templateHasMedia(selectedTemplate) &&
+      !mediaFile &&
+      !headerMediaUrl &&
+      !(mediaPreviewUrl && resolveStoredHeaderMediaUrl(mediaPreviewUrl))
+    ) {
       setError('This template needs a header image or video. Choose media from the library before sending.');
       return;
     }
@@ -942,13 +1030,16 @@ export default function CreateCampaignPage() {
       }
 
       let resolvedHeaderMediaUrl = null;
-      if (mediaFile) {
-        const uploaded = await uploadBroadcastHeaderMedia(mediaFile);
-        resolvedHeaderMediaUrl = uploaded.url;
-      } else if (headerMediaUrl) {
-        resolvedHeaderMediaUrl = headerMediaUrl;
-      } else if (mediaPreviewUrl && !String(mediaPreviewUrl).startsWith('blob:')) {
-        resolvedHeaderMediaUrl = mediaPreviewUrl;
+      if (selectedTemplate && templateHasMedia(selectedTemplate)) {
+        resolvedHeaderMediaUrl = await resolveCampaignHeaderMediaForSend({
+          mediaFile,
+          headerMediaUrl,
+          mediaPreviewUrl,
+          headerFormat: selectedHeaderFormat,
+        });
+        if (!resolvedHeaderMediaUrl) {
+          throw new Error('This template needs a header image or video. Choose media in step 3 before sending.');
+        }
       }
 
       const variable_mapping = buildVariableMapping(templateVarMap, templateVarCustom);
@@ -956,17 +1047,23 @@ export default function CreateCampaignPage() {
         name: campaignName.trim(),
         template_name: selectedTemplate.name,
         template_language: templateLanguage,
-        schedule_time: scheduleEnabled ? new Date(Date.now() + 3600000).toISOString() : null,
+        schedule_time: isFutureSchedule ? scheduledDate.toISOString() : null,
         audience,
         variable_mapping,
         header_media_url: resolvedHeaderMediaUrl,
       });
       const campaignId = data.campaignId || data.campaign?.id;
       if (!campaignId) throw new Error('Campaign created but id missing');
-      if (!scheduleEnabled) {
+      if (!isFutureSchedule) {
         await startCampaign(campaignId);
       }
-      navigate('/campaigns', { state: { success: 'Campaign created and sending started' } });
+      navigate('/campaigns', {
+        state: {
+          success: isFutureSchedule
+            ? `Campaign scheduled for ${scheduledDate.toLocaleString()}`
+            : 'Campaign created and sending started',
+        },
+      });
     } catch (e) {
       const limitPayload = extractPlanLimitError(e);
       if (limitPayload) {
@@ -1326,81 +1423,35 @@ export default function CreateCampaignPage() {
                   </div>
                 )}
 
-                {/* Step 4 */}
+                {/* Step 4 — Schedule */}
                 {step === 4 && (
                   <div className="max-w-xl">
-                    <h2 className="text-xl font-bold text-gray-900 mb-1">Test Campaign</h2>
+                    <h2 className="text-xl font-bold text-gray-900 mb-1">Schedule Date and Time</h2>
                     <p className="text-sm text-gray-500 mb-6">
-                      Optionally send a test to an opted-in WhatsApp number, or continue to preview without testing.
+                      Leave empty to send immediately, or pick a future date and time (up to {SCHEDULE_MAX_MONTHS} months from today).
                     </p>
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
-                        <input
-                          type="text"
-                          value={testName}
-                          onChange={(e) => setTestName(e.target.value)}
-                          placeholder="Username"
-                          className="w-full px-4 py-3 border-2 border-gray-200/90 rounded-xl bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-400/20 outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Phone Number</label>
-                        <div className="flex gap-2">
-                          <select
-                            value={testCountry}
-                            onChange={(e) => setTestCountry(e.target.value)}
-                            className="px-3 py-3 border-2 border-gray-200/90 rounded-xl bg-white text-sm focus:border-sky-400 outline-none"
-                          >
-                            <option value="+91">IN +91</option>
-                            <option value="+1">US +1</option>
-                          </select>
-                          <input
-                            type="text"
-                            value={testPhone}
-                            onChange={(e) => setTestPhone(e.target.value)}
-                            placeholder="WhatsApp Number"
-                            className="flex-1 px-4 py-3 border-2 border-gray-200/90 rounded-xl bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-400/20 outline-none"
-                          />
-                          <button
-                            type="button"
-                            disabled={busy || !testPhone.trim()}
-                            onClick={handleTestSend}
-                            className="shrink-0 px-4 py-3 border-2 border-sky-300 text-sky-800 rounded-xl text-sm font-semibold flex items-center gap-2 hover:bg-sky-50 disabled:opacity-40 transition-all"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                            </svg>
-                            {busy ? 'Sending…' : 'Test'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Schedule (optional)</label>
+                    <input
+                      type="datetime-local"
+                      value={scheduleTime}
+                      min={minScheduleDateTimeLocal()}
+                      max={maxScheduleDateTimeLocal()}
+                      onChange={(e) => setScheduleTime(e.target.value)}
+                      className="w-full px-4 py-3 border-2 border-gray-200/90 rounded-xl bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-400/20 outline-none"
+                    />
+                    <p className="text-xs text-gray-500 mt-2">
+                      {scheduleTime
+                        ? `Campaign will send on ${new Date(scheduleTime).toLocaleString()}`
+                        : 'No schedule selected — campaign will send immediately on the next step.'}
+                    </p>
                   </div>
                 )}
 
-                {/* Step 5 */}
+                {/* Step 5 — Preview & Send */}
                 {step === 5 && (
                   <div>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
                       <div className="space-y-6">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium text-gray-800">Schedule Date and Time</p>
-                            <p className="text-xs text-gray-500">Schedule campaign upto two month from today</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setScheduleEnabled((v) => !v)}
-                            className={`w-12 h-6 rounded-full transition ${scheduleEnabled ? 'bg-sky-600' : 'bg-gray-300'}`}
-                          >
-                            <span
-                              className={`block w-5 h-5 bg-white rounded-full shadow transform transition ${
-                                scheduleEnabled ? 'translate-x-6' : 'translate-x-0.5'
-                              }`}
-                            />
-                          </button>
-                        </div>
                         <div className="flex items-center justify-between">
                           <div>
                             <p className="font-medium text-gray-800">Exclude Opted-out data</p>
@@ -1426,13 +1477,19 @@ export default function CreateCampaignPage() {
                           <p className="text-sm text-gray-500">Audience Size</p>
                           <p className="text-lg font-semibold text-gray-900">{audienceCount}</p>
                         </div>
+                        <div>
+                          <p className="text-sm text-gray-500">Send Time</p>
+                          <p className="text-lg font-semibold text-gray-900">
+                            {isFutureSchedule ? scheduledDate.toLocaleString() : 'Immediately'}
+                          </p>
+                        </div>
                         <button
                           type="button"
                           disabled={busy || !wccSufficient}
                           onClick={handleSendNow}
                           className="w-full max-w-xs py-3 rounded-xl font-bold uppercase tracking-wide text-white bg-gradient-to-r from-sky-600 to-blue-700 shadow-lg shadow-sky-600/30 hover:from-sky-500 hover:to-blue-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          {busy ? 'Sending…' : 'Send Now'}
+                          {busy ? 'Processing…' : isFutureSchedule ? 'Schedule Campaign' : 'Send Now'}
                         </button>
                         {!wccSufficient && (
                           <p className="text-red-600 text-sm font-semibold">Insufficient WCC please recharge</p>
@@ -1454,17 +1511,65 @@ export default function CreateCampaignPage() {
                     </div>
 
                     <div className="border-t border-sky-100 pt-4 flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-sky-50/80 to-slate-50/80 -mx-4 md:-mx-8 px-4 md:px-8 py-4 rounded-b-2xl">
-                      <span className="font-semibold text-gray-800">Estimated Campaign Cost</span>
-                      <div className="flex flex-wrap gap-4">
+                      <div>
+                        <span className="font-semibold text-gray-800">Estimated Campaign Cost</span>
+                        {costCategory ? (
+                          <p className="text-xs text-gray-500 mt-0.5 capitalize">{costCategory} template</p>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-col gap-3 w-full lg:w-auto">
+                        {costBreakdown.length > 0 ? (
+                          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                            {costBreakdown.map((row) => (
+                              <div
+                                key={row.countryCode || row.country}
+                                className="bg-white border border-sky-100 rounded-xl px-3 py-2 text-sm shadow-sm ring-1 ring-sky-50"
+                              >
+                                <p className="font-semibold text-gray-900">
+                                  {row.country || row.countryCode}
+                                </p>
+                                <p className="text-xs text-gray-500">
+                                  {row.messages ?? row.count ?? 0} messages
+                                </p>
+                                <p className="text-xs text-gray-500">
+                                  Rate: ${Number(row.rateUsd ?? row.originalPrice ?? 0).toFixed(4)} USD
+                                </p>
+                                {row.exchangeRate ? (
+                                  <p className="text-xs text-gray-500">
+                                    FX: 1 USD = ₹ {Number(row.exchangeRate).toFixed(2)}
+                                  </p>
+                                ) : null}
+                                <p className="text-xs text-gray-500">
+                                  ₹ {Number(row.rateLocal ?? row.pricePerMessage ?? 0).toFixed(4)}/msg
+                                </p>
+                                <p className="text-sm font-bold text-gray-900">
+                                  ₹ {Number(row.totalLocal ?? row.total ?? 0).toFixed(2)}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="flex flex-wrap gap-4">
                         <div className="bg-white border border-sky-100 rounded-xl px-4 py-2 text-center min-w-[140px] shadow-sm ring-1 ring-sky-50">
                           <p className="text-xs text-gray-500">Estimated Cost</p>
-                          <p className="font-bold text-gray-900">₹ {estimatedCost.toFixed(2)}</p>
+                          <p className="font-bold text-gray-900">
+                            {costLoading ? '…' : `₹ ${estimatedCost.toFixed(2)}`}
+                          </p>
                         </div>
                         <div className="bg-white border border-sky-100 rounded-xl px-4 py-2 text-center min-w-[140px] shadow-sm ring-1 ring-sky-50">
-                          <p className="text-xs text-gray-500">Available WCC</p>
+                          <p className="text-xs text-gray-500">Wallet Balance</p>
                           <p className={`font-bold ${wccSufficient ? 'text-gray-900' : 'text-red-600'}`}>
                             ₹ {wccCredits != null ? Number(wccCredits).toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'}
                           </p>
+                        </div>
+                        <div className="bg-white border border-sky-100 rounded-xl px-4 py-2 text-center min-w-[140px] shadow-sm ring-1 ring-sky-50">
+                          <p className="text-xs text-gray-500">Remaining Balance</p>
+                          <p className={`font-bold ${wccSufficient ? 'text-emerald-700' : 'text-red-600'}`}>
+                            {costLoading || remainingBalance == null
+                              ? '…'
+                              : `₹ ${Number(remainingBalance).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
+                          </p>
+                        </div>
                         </div>
                       </div>
                     </div>

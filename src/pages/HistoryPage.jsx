@@ -222,15 +222,19 @@ function HistoryPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [localRes, metaRes] = await Promise.all([
-          getTemplates({ page: 1, limit: 500, status: "approved" }),
-          axios.get("/templates/meta"),
-        ]);
+        const localRes = await getTemplates({ page: 1, limit: 500, status: "approved" });
+        let metaTemplates = [];
+        try {
+          const metaRes = await axios.get("/templates/meta");
+          metaTemplates = Array.isArray(metaRes?.data?.templates) ? metaRes.data.templates : [];
+        } catch (_) {
+          /* WhatsApp may not be linked yet */
+        }
         const map = new Map();
         (localRes?.templates || []).forEach((t) => {
           if (t?.name) map.set(normalizeTemplateKey(t.name), t);
         });
-        (metaRes?.data?.templates || []).forEach((t) => {
+        metaTemplates.forEach((t) => {
           if (t?.name) map.set(normalizeTemplateKey(t.name), t);
         });
         if (!cancelled) setTemplateCatalog(map);

@@ -1,5 +1,6 @@
+import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 // const API_BASE = (process.env.REACT_APP_API_URL || 'https://wabizx.techwhizzc.com').replace(/\/$/, '');
-const API_BASE = (process.env.REACT_APP_API_URL || 'https://api.waabizx.com').replace(/\/$/, '');
+const API_BASE = getApiOrigin();
 const API_URL = `${API_BASE}/api`;
 
 // Get token from localStorage

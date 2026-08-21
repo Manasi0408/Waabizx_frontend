@@ -2,8 +2,9 @@ import React, { useEffect, useState, useCallback } from "react";
 import { getToken } from "../services/authService";
 import { getManagerRequesting, assignChatToAgent } from "../api/chatApi";
 import { initializeSocket, onSocketEvent, offSocketEvent } from "../services/socketService";
+import { getApiOrigin } from "../utils/apiBase";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const API_URL = getApiOrigin();
 
 export default function AdminDashboard() {
   const [chats, setChats] = useState([]);

@@ -4,6 +4,7 @@
  */
 
 import { resolvePublicMediaUrl, resolveWhatsAppMediaUrl } from './mediaUrl';
+import { getApiOrigin } from './apiBase';
 
 const MEDIA_TYPES = new Set([
   'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'contacts',
@@ -152,10 +153,7 @@ export function normalizeMessage(raw, source = 'unknown') {
   const timestamp =
     raw.sentAt || raw.createdAt || raw.created_at || raw.timestamp || raw.received_at || null;
 
-  // const apiBase =
-  //   process.env.REACT_APP_API_URL?.replace(/\/api\/?$/i, '') || 'https://wabizx.techwhizzc.com';
-  const apiBase =
-    process.env.REACT_APP_API_URL?.replace(/\/api\/?$/i, '') || 'https://api.waabizx.com';
+  const apiBase = getApiOrigin();
 
   let resolvedMediaUrl = (() => {
     const direct = raw.mediaUrl || raw.url;

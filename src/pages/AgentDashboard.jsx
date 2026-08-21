@@ -2,8 +2,9 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import axios from "axios";
 import { getToken } from "../services/authService";
+import { getApiOrigin } from "../utils/apiBase";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const API_URL = getApiOrigin();
 
 export default function AgentDashboard() {
   const location = useLocation();

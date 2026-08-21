@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { getProfile, logout, isAuthenticated, readSessionUser } from '../services/authService';
+import { isActualSessionExpiryResponse } from '../services/sessionExpiryService';
 import { getNotifications, markAsRead, markAllAsRead } from '../services/notificationService';
 import { getDashboardStats, getConversationQuota } from '../services/dashboardService';
 import { getQualityRating } from '../services/projectService';
@@ -12,6 +13,7 @@ import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
 import AgentRightPanel from '../components/AgentRightPanel';
 import CountUp from '../components/CountUp';
+import { getApiOrigin } from '../utils/apiBase';
 
 function readSelectedProjectFromStorage() {
   try {
@@ -79,7 +81,7 @@ function Dashboard() {
   const [loadingQualityRating, setLoadingQualityRating] = useState(false);
   const [chartTimeRange, setChartTimeRange] = useState(1); // 1 (Today), 7, 30, or 90 days
   const notificationRef = useRef(null);
-  const API_BASE = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+  const API_BASE = getApiOrigin();
 
   const activeProjectId = useMemo(() => {
     const fromSelected = selectedProject?.id;
@@ -128,9 +130,13 @@ function Dashboard() {
         setUser(userData);
       } catch (error) {
         console.error('Error fetching profile:', error);
-        // If profile fetch fails, redirect to login
-        logout();
-        navigate('/login');
+        const payload =
+          error?.response?.data ||
+          (error?.message ? { message: error.message } : null);
+        if (isActualSessionExpiryResponse(payload, '/auth/profile')) {
+          logout();
+          navigate('/login');
+        }
       } finally {
         setLoading(false);
       }

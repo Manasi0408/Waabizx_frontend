@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import BrandLogoMark, { BrandLogoWatermark } from '../components/BrandLogoMark';
 import { useNavigate, Link, useLocation } from 'react-router-dom';
-import { login, requestPasswordReset, resetPassword, getProfile } from '../services/authService';
+import { login, requestPasswordReset, resetPassword, getProfile, logout, markAuthSessionIssued } from '../services/authService';
 import { getConversationQuota } from '../services/dashboardService';
 import ThemeToggle from '../components/ThemeToggle';
 import PasswordInput from '../components/PasswordInput';
@@ -45,6 +45,8 @@ function Login() {
   const [forgotError, setForgotError] = useState('');
   const [forgotInfo, setForgotInfo] = useState('');
 
+  const loginAttemptRef = useRef(0);
+
   const isForgotPasswordRoute = location.pathname === '/login/forgot-password';
 
   useEffect(() => {
@@ -73,12 +75,27 @@ function Login() {
     setError('');
     setLoading(true);
 
+    // Drop any stale token from a previous account/session before issuing a new login.
+    logout();
+    try {
+      localStorage.removeItem('selectedProject');
+    } catch (_) {
+      /* ignore */
+    }
+
+    const attemptId = ++loginAttemptRef.current;
+
     try {
       const response = await login(formData.email, formData.password);
+      if (attemptId !== loginAttemptRef.current) {
+        logout();
+        return;
+      }
       console.log('LOGIN RESPONSE:', response);
 
       if (response.success && response.token) {
         localStorage.setItem('token', response.token);
+        markAuthSessionIssued();
         // Source-of-truth role: profile from backend after token is set.
         // This avoids stale/partial login payloads.
         let resolvedUser = response.user || { id: response.id, name: response.name, role: response.role };

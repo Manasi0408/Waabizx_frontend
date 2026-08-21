@@ -1,5 +1,6 @@
+import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 // const API_URL = 'https://wabizx.techwhizzc.com/api';
-const API_URL = 'https://api.waabizx.com/api';
+const API_URL = getApiUrl();
 
 // Get token from localStorage
 const getToken = () => {
@@ -225,7 +226,10 @@ export const uploadBroadcastHeaderMedia = async (file) => {
     }
 
     if (data.success && data.url) {
-      return data;
+      return {
+        ...data,
+        storedPath: data.storedPath || null,
+      };
     }
 
     throw new Error(data.message || 'Failed to upload header media');

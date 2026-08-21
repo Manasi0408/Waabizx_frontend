@@ -1,4 +1,13 @@
 import { io } from 'socket.io-client';
+import { getApiOrigin } from '../utils/apiBase';
+
+function getSocketUrl() {
+  if (process.env.NODE_ENV !== 'production') {
+    const env = String(process.env.REACT_APP_API_URL || '').trim().replace(/\/$/, '');
+    return env || 'http://localhost:5000';
+  }
+  return getApiOrigin();
+}
 
 let socket = null;
 
@@ -7,7 +16,7 @@ export const initializeSocket = (userId, token) => {
     return socket;
   }
 
-  socket = io(process.env.REACT_APP_API_URL || 'http://localhost:5000', {
+  socket = io(getSocketUrl(), {
     auth: {
       token: token
     },

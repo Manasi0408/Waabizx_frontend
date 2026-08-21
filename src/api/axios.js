@@ -1,12 +1,11 @@
 import axios from "axios";
 import {
-  handleSessionExpired,
-  shouldHandleSessionExpired,
+  maybeHandleUnauthorizedResponse,
 } from "../services/sessionExpiryService";
+import { getApiUrl } from "../utils/apiBase";
 
 const instance = axios.create({
-  // baseURL: "https://wabizx.techwhizzc.com/api"
-  baseURL: "https://api.waabizx.com/api"
+  baseURL: getApiUrl(),
 });
 
 // Automatically attach token in every request
@@ -35,8 +34,8 @@ instance.interceptors.response.use(
     const status = error?.response?.status;
     const url = error?.config?.url || error?.config?.baseURL || "";
     const hadAuth = Boolean(error?.config?.__hadAuthToken);
-    if (status === 401 && shouldHandleSessionExpired(url, hadAuth)) {
-      handleSessionExpired();
+    if (status === 401) {
+      maybeHandleUnauthorizedResponse(url, hadAuth, error?.response?.data);
     }
     return Promise.reject(error);
   }

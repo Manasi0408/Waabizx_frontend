@@ -17,21 +17,72 @@ import {
   createBroadcast,
   uploadBroadcastHeaderMedia,
 } from '../services/broadcastService';
-import { startCampaign } from '../services/campaignService';
+import { startCampaign, calculateCampaignCost } from '../services/campaignService';
 import { getConversationQuota } from '../services/dashboardService';
 import { fetchConversationMetrics } from '../services/planService';
 import {
   CONVERSATION_METRICS,
   buildConversationMetrics,
   buildMessageCategoryRates,
-  estimateCampaignMessageCost,
   formatInr,
   getBillingCategoryLabel,
-  getMessageRateForBillingCategory,
   resolveTemplateBillingCategory,
 } from '../utils/planPricing';
-// Temporary: allow broadcast send even when WCC balance is below estimated cost (testing).
-const DISABLE_WCC_RECHARGE_CHECK = true;
+
+async function prepareImageHeaderForUpload(file) {
+  const mime = String(file.type || '').toLowerCase();
+  const name = String(file.name || '');
+  const isJpegOrPng =
+    mime === 'image/jpeg' ||
+    mime === 'image/jpg' ||
+    mime === 'image/png' ||
+    /\.(jpe?g|png)$/i.test(name);
+  if (isJpegOrPng || typeof createImageBitmap !== 'function') return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      bitmap.close?.();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+    if (!blob) return file;
+    const baseName = name.replace(/\.[^.]+$/, '') || 'header-image';
+    return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: file.lastModified });
+  } catch {
+    return file;
+  }
+}
+
+function resolveStoredHeaderMediaUrl(...candidates) {
+  for (const candidate of candidates) {
+    const stored = toPermanentUploadPath(candidate);
+    if (stored) return stored;
+  }
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value && !value.startsWith('blob:') && /^https?:\/\//i.test(value)) return value;
+  }
+  return null;
+}
+
+async function resolveBroadcastHeaderMediaForSend({ mediaFile, mediaUrl, headerFormat }) {
+  if (mediaFile) {
+    const uploadFile =
+      headerFormat !== 'VIDEO' && headerFormat !== 'DOCUMENT'
+        ? await prepareImageHeaderForUpload(mediaFile)
+        : mediaFile;
+    const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
+    return resolveStoredHeaderMediaUrl(uploaded.storedPath, uploaded.url) || uploaded.url || null;
+  }
+  return resolveStoredHeaderMediaUrl(mediaUrl);
+}
 
 function parseTemplateVariablesMeta(variables) {
   if (!variables) return {};
@@ -462,6 +513,11 @@ function Broadcast() {
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
   const [headerMediaFile, setHeaderMediaFile] = useState(null);
   const [wccCredits, setWccCredits] = useState(null);
+  const [costEstimate, setCostEstimate] = useState(null);
+  const [costBreakdown, setCostBreakdown] = useState([]);
+  const [costCategory, setCostCategory] = useState('');
+  const [remainingBalance, setRemainingBalance] = useState(null);
+  const [costLoading, setCostLoading] = useState(false);
   const [conversationMetrics, setConversationMetrics] = useState(CONVERSATION_METRICS);
   const [messageCategoryRates, setMessageCategoryRates] = useState(null);
   
@@ -838,17 +894,69 @@ function Broadcast() {
     [selectedTemplate]
   );
 
-  const templateRatePerMessage = useMemo(
-    () => getMessageRateForBillingCategory(templateBillingCategory, messageCategoryRates),
-    [templateBillingCategory, messageCategoryRates]
-  );
+  const estimatedCampaignCost = costEstimate != null ? Number(costEstimate) : 0;
+  const wccSufficient = costEstimate == null ? true : Number(wccCredits ?? 0) >= estimatedCampaignCost;
 
-  const estimatedCampaignCost = useMemo(
-    () => estimateCampaignMessageCost(audienceCount, templateBillingCategory, messageCategoryRates),
-    [audienceCount, templateBillingCategory, messageCategoryRates]
-  );
+  useEffect(() => {
+    if (step !== 4 || !selectedTemplate) {
+      setCostEstimate(null);
+      setCostBreakdown([]);
+      setCostCategory('');
+      setRemainingBalance(null);
+      return;
+    }
 
-  const wccSufficient = wccCredits == null ? true : Number(wccCredits) >= estimatedCampaignCost;
+    const audience = prepareAudienceData();
+    if (!audience.length) {
+      setCostEstimate(null);
+      setCostBreakdown([]);
+      setCostCategory('');
+      setRemainingBalance(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setCostLoading(true);
+      try {
+        const data = await calculateCampaignCost({
+          contacts: audience,
+          category: templateBillingCategory,
+          currency: 'INR',
+        });
+        if (!cancelled) {
+          setCostEstimate(Number(data.totalAmount) || 0);
+          setCostBreakdown(Array.isArray(data.countries) ? data.countries : []);
+          setCostCategory(String(data.category || templateBillingCategory || ''));
+          if (data.balance != null) setWccCredits(Number(data.balance));
+          if (data.remainingBalance != null) setRemainingBalance(Number(data.remainingBalance));
+        }
+      } catch (_) {
+        if (!cancelled) {
+          setCostEstimate(null);
+          setCostBreakdown([]);
+          setCostCategory('');
+          setRemainingBalance(null);
+        }
+      } finally {
+        if (!cancelled) setCostLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    step,
+    selectedTemplate,
+    templateBillingCategory,
+    audienceType,
+    csvData,
+    selectedContacts,
+    manualNumbers,
+    variableMapping,
+    templateVariables,
+  ]);
 
   // Create broadcast
   const handleCreateBroadcast = async () => {
@@ -882,8 +990,8 @@ function Broadcast() {
       return;
     }
 
-    if (!DISABLE_WCC_RECHARGE_CHECK && !wccSufficient) {
-      setError('Insufficient balance. Please recharge your WCC credits before sending.');
+    if (!wccSufficient) {
+      setError('Insufficient WCC please recharge');
       return;
     }
 
@@ -903,12 +1011,17 @@ function Broadcast() {
       const scheduleDate = scheduleTime ? new Date(scheduleTime) : null;
       const isFutureSchedule = scheduleDate && scheduleDate.getTime() > Date.now();
 
-      let headerMediaUrl = mediaUrl.trim() || null;
-      if (headerMediaFile) {
-        const uploaded = await uploadBroadcastHeaderMedia(headerMediaFile);
-        headerMediaUrl = uploaded.url;
-      } else if (headerMediaUrl?.startsWith('blob:')) {
-        throw new Error('Please upload the image file again before sending.');
+      let resolvedHeaderMediaUrl = null;
+      if (selectedTemplate && templateHasMedia(selectedTemplate)) {
+        const parts = getTemplatePreviewParts(selectedTemplate);
+        resolvedHeaderMediaUrl = await resolveBroadcastHeaderMediaForSend({
+          mediaFile: headerMediaFile,
+          mediaUrl: mediaUrl.trim(),
+          headerFormat: parts?.headerFormat,
+        });
+        if (!resolvedHeaderMediaUrl) {
+          throw new Error('This template needs header media. Choose from Media Library or upload a JPEG/PNG image.');
+        }
       }
 
       const broadcastData = {
@@ -920,7 +1033,7 @@ function Broadcast() {
         audience_data: audienceData,
         variable_mapping: variableMapping,
         segment_tag: null,
-        header_media_url: headerMediaUrl,
+        header_media_url: resolvedHeaderMediaUrl,
       };
 
       const campaign = await createBroadcast(broadcastData);
@@ -1899,44 +2012,34 @@ function Broadcast() {
                     </div>
                   )}
 
-                  {selectedTemplate && templateIsImage(selectedTemplate) && (
+                  {selectedTemplate && templateHasMedia(selectedTemplate) && (
                     <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-4 space-y-3 shadow-sm">
                       <div>
-                        <p className="text-sm font-semibold text-gray-900">Header image *</p>
+                        <p className="text-sm font-semibold text-gray-900">
+                          Header {String(getTemplatePreviewParts(selectedTemplate)?.headerFormat || 'media').toLowerCase()} *
+                        </p>
                         <p className="text-xs text-gray-600 mt-0.5">
-                          Choose from Media Library or paste a public HTTPS URL. Size &lt; 5MB · .png or .jpeg
+                          Choose from Media Library. For images use JPEG or PNG under 5MB.
                         </p>
                       </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-600 mb-1.5">Image URL (optional)</label>
-                        <input
-                          type="url"
-                          value={mediaUrl}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setMediaUrl(val);
-                            setHeaderMediaFile(null);
-                            if (val.trim()) {
-                              setMediaPreviewUrl(resolvePublicMediaUrl(val.trim()) || val.trim());
-                            } else {
-                              setMediaPreviewUrl('');
-                            }
-                          }}
-                          placeholder="https://example.com/image.png"
-                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none bg-white"
-                        />
-                      </div>
                       <FlowMediaAttachField
-                        mediaType="IMAGE"
-                        label="Header image"
+                        mediaType={
+                          getTemplatePreviewParts(selectedTemplate)?.headerFormat === 'VIDEO'
+                            ? 'VIDEO'
+                            : getTemplatePreviewParts(selectedTemplate)?.headerFormat === 'DOCUMENT'
+                              ? 'DOCUMENT'
+                              : 'IMAGE'
+                        }
+                        label="Header media"
                         mediaUrl={toPermanentUploadPath(mediaUrl) || mediaUrl.trim()}
                         mediaFilename={
                           headerMediaFile?.name ||
                           (toPermanentUploadPath(mediaUrl) ? mediaUrl.split('/').pop() : '')
                         }
-                        onChange={({ mediaUrl: storedUrl, mediaFilename }) => {
-                          const preview = resolvePublicMediaUrl(storedUrl) || storedUrl;
-                          setMediaUrl(storedUrl);
+                        onChange={({ mediaUrl: storedUrl }) => {
+                          const stored = toPermanentUploadPath(storedUrl) || storedUrl;
+                          const preview = resolvePublicMediaUrl(stored) || stored;
+                          setMediaUrl(stored);
                           setMediaPreviewUrl(preview);
                           setHeaderMediaFile(null);
                           setError('');
@@ -1977,9 +2080,9 @@ function Broadcast() {
                   disabled={
                     (templateVariables.length > 0 && !validationResult?.validation.isValid) ||
                     (selectedTemplate &&
-                      templateIsImage(selectedTemplate) &&
+                      templateHasMedia(selectedTemplate) &&
                       !headerMediaFile &&
-                      !mediaUrl.trim())
+                      !resolveStoredHeaderMediaUrl(mediaUrl))
                   }
                   className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold shadow-md shadow-sky-600/25 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98] disabled:active:scale-100"
                 >
@@ -2052,53 +2155,9 @@ function Broadcast() {
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-600">Rate per message:</span>
-                        <span className="font-medium">
-                          {templateBillingCategory === 'service'
-                            ? 'Free'
-                            : `₹ ${formatInr(templateRatePerMessage)}`}
-                        </span>
+                        <span className="font-medium">Per country (see below)</span>
                       </div>
                     </div>
-                  </div>
-
-                  <div className="rounded-xl border border-sky-100 bg-gradient-to-br from-sky-50/80 to-white p-4 ring-1 ring-sky-100/80">
-                    <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
-                      Message pricing (as per template category)
-                    </p>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      {conversationMetrics.map((metric) => {
-                        const isActive = metric.key === templateBillingCategory;
-                        return (
-                          <div
-                            key={metric.key}
-                            className={`rounded-xl px-3 py-2.5 text-center ring-1 transition ${
-                              isActive
-                                ? 'bg-emerald-50 ring-emerald-300 shadow-sm'
-                                : 'bg-white ring-slate-100'
-                            }`}
-                          >
-                            <p
-                              className={`text-[10px] font-bold uppercase tracking-wide ${
-                                isActive ? 'text-emerald-700' : 'text-slate-400'
-                              }`}
-                            >
-                              {metric.label}
-                            </p>
-                            <p className={`mt-1 text-xs font-medium ${isActive ? 'text-emerald-900' : 'text-slate-700'}`}>
-                              {metric.text}
-                            </p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <p className="mt-3 text-[11px] text-slate-500">
-                      Selected template uses{' '}
-                      <span className="font-semibold text-slate-700">
-                        {getBillingCategoryLabel(templateBillingCategory, conversationMetrics)}
-                      </span>{' '}
-                      pricing — {audienceCount} recipient{audienceCount === 1 ? '' : 's'} × ₹{' '}
-                      {formatInr(templateRatePerMessage)} = ₹ {formatInr(estimatedCampaignCost)}
-                    </p>
                   </div>
                 </div>
 
@@ -2116,25 +2175,65 @@ function Broadcast() {
               </div>
 
               <div className="mt-6 flex flex-col gap-4 border-t border-sky-100 bg-gradient-to-r from-sky-50/80 to-slate-50/80 -mx-6 md:-mx-8 px-6 md:px-8 py-4 rounded-b-2xl">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <span className="font-semibold text-gray-800">Estimated Campaign Cost</span>
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <span className="font-semibold text-gray-800">Estimated Campaign Cost</span>
+                    {costCategory ? (
+                      <p className="text-xs text-gray-500 mt-0.5 capitalize">{costCategory} template</p>
+                    ) : null}
+                  </div>
+                  {costBreakdown.length > 0 ? (
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {costBreakdown.map((row) => (
+                        <div
+                          key={row.countryCode || row.country}
+                          className="bg-white border border-sky-100 rounded-xl px-3 py-2 text-sm shadow-sm ring-1 ring-sky-50"
+                        >
+                          <p className="font-semibold text-gray-900">{row.country || row.countryCode}</p>
+                          <p className="text-xs text-gray-500">{row.messages ?? row.count ?? 0} messages</p>
+                          <p className="text-xs text-gray-500">
+                            Rate: ${Number(row.rateUsd ?? row.originalPrice ?? 0).toFixed(4)} USD
+                          </p>
+                          {row.exchangeRate ? (
+                            <p className="text-xs text-gray-500">
+                              FX: 1 USD = ₹ {Number(row.exchangeRate).toFixed(2)}
+                            </p>
+                          ) : null}
+                          <p className="text-xs text-gray-500">
+                            ₹ {Number(row.rateLocal ?? row.pricePerMessage ?? 0).toFixed(4)}/msg
+                          </p>
+                          <p className="text-sm font-bold text-gray-900">
+                            ₹ {Number(row.totalLocal ?? row.total ?? 0).toFixed(2)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap gap-3">
                     <div className="min-w-[140px] rounded-xl border border-sky-100 bg-white px-4 py-2.5 text-center shadow-sm ring-1 ring-sky-50">
                       <p className="text-xs text-gray-500">Estimated Cost</p>
-                      <p className="font-bold text-gray-900">₹ {formatInr(estimatedCampaignCost)}</p>
+                      <p className="font-bold text-gray-900">
+                        {costLoading ? '…' : `₹ ${formatInr(estimatedCampaignCost)}`}
+                      </p>
                     </div>
                     <div className="min-w-[140px] rounded-xl border border-sky-100 bg-white px-4 py-2.5 text-center shadow-sm ring-1 ring-sky-50">
-                      <p className="text-xs text-gray-500">Available cost</p>
+                      <p className="text-xs text-gray-500">Wallet Balance</p>
                       <p className={`font-bold ${wccSufficient ? 'text-gray-900' : 'text-red-600'}`}>
                         ₹ {wccCredits != null ? formatInr(wccCredits) : '—'}
                       </p>
                     </div>
+                    <div className="min-w-[140px] rounded-xl border border-sky-100 bg-white px-4 py-2.5 text-center shadow-sm ring-1 ring-sky-50">
+                      <p className="text-xs text-gray-500">Remaining Balance</p>
+                      <p className={`font-bold ${wccSufficient ? 'text-emerald-700' : 'text-red-600'}`}>
+                        {costLoading || remainingBalance == null
+                          ? '…'
+                          : `₹ ${formatInr(remainingBalance)}`}
+                      </p>
+                    </div>
                   </div>
                 </div>
-                {!DISABLE_WCC_RECHARGE_CHECK && !wccSufficient ? (
-                  <p className="text-sm font-semibold text-red-600">
-                    Insufficient balance. Please recharge before sending this broadcast.
-                  </p>
+                {!wccSufficient ? (
+                  <p className="text-sm font-semibold text-red-600">Insufficient WCC please recharge</p>
                 ) : null}
               </div>
 
@@ -2146,18 +2245,23 @@ function Broadcast() {
                 >
                   Back
                 </button>
-                <button
-                  type="button"
-                  onClick={handleCreateBroadcast}
-                  disabled={saving || !campaignName.trim() || (!DISABLE_WCC_RECHARGE_CHECK && !wccSufficient)}
-                  className="px-6 py-2.5 bg-green-600 text-white rounded-xl font-semibold shadow-md shadow-green-600/25 hover:bg-green-700 hover:shadow-lg transition-all duration-200 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 disabled:shadow-none"
-                >
-                  {saving
-                    ? 'Creating...'
-                    : scheduleTime && new Date(scheduleTime).getTime() > Date.now()
-                      ? 'Schedule Broadcast'
-                      : 'Send Broadcast'}
-                </button>
+                <div className="flex flex-col items-end gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCreateBroadcast}
+                    disabled={saving || !campaignName.trim() || !wccSufficient}
+                    className="px-6 py-2.5 bg-green-600 text-white rounded-xl font-semibold shadow-md shadow-green-600/25 hover:bg-green-700 hover:shadow-lg transition-all duration-200 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 disabled:shadow-none"
+                  >
+                    {saving
+                      ? 'Creating...'
+                      : scheduleTime && new Date(scheduleTime).getTime() > Date.now()
+                        ? 'Schedule Broadcast'
+                        : 'Send Broadcast'}
+                  </button>
+                  {!wccSufficient && (
+                    <p className="text-red-600 text-sm font-semibold">Insufficient WCC please recharge</p>
+                  )}
+                </div>
               </div>
             </div>
           )}

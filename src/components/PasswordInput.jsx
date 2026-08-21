@@ -21,27 +21,42 @@ const EyeOffIcon = (props) => (
   </svg>
 );
 
-function PasswordInput({ className = '', disabled, ...props }) {
+function PasswordInput({ className = '', disabled, type: _typeIgnored, ...props }) {
   const [visible, setVisible] = useState(false);
   const inputClass = [className, 'pr-11'].filter(Boolean).join(' ');
+
+  const toggleVisible = () => {
+    if (disabled) return;
+    setVisible((v) => !v);
+  };
 
   return (
     <div className="relative">
       <input
         {...props}
-        type={visible ? 'text' : 'password'}
         disabled={disabled}
+        type={visible ? 'text' : 'password'}
+        autoComplete={props.autoComplete || 'current-password'}
         className={inputClass}
       />
       <button
         type="button"
         tabIndex={-1}
         disabled={disabled}
-        onClick={() => setVisible((v) => !v)}
-        className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-0.5 text-gray-400 transition-colors hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 disabled:pointer-events-none disabled:opacity-40"
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleVisible();
+        }}
+        className="absolute right-2 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-gray-400 transition-colors hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 disabled:pointer-events-none disabled:opacity-40"
         aria-label={visible ? 'Hide password' : 'Show password'}
+        aria-pressed={visible}
       >
-        {visible ? <EyeOffIcon className="h-5 w-5" /> : <EyeIcon className="h-5 w-5" />}
+        {visible ? <EyeOffIcon className="pointer-events-none h-5 w-5" /> : <EyeIcon className="pointer-events-none h-5 w-5" />}
       </button>
     </div>
   );

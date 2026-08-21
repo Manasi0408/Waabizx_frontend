@@ -1,9 +1,8 @@
-import React, { useRef, useState, useEffect, useMemo } from "react";
+import React, { useMemo } from "react";
 import { resolvePublicMediaUrl } from "../utils/mediaUrl";
-import { uploadBroadcastHeaderMedia } from "../services/broadcastService";
+import FlowMediaAttachField from "./FlowMediaLibraryField";
 
-function resolveHeaderPreviewSrc(preview, apiBase, localSrc = "") {
-  if (localSrc) return localSrc;
+function resolveHeaderPreviewSrc(preview, apiBase) {
   const candidates = [preview?.headerImageUrl, preview?.header?.url].filter(Boolean);
   for (const candidate of candidates) {
     const raw = String(candidate).trim();
@@ -15,41 +14,24 @@ function resolveHeaderPreviewSrc(preview, apiBase, localSrc = "") {
   return "";
 }
 
-/** WhatsApp template headers need JPEG/PNG — convert other image types in the browser before upload. */
-async function prepareImageHeaderForUpload(file) {
-  const mime = String(file.type || "").toLowerCase();
-  const name = String(file.name || "");
-  const isJpegOrPng =
-    mime === "image/jpeg" ||
-    mime === "image/jpg" ||
-    mime === "image/png" ||
-    /\.(jpe?g|png)$/i.test(name);
-  if (isJpegOrPng || typeof createImageBitmap !== "function") return file;
-
+function normalizeStoredMediaPath(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("/uploads/")) return raw.split(/[?#]/)[0];
+  if (raw.startsWith("uploads/")) return `/${raw.split(/[?#]/)[0]}`;
   try {
-    const bitmap = await createImageBitmap(file);
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      bitmap.close?.();
-      return file;
-    }
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close?.();
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
-    if (!blob) return file;
-    const baseName = name.replace(/\.[^.]+$/, "") || "header-image";
-    return new File([blob], `${baseName}.jpg`, { type: "image/jpeg", lastModified: file.lastModified });
-  } catch {
-    return file;
+    const pathname = new URL(raw).pathname || "";
+    const idx = pathname.indexOf("/uploads/");
+    if (idx >= 0) return pathname.slice(idx).split(/[?#]/)[0];
+  } catch (_) {
+    /* ignore */
   }
+  return raw;
 }
 
 /**
  * AiSensy-style WhatsApp bubble preview for Insert (canned / template).
- * For image/video/document templates, optional header media upload before send.
+ * For image/video/document templates, header media is chosen from Media Library.
  */
 export default function InsertMessagePreview({
   title,
@@ -61,39 +43,18 @@ export default function InsertMessagePreview({
   templateName = "",
   onHeaderMediaChange,
 }) {
-  const fileInputRef = useRef(null);
-  const objectUrlRef = useRef(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState("");
-  const [uploadedPreviewSrc, setUploadedPreviewSrc] = useState("");
-
-  useEffect(() => {
-    return () => {
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    setUploadedPreviewSrc("");
-    setUploadError("");
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
-  }, [templateName]);
-
   const headerText = String(preview?.headerText || "").trim();
   const headerFormat = String(preview?.headerFormat || "").toUpperCase();
   const footer = String(preview?.footer || "").trim();
   const buttons = Array.isArray(preview?.buttons) ? preview.buttons : [];
   const body = String(preview?.body || bodyText || "").trim();
-  const resolvedImage = useMemo(
-    () => resolveHeaderPreviewSrc(preview, apiBase, uploadedPreviewSrc),
-    [preview, apiBase, uploadedPreviewSrc]
-  );
+  const headerMediaUrl = normalizeStoredMediaPath(preview?.headerImageUrl || preview?.header?.url || "");
+  const resolvedImage = useMemo(() => {
+    const fromPreview = resolveHeaderPreviewSrc(preview, apiBase);
+    if (fromPreview) return fromPreview;
+    if (headerMediaUrl) return resolvePublicMediaUrl(headerMediaUrl, apiBase);
+    return "";
+  }, [preview, apiBase, headerMediaUrl]);
 
   const mediaFormat =
     headerFormat ||
@@ -110,52 +71,14 @@ export default function InsertMessagePreview({
     Boolean(resolvedImage) || needsMediaHeader || preview?.header?.type === "image";
   const showUpload = allowHeaderUpload && needsMediaHeader;
 
-  const accept =
-    mediaFormat === "VIDEO"
-      ? "video/mp4,video/3gpp"
-      : mediaFormat === "DOCUMENT"
-        ? ".pdf,.doc,.docx,application/pdf"
-        : "image/*";
-
   const mediaLabel =
     mediaFormat === "VIDEO" ? "Video" : mediaFormat === "DOCUMENT" ? "Document" : "Image";
 
-  const handleFileChange = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file || typeof onHeaderMediaChange !== "function") return;
-    setUploadError("");
-    setUploading(true);
-    try {
-      const uploadFile =
-        mediaFormat === "IMAGE" || mediaFormat === "" || preview?.header?.type === "image"
-          ? await prepareImageHeaderForUpload(file)
-          : file;
-
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = null;
-      }
-      const objectUrl = URL.createObjectURL(uploadFile);
-      objectUrlRef.current = objectUrl;
-      setUploadedPreviewSrc(objectUrl);
-
-      const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
-      const url = uploaded?.url || uploaded?.publicUrl || uploaded?.headerMediaUrl || null;
-      if (!url) throw new Error("Upload succeeded but no media URL was returned");
-      onHeaderMediaChange(url, { templateName, fileName: file.name });
-
-      const serverPreview = resolvePublicMediaUrl(url, apiBase) || url;
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = null;
-      }
-      setUploadedPreviewSrc(serverPreview);
-    } catch (err) {
-      setUploadError(err?.message || "Failed to upload header media");
-    } finally {
-      setUploading(false);
-    }
+  const handleMediaLibraryChange = ({ mediaUrl: storedUrl, mediaFilename }) => {
+    if (typeof onHeaderMediaChange !== "function") return;
+    const stored = normalizeStoredMediaPath(storedUrl);
+    if (!stored) return;
+    onHeaderMediaChange(stored, { templateName, fileName: mediaFilename || stored.split("/").pop() || "" });
   };
 
   return (
@@ -232,33 +155,31 @@ export default function InsertMessagePreview({
 
         {showUpload ? (
           <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/60 px-3 py-3">
-            <label className="block text-xs font-bold uppercase tracking-wide text-sky-800 mb-2">
-              Upload header {mediaLabel.toLowerCase()}
-              {!resolvedImage ? " *" : ""}
-            </label>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept={accept}
-              disabled={uploading}
-              onChange={handleFileChange}
-              className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-sky-100 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-sky-800 hover:file:bg-sky-200 disabled:opacity-60"
+            <FlowMediaAttachField
+              key={templateName || "insert-header-media"}
+              mediaType={
+                mediaFormat === "VIDEO" ? "VIDEO" : mediaFormat === "DOCUMENT" ? "DOCUMENT" : "IMAGE"
+              }
+              label={`Header ${mediaLabel.toLowerCase()}${!headerMediaUrl ? " *" : ""}`}
+              hint={
+                headerMediaUrl
+                  ? "Header media ready. Open library to replace before sending."
+                  : "Required for this template. Choose from Media Library — browse, upload, or delete files."
+              }
+              mediaUrl={headerMediaUrl}
+              mediaFilename={headerMediaUrl ? headerMediaUrl.split("/").pop() : ""}
+              onChange={handleMediaLibraryChange}
             />
-            <p className="mt-1.5 text-[11px] text-sky-700/80">
-              {resolvedImage
-                ? "Header media ready. You can replace it before sending."
-                : `Required for this ${mediaLabel.toLowerCase()} template before send.`}
-            </p>
-            {uploading ? (
-              <p className="mt-1.5 text-xs font-semibold text-sky-700">Uploading…</p>
-            ) : null}
-            {uploadError ? (
-              <p className="mt-1.5 text-xs text-red-600">{uploadError}</p>
-            ) : null}
           </div>
         ) : null}
 
-        {hint ? <p className="mt-2 text-xs text-gray-500 leading-relaxed">{hint}</p> : null}
+        {hint ? (
+          <p className="mt-2 text-xs text-gray-500 leading-relaxed">
+            {showUpload && !headerMediaUrl
+              ? "Review the template preview above, choose header media, then click Send."
+              : hint}
+          </p>
+        ) : null}
       </div>
     </div>
   );
