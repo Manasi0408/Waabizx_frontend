@@ -267,6 +267,41 @@ code {
   }
 }
 
+@keyframes agent-hero-green-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+}
+
+@keyframes agent-hero-title-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes agent-step-pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .motion-header-enter {
     animation: fade-in-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -634,6 +669,23 @@ code {
   .auth-inbox-top-glow {
     animation: auth-inbox-glow-line 2.8s ease-in-out infinite;
   }
+
+  .agent-hero-glow-a {
+    animation: agent-hero-green-pulse 6s ease-in-out infinite;
+  }
+
+  .agent-hero-glow-b {
+    animation: agent-hero-green-pulse 8s ease-in-out infinite reverse;
+  }
+
+  .agent-hero-title-gradient {
+    background-size: 220% auto;
+    animation: agent-hero-title-shimmer 5s ease infinite;
+  }
+
+  .agent-hero-step {
+    animation: agent-step-pop 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -646,6 +698,10 @@ code {
   .motion-enter-slide,
   .motion-pop,
   .motion-gradient-text,
+  .agent-hero-glow-a,
+  .agent-hero-glow-b,
+  .agent-hero-title-gradient,
+  .agent-hero-step,
   .sidebar-nav-stagger > li,
   .manage-menu-stagger > button {
     animation: none !important;

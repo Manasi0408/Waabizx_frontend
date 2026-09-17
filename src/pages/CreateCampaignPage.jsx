@@ -189,15 +189,64 @@ function normalizeTemplateButtons(buttons) {
     .filter((b) => String(b.text || '').trim());
 }
 
+function getCarouselCardsFromComponents(components) {
+  const carousel = (components || []).find(
+    (c) => String(c?.type || '').toUpperCase() === 'CAROUSEL'
+  );
+  return Array.isArray(carousel?.cards) ? carousel.cards : [];
+}
+
+function synthesizeCarouselComponentsFromVars(template) {
+  const meta = parseTemplateVariablesMeta(template?.variables);
+  const storedCards = Array.isArray(meta.carouselCards) ? meta.carouselCards : [];
+  const isCarousel =
+    String(meta.templateType || '').toLowerCase() === 'carousel' || storedCards.length > 0;
+  if (!isCarousel || !storedCards.length) return null;
+
+  const carouselMediaType = String(meta.carouselMediaType || 'IMAGE').toUpperCase();
+  const headerFormat = carouselMediaType === 'VIDEO' ? 'VIDEO' : 'IMAGE';
+  const introBody = String(meta.carouselMainBody || template?.content || '').trim();
+  const cards = storedCards.map((card) => ({
+    components: [
+      { type: 'HEADER', format: headerFormat },
+      { type: 'BODY', text: String(card?.body || '').trim() },
+      {
+        type: 'BUTTONS',
+        buttons: (Array.isArray(card?.buttons) ? card.buttons : [])
+          .map((btn) => ({
+            type: String(btn?.type || 'URL').toUpperCase(),
+            text: String(btn?.label || btn?.text || '').trim(),
+            url: btn?.url || btn?.value || undefined,
+          }))
+          .filter((b) => b.text),
+      },
+    ],
+  }));
+
+  const out = [];
+  if (introBody) out.push({ type: 'BODY', text: introBody });
+  out.push({ type: 'CAROUSEL', cards });
+  return out;
+}
+
 function getTemplateComponentsList(template) {
   if (Array.isArray(template?.components) && template.components.length) {
+    if (getCarouselCardsFromComponents(template.components).length) {
+      return template.components;
+    }
+    const synth = synthesizeCarouselComponentsFromVars(template);
+    if (synth?.length) return synth;
     return template.components;
   }
   const meta = parseTemplateVariablesMeta(template?.variables);
   if (Array.isArray(meta.components) && meta.components.length) {
+    if (getCarouselCardsFromComponents(meta.components).length) return meta.components;
+    const synth = synthesizeCarouselComponentsFromVars(template);
+    if (synth?.length) return synth;
     return meta.components;
   }
-  return [];
+  const synth = synthesizeCarouselComponentsFromVars(template);
+  return synth?.length ? synth : [];
 }
 
 function extractButtonsFromComponents(components) {
@@ -283,9 +332,13 @@ async function resolveCampaignTemplate(template) {
     }
   }
 
-  const needsButtons = !getTemplatePreviewParts(resolved)?.buttons?.length;
+  const previewParts = getTemplatePreviewParts(resolved);
+  const needsButtons = !previewParts?.buttons?.length;
+  const needsCarousel =
+    templateIsCarousel(resolved) &&
+    !(Array.isArray(previewParts?.carouselCards) && previewParts.carouselCards.length);
 
-  if (resolved.id && needsButtons) {
+  if (resolved.id && (needsButtons || needsCarousel)) {
     try {
       const full = await getTemplateById(resolved.id);
       if (full) {
@@ -303,7 +356,15 @@ async function resolveCampaignTemplate(template) {
     }
   }
 
-  if (getTemplatePreviewParts(resolved)?.buttons?.length) return resolved;
+  const afterFetch = getTemplatePreviewParts(resolved);
+  if (afterFetch?.buttons?.length) return resolved;
+  if (
+    templateIsCarousel(resolved) &&
+    Array.isArray(afterFetch?.carouselCards) &&
+    afterFetch.carouselCards.length
+  ) {
+    return resolved;
+  }
 
   const metaId = resolved.metaTemplateId;
   if (!metaId) return resolved;
@@ -334,6 +395,72 @@ async function resolveCampaignTemplate(template) {
   }
 }
 
+function buildCarouselPreviewCardsFromTemplate(template) {
+  const meta = parseTemplateVariablesMeta(template?.variables);
+  const components = getTemplateComponentsList(template);
+  const carouselComp = components.find((c) => String(c?.type || '').toUpperCase() === 'CAROUSEL');
+  let carouselMediaType = String(meta.carouselMediaType || 'IMAGE').toUpperCase();
+
+  const mapCardDef = (cardDef, idx, fallbackBody) => {
+    const inner = Array.isArray(cardDef?.components) ? cardDef.components : [];
+    const cardHeader = inner.find((c) => String(c?.type || '').toUpperCase() === 'HEADER');
+    const cardBody = inner.find((c) => String(c?.type || '').toUpperCase() === 'BODY');
+    const cardButtonsComp = inner.find((c) => String(c?.type || '').toUpperCase() === 'BUTTONS');
+    if (cardHeader?.format) {
+      carouselMediaType = String(cardHeader.format).toUpperCase();
+    }
+    return {
+      index: idx,
+      body: String(cardBody?.text || fallbackBody || '').trim(),
+      headerImageUrl: null,
+      buttons: normalizeTemplateButtons(cardButtonsComp?.buttons || cardDef?.buttons || []),
+    };
+  };
+
+  const metaCards = Array.isArray(carouselComp?.cards) ? carouselComp.cards : [];
+  if (metaCards.length) {
+    return {
+      carouselMediaType,
+      carouselCards: metaCards.map((card, idx) => mapCardDef(card, idx, '')),
+    };
+  }
+  const stored = Array.isArray(meta.carouselCards) ? meta.carouselCards : [];
+  if (stored.length) {
+    return {
+      carouselMediaType,
+      carouselCards: stored.map((card, idx) =>
+        mapCardDef(
+          {
+            components: [
+              { type: 'HEADER', format: carouselMediaType },
+              { type: 'BODY', text: card?.body || '' },
+              {
+                type: 'BUTTONS',
+                buttons: (card?.buttons || []).map((b) => ({
+                  type: 'URL',
+                  text: b?.label || b?.text,
+                  url: b?.url || b?.value,
+                })),
+              },
+            ],
+          },
+          idx,
+          card?.body
+        )
+      ),
+    };
+  }
+  return { carouselMediaType, carouselCards: [] };
+}
+
+function templateIsCarousel(template) {
+  if (!template) return false;
+  const meta = parseTemplateVariablesMeta(template.variables);
+  if (String(meta.templateType || '').toLowerCase() === 'carousel') return true;
+  if (Array.isArray(meta.carouselCards) && meta.carouselCards.length) return true;
+  return getCarouselCardsFromComponents(getTemplateComponentsList(template)).length > 0;
+}
+
 function getTemplatePreviewParts(template) {
   if (!template) return null;
 
@@ -347,10 +474,27 @@ function getTemplatePreviewParts(template) {
   const header = findComp('HEADER');
   const body = findComp('BODY');
   const footerComp = findComp('FOOTER');
+  const isCarousel = templateIsCarousel(template);
+
+  if (isCarousel) {
+    const carouselPreview = buildCarouselPreviewCardsFromTemplate(template);
+    const introBody = String(
+      body?.text || meta.carouselMainBody || template?.content || ''
+    ).trim();
+    return {
+      headerFormat: null,
+      headerText: '',
+      body: introBody,
+      footer: '',
+      buttons: [],
+      isCarousel: true,
+      carouselMediaType: carouselPreview.carouselMediaType || 'IMAGE',
+      carouselCards: carouselPreview.carouselCards || [],
+    };
+  }
+
   const bodyText = body?.text || template?.content || '';
-
   const buttons = mergeTemplateButtons(componentButtons, metaButtons);
-
   const templateType = String(meta.templateType || 'text').toLowerCase();
   const headerFormat =
     (header?.format ? String(header.format).toUpperCase() : null) ||
@@ -362,6 +506,9 @@ function getTemplatePreviewParts(template) {
     body: bodyText,
     footer: footerComp?.text || meta.footer || '',
     buttons: normalizeTemplateButtons(buttons),
+    isCarousel: false,
+    carouselMediaType: null,
+    carouselCards: [],
   };
 }
 
@@ -586,6 +733,123 @@ function Stepper({ step }) {
   );
 }
 
+function templateHeaderMediaSlotActive(headerFormat, mediaPreviewUrl) {
+  const format = String(headerFormat || '').toUpperCase();
+  return ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(format) || Boolean(mediaPreviewUrl);
+}
+
+function renderTemplateHeaderMediaPreview(headerFormat, mediaPreviewUrl) {
+  const format = String(headerFormat || '').toUpperCase();
+  if (mediaPreviewUrl) {
+    if (format === 'VIDEO') {
+      return (
+        <video
+          src={mediaPreviewUrl}
+          className="w-full h-full object-cover"
+          controls
+          muted
+          playsInline
+        />
+      );
+    }
+    if (format === 'DOCUMENT') {
+      const name = decodeURIComponent(
+        String(mediaPreviewUrl).split('/').pop()?.split('?')[0] || 'document.pdf'
+      );
+      return (
+        <div className="flex flex-col items-center justify-center gap-1 px-3 text-center text-gray-600">
+          <span className="text-2xl" aria-hidden>
+            📄
+          </span>
+          <span className="text-xs font-medium break-all">{name}</span>
+        </div>
+      );
+    }
+    return <img src={mediaPreviewUrl} alt="" className="w-full h-full object-cover" />;
+  }
+  const label =
+    format === 'VIDEO' ? 'Video header' : format === 'DOCUMENT' ? 'Document header' : 'Media header';
+  const icon = format === 'VIDEO' ? '🎬' : format === 'DOCUMENT' ? '📄' : '🖼';
+  return (
+    <div className="flex flex-col items-center justify-center gap-1 text-gray-400">
+      <span className="text-xl" aria-hidden>
+        {icon}
+      </span>
+      <span className="text-xs">{label}</span>
+    </div>
+  );
+}
+
+function headerMediaHint(format) {
+  const f = String(format || '').toUpperCase();
+  if (f === 'VIDEO') return 'Choose from Media Library. Use MP4 (up to 1 GB).';
+  if (f === 'DOCUMENT') return 'Choose from Media Library. Use PDF.';
+  return 'Choose from Media Library. For images use JPEG or PNG under 5MB.';
+}
+
+function CampaignCarouselCardsPreview({ parts, compact = false }) {
+  const carouselMediaType = String(parts?.carouselMediaType || 'IMAGE').toUpperCase();
+  const carouselMediaLabel = carouselMediaType === 'VIDEO' ? 'Video' : 'Image';
+  const carouselCards = Array.isArray(parts?.carouselCards) ? parts.carouselCards : [];
+  if (!carouselCards.length) return null;
+
+  const cardWidth = compact ? 'w-[96px]' : 'w-[118px]';
+  const mediaHeight = compact ? 'h-14' : 'h-[4.5rem]';
+
+  return (
+    <div className={compact ? 'mt-2' : 'px-3 pb-3 border-t border-gray-100 pt-2'}>
+      {!compact ? (
+        <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+          {carouselMediaLabel} cards
+        </p>
+      ) : null}
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {carouselCards.map((card, idx) => {
+          const cardUrl = resolvePublicMediaUrl(card?.headerImageUrl || '');
+          const cardButtons = Array.isArray(card.buttons) ? card.buttons : [];
+          return (
+            <div
+              key={card.index ?? idx}
+              className={`shrink-0 ${cardWidth} rounded-lg border border-gray-200 bg-gray-50 overflow-hidden`}
+            >
+              {cardUrl ? (
+                carouselMediaType === 'VIDEO' ? (
+                  <video
+                    src={cardUrl}
+                    className={`w-full ${mediaHeight} object-cover bg-black/5`}
+                    muted
+                    playsInline
+                  />
+                ) : (
+                  <img src={cardUrl} alt="" className={`w-full ${mediaHeight} object-cover bg-gray-100`} />
+                )
+              ) : (
+                <div
+                  className={`w-full ${mediaHeight} flex items-center justify-center text-[10px] font-semibold uppercase text-gray-400 bg-gray-100`}
+                >
+                  {carouselMediaLabel} {idx + 1}
+                </div>
+              )}
+              <div className="px-2 py-1.5 space-y-0.5">
+                {card.body ? (
+                  <p className="text-[10px] text-gray-800 line-clamp-3 whitespace-pre-wrap break-words">
+                    {card.body}
+                  </p>
+                ) : null}
+                {cardButtons.slice(0, 2).map((btn, bi) => (
+                  <p key={bi} className="text-[9px] font-semibold text-[#008069] truncate text-center">
+                    {btn.text || btn.label || 'Button'}
+                  </p>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function WhatsAppPreview({
   template,
   mediaPreviewUrl,
@@ -596,25 +860,30 @@ function WhatsAppPreview({
   previewFallback = {},
 }) {
   const parts = getTemplatePreviewParts(template);
+  const isCarousel = Boolean(parts?.isCarousel);
   const firstRow = csvRows[0] || {};
-  const bodyText = applyPreviewSubstitutions(
-    parts.body,
-    templateVarMap,
-    templateVarCustom,
-    firstRow,
-    columnMapping,
-    previewFallback
-  );
-  const headerText = parts.headerText
-    ? applyPreviewSubstitutions(
-        parts.headerText,
-        templateVarMap,
-        templateVarCustom,
-        firstRow,
-        columnMapping,
-        previewFallback
-      )
-    : '';
+  const applySub = (text) =>
+    applyPreviewSubstitutions(
+      text,
+      templateVarMap,
+      templateVarCustom,
+      firstRow,
+      columnMapping,
+      previewFallback
+    );
+  const bodyText = applySub(parts.body);
+  const headerText = parts.headerText ? applySub(parts.headerText) : '';
+  const displayParts = isCarousel
+    ? {
+        ...parts,
+        body: bodyText,
+        carouselCards: (parts.carouselCards || []).map((card) => ({
+          ...card,
+          body: applySub(card.body),
+        })),
+      }
+    : parts;
+
   return (
     <div className="mx-auto w-full max-w-[280px] rounded-2xl border border-sky-100/80 bg-[#e5ddd5] shadow-xl shadow-sky-900/10 ring-1 ring-sky-100/50 overflow-hidden">
       <div className="bg-[#075e54] text-white text-xs px-3 py-2 flex items-center gap-2">
@@ -623,25 +892,24 @@ function WhatsAppPreview({
       </div>
       <div className="p-3 max-h-[420px] overflow-y-auto">
         <div className="bg-white rounded-lg shadow-sm overflow-hidden text-sm text-gray-900">
-          {(parts.headerFormat === 'IMAGE' || parts.headerFormat === 'VIDEO' || mediaPreviewUrl) && (
+          {!isCarousel && templateHeaderMediaSlotActive(parts.headerFormat, mediaPreviewUrl) && (
             <div className="bg-gray-100 aspect-video flex items-center justify-center overflow-hidden">
-              {mediaPreviewUrl ? (
-                <img src={mediaPreviewUrl} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <span className="text-xs text-gray-400">Media header</span>
-              )}
+              {renderTemplateHeaderMediaPreview(parts.headerFormat, mediaPreviewUrl)}
             </div>
           )}
           {headerText && !mediaPreviewUrl && parts.headerFormat === 'TEXT' && (
             <p className="px-3 pt-2 font-semibold text-gray-900">{headerText}</p>
           )}
-          <div className="px-3 py-2 whitespace-pre-wrap break-words text-[13px] leading-relaxed">
-            {bodyText || 'Template body'}
-          </div>
+          {bodyText || !isCarousel ? (
+            <div className="px-3 py-2 whitespace-pre-wrap break-words text-[13px] leading-relaxed">
+              {bodyText || (isCarousel ? '' : 'Template body')}
+            </div>
+          ) : null}
+          {isCarousel ? <CampaignCarouselCardsPreview parts={displayParts} /> : null}
           {parts.footer && (
             <p className="px-3 pb-2 text-[11px] text-gray-500">{parts.footer}</p>
           )}
-          {parts.buttons?.length > 0 && (
+          {!isCarousel && parts.buttons?.length > 0 && (
             <div className="border-t border-gray-100">
               {parts.buttons.map((btn, i) => (
                 <div
@@ -965,7 +1233,7 @@ export default function CreateCampaignPage() {
         !headerMediaUrl &&
         !(mediaPreviewUrl && resolveStoredHeaderMediaUrl(mediaPreviewUrl))
       ) {
-        setError('This template needs a header image or video. Choose media from the library to continue.');
+        setError('This template needs header media (image, video, or document). Choose from the Media Library to continue.');
         return;
       }
       setStep(4);
@@ -1016,7 +1284,7 @@ export default function CreateCampaignPage() {
       !headerMediaUrl &&
       !(mediaPreviewUrl && resolveStoredHeaderMediaUrl(mediaPreviewUrl))
     ) {
-      setError('This template needs a header image or video. Choose media from the library before sending.');
+      setError('This template needs header media (image, video, or document). Choose from the Media Library before sending.');
       return;
     }
     setBusy(true);
@@ -1038,7 +1306,7 @@ export default function CreateCampaignPage() {
           headerFormat: selectedHeaderFormat,
         });
         if (!resolvedHeaderMediaUrl) {
-          throw new Error('This template needs a header image or video. Choose media in step 3 before sending.');
+          throw new Error('This template needs header media (image, video, or document). Choose media in step 3 before sending.');
         }
       }
 
@@ -1382,7 +1650,7 @@ export default function CreateCampaignPage() {
                             Header {String(selectedHeaderFormat || 'media').toLowerCase()} *
                           </label>
                           <p className="text-xs text-amber-900/80">
-                            Required for this template. Choose from Media Library — browse, upload, or delete files.
+                            {headerMediaHint(selectedHeaderFormat)}
                           </p>
                           <FlowMediaAttachField
                             mediaType={

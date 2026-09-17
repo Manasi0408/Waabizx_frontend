@@ -145,7 +145,8 @@ export const sendTemplateMessage = async (
   templateName,
   templateLanguage = 'en_US',
   templateParams = [],
-  headerMediaUrl = null
+  headerMediaUrl = null,
+  carouselCardMediaUrls = null
 ) => {
   try {
     const token = getToken();
@@ -160,6 +161,9 @@ export const sendTemplateMessage = async (
     if (headerMediaUrl) {
       payload.headerMediaUrl = headerMediaUrl;
     }
+    if (Array.isArray(carouselCardMediaUrls) && carouselCardMediaUrls.length) {
+      payload.carouselCardMediaUrls = carouselCardMediaUrls;
+    }
 
     const response = await fetch(`${API_URL}/messages/send-template`, {
       method: 'POST',
@@ -167,20 +171,38 @@ export const sendTemplateMessage = async (
       body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
-    if (!response.ok || data.success === false) {
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (_) {
+      data = {};
+    }
+    if (!response.ok || data.success === false || !data.waMessageId) {
       let errorMsg =
         data.msg ||
         data.message ||
         data.error ||
         (data.wabaUnverified
           ? 'WhatsApp Business Account is not verified yet. Complete Meta Business Verification and WhatsApp number setup, then retry.'
-          : 'Failed to send template');
+          : !data.waMessageId && response.ok
+            ? 'Template send did not return a WhatsApp message id'
+            : 'Failed to send template');
       if (typeof errorMsg !== 'string') {
         errorMsg = errorMsg?.message || JSON.stringify(errorMsg);
       }
-      console.error('Template send error:', { status: response.status, data });
-      throw new Error(errorMsg);
+      if (data.details && typeof data.details === 'object') {
+        const detailStr = JSON.stringify(data.details);
+        if (detailStr && detailStr !== '{}') {
+          errorMsg = `${errorMsg} (${detailStr})`;
+        }
+      }
+      console.error(
+        'Template send error:',
+        response.status,
+        errorMsg,
+        data
+      );
+      throw new Error(errorMsg || `Template send failed (HTTP ${response.status})`);
     }
     if (data.wccCredits != null && typeof window !== 'undefined') {
       window.dispatchEvent(

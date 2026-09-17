@@ -19,6 +19,8 @@ import {
   extractTemplateHeaderMediaUrl,
   templateHasImageHeader,
   templateNeedsHeaderMedia,
+  templateNeedsCarouselMedia,
+  templateCarouselCardCount,
 } from "../utils/whatsappTemplatePreview";
 import {
   fetchTags,
@@ -241,9 +243,6 @@ async function fetchLiveChatTabData(tabName, { isManager, isAgent, currentUserId
   if (tabName === "intervened") {
     return listIntervenedChats(await getIntervenedChats());
   }
-  if (tabName === "history") {
-    return listHistoryChats(await getHistoryChats());
-  }
   return [];
 }
 
@@ -286,6 +285,7 @@ function LiveChatPage() {
   const [messageText, setMessageText] = useState("");
   const [sending, setSending] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [profileSidebarOpen, setProfileSidebarOpen] = useState(true);
 
   const [insertOpen, setInsertOpen] = useState(false);
   const insertPopoverRef = useRef(null);
@@ -642,6 +642,18 @@ function LiveChatPage() {
   const isAgent = roleLower === "agent";
   const isManager = roleLower === "manager" || roleLower === "admin";
   const agentCanPickup = isAgent ? readAgentPickupAllowed() : false;
+  const liveChatTabs = isAgent
+    ? [
+        { id: "active", label: "Active" },
+        { id: "requesting", label: "Requesting" },
+        { id: "intervened", label: "Intervened" },
+      ]
+    : [
+        { id: "active", label: "Active" },
+        { id: "requesting", label: "Requesting" },
+        { id: "intervened", label: "Intervened" },
+        { id: "history", label: "History" },
+      ];
   const isHistoryTab = tab === "history";
   const showIntervenedActions =
     Boolean(selectedChat?.id) &&
@@ -649,6 +661,13 @@ function LiveChatPage() {
     (isAgent || isManager) &&
     (tab === "intervened" ||
       ["active", "intervened"].includes(String(selectedChat?.status || "").toLowerCase()));
+
+  useEffect(() => {
+    if (isAgent && tab === "history") {
+      liveChatTabRef.current = "active";
+      setTab("active");
+    }
+  }, [isAgent, tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1380,11 +1399,17 @@ function LiveChatPage() {
     setInsertError("");
 
     let templatePreview = null;
+    let needsCarouselMedia = false;
+    let carouselCardCount = 0;
     if (item.mode === "template" || item.kind === "template") {
       const templateName = String(item.templateName || "").trim();
       const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
       const needsHeaderMedia =
         templateNeedsHeaderMedia(catalogHit) || templateNeedsHeaderMedia(item);
+      needsCarouselMedia =
+        templateNeedsCarouselMedia(catalogHit) || templateNeedsCarouselMedia(item);
+      carouselCardCount =
+        templateCarouselCardCount(catalogHit) || templateCarouselCardCount(item) || 0;
       const stripStoredHeaderMediaVars = (vars) => {
         if (!vars || typeof vars !== "object" || Array.isArray(vars)) return {};
         const { headerMediaUrl, header_media_url, ...rest } = vars;
@@ -1431,7 +1456,7 @@ function LiveChatPage() {
         templateName,
         isTemplate: true,
       });
-      if (templatePreview && needsHeaderMedia) {
+      if (templatePreview && needsHeaderMedia && !needsCarouselMedia) {
         const fmt =
           String(templatePreview.headerFormat || "").toUpperCase() ||
           (imageVars.templateType === "video"
@@ -1453,6 +1478,9 @@ function LiveChatPage() {
       rawText,
       resolvedText: resolvedText || String(item.templateName || "Template"),
       headerMediaUrl: null,
+      carouselCardMediaUrls: needsCarouselMedia
+        ? Array(carouselCardCount).fill(null)
+        : undefined,
       templatePreview,
     });
   };
@@ -1485,20 +1513,56 @@ function LiveChatPage() {
         const resolvedBody = String(insertPreviewItem.resolvedText || "").trim();
         const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
         const headerMediaUrl = insertPreviewItem.headerMediaUrl || null;
+        const needsCarouselMedia =
+          templateNeedsCarouselMedia(catalogHit) ||
+          templateNeedsCarouselMedia(insertPreviewItem) ||
+          Boolean(insertPreviewItem.templatePreview?.isCarousel);
+        const carouselCardCount =
+          templateCarouselCardCount(catalogHit) ||
+          templateCarouselCardCount(insertPreviewItem) ||
+          (Array.isArray(insertPreviewItem.carouselCardMediaUrls)
+            ? insertPreviewItem.carouselCardMediaUrls.length
+            : 0);
+        const carouselCardMediaUrls = Array.isArray(insertPreviewItem.carouselCardMediaUrls)
+          ? insertPreviewItem.carouselCardMediaUrls
+          : [];
         const needsHeaderMedia =
-          templateNeedsHeaderMedia(catalogHit) ||
-          templateNeedsHeaderMedia(insertPreviewItem) ||
-          templateHasImageHeader(catalogHit) ||
-          templateHasImageHeader(insertPreviewItem) ||
-          String(insertPreviewItem.templatePreview?.headerFormat || "").toUpperCase() === "IMAGE";
-        if (needsHeaderMedia && !headerMediaUrl) {
+          !needsCarouselMedia &&
+          (templateNeedsHeaderMedia(catalogHit) ||
+            templateNeedsHeaderMedia(insertPreviewItem) ||
+            templateHasImageHeader(catalogHit) ||
+            templateHasImageHeader(insertPreviewItem) ||
+            ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(
+              String(insertPreviewItem.templatePreview?.headerFormat || "").toUpperCase()
+            ));
+        if (needsCarouselMedia) {
+          const filled = carouselCardMediaUrls.filter((u) => String(u || "").trim());
+          if (filled.length !== carouselCardCount || carouselCardCount < 1) {
+            throw new Error("Upload image or video for each carousel card before sending.");
+          }
+        } else if (needsHeaderMedia && !headerMediaUrl) {
           throw new Error("Choose header media from Media Library before sending this template.");
         }
-        const isImageTemplate = needsHeaderMedia;
-        const imageVars = isImageTemplate
+        const sendTemplateType =
+          String(insertPreviewItem.templatePreview?.headerFormat || "").toUpperCase() === "VIDEO"
+            ? "video"
+            : String(insertPreviewItem.templatePreview?.headerFormat || "").toUpperCase() === "DOCUMENT"
+              ? "document"
+              : String(catalogHit?.variables?.templateType || insertPreviewItem?.variables?.templateType || "image")
+                  .toLowerCase() || "image";
+        const sendHeaderFormat =
+          sendTemplateType === "video"
+            ? "VIDEO"
+            : sendTemplateType === "document"
+              ? "DOCUMENT"
+              : "IMAGE";
+        const headerMediaType =
+          sendHeaderFormat === "VIDEO" ? "video" : sendHeaderFormat === "DOCUMENT" ? "document" : "image";
+        const isMediaTemplate = needsHeaderMedia;
+        const imageVars = isMediaTemplate
           ? {
               ...(headerMediaUrl ? { headerMediaUrl, header_media_url: headerMediaUrl } : {}),
-              templateType: "image",
+              templateType: sendTemplateType,
             }
           : {};
         const previewSource = catalogHit
@@ -1521,16 +1585,19 @@ function LiveChatPage() {
               isTemplate: true,
               mediaUrl: headerMediaUrl,
               headerImageUrl: headerMediaUrl,
+              carouselCardMediaUrls: needsCarouselMedia ? carouselCardMediaUrls : undefined,
             })
           : null;
-        if (templatePreview && isImageTemplate) {
+        if (templatePreview && isMediaTemplate) {
           templatePreview = {
             ...templatePreview,
-            headerFormat: templatePreview.headerFormat || "IMAGE",
+            headerFormat: templatePreview.headerFormat || sendHeaderFormat,
             headerImageUrl: templatePreview.headerImageUrl || headerMediaUrl || null,
             header:
               templatePreview.header ||
-              (headerMediaUrl ? { type: "image", url: headerMediaUrl } : null),
+              (headerMediaUrl
+                ? { type: headerMediaType, url: headerMediaUrl }
+                : { type: headerMediaType }),
           };
         }
 
@@ -1561,7 +1628,8 @@ function LiveChatPage() {
           templateName,
           insertPreviewItem.templateLanguage || "en_US",
           buildTemplateParams(insertPreviewItem, selectedChat),
-          headerMediaUrl
+          needsCarouselMedia ? null : headerMediaUrl,
+          needsCarouselMedia ? carouselCardMediaUrls : null
         );
         closeInsertPopover();
         setMessageText("");
@@ -1849,12 +1917,7 @@ function LiveChatPage() {
           <div className="relative z-[1] flex flex-1 min-h-0 min-w-0">
           <div className="w-80 flex flex-col flex-shrink-0 min-h-0 bg-white/90 backdrop-blur-sm border-r border-gray-200/80 shadow-sm shadow-gray-200/20">
             <div className="flex p-1.5 gap-1.5 flex-shrink-0 bg-gradient-to-b from-gray-100/90 to-gray-50/80 border-b border-gray-200/60 overflow-x-auto [scrollbar-width:none]">
-              {[
-                { id: "active", label: "Active" },
-                { id: "requesting", label: "Requesting" },
-                { id: "intervened", label: "Intervened" },
-                { id: "history", label: "History" },
-              ].map((t) => (
+              {liveChatTabs.map((t) => (
               <button
                   key={t.id}
                 type="button"
@@ -2102,18 +2165,19 @@ function LiveChatPage() {
           </div>
 
           <div className="flex-1 flex flex-col min-w-0 min-h-0 relative bg-white/40 backdrop-blur-[2px] border-x border-gray-200/60">
-            {selectedChat && (
-              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-200/80 bg-white/95 backdrop-blur-md relative z-20 shrink-0">
-                <div className="min-w-0">
-                  <p className="font-bold text-gray-900 truncate">
-                    {resolveContactDisplayName(selectedChat)}
-                    {selectedChat.phone
-                      ? ` (${formatPhoneDisplay(selectedChat.phone)})`
-                      : ""}
-                  </p>
-                </div>
-                {showIntervenedActions && (
-                  <div className="flex items-center gap-2 shrink-0">
+            <div className="shrink-0 z-20 border-b border-gray-200/80 bg-white/95 backdrop-blur-md px-4 py-3 flex items-center justify-between gap-3 shadow-sm">
+              <div className="min-w-0 flex-1">
+                <p className="font-bold text-gray-900 truncate">
+                  {selectedChat
+                    ? `${resolveContactDisplayName(selectedChat)}${
+                        selectedChat.phone ? ` (${formatPhoneDisplay(selectedChat.phone)})` : ""
+                      }`
+                    : "Select a chat"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {selectedChat && showIntervenedActions && (
+                  <>
                     <div className="relative" ref={transferMenuRef}>
                       <button
                         type="button"
@@ -2157,10 +2221,18 @@ function LiveChatPage() {
                     >
                       {resolving ? "Resolving…" : "Resolve"}
                     </button>
-                  </div>
+                  </>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setProfileSidebarOpen((open) => !open)}
+                  className="text-[10px] font-bold text-sky-600 uppercase tracking-wider shrink-0 hover:text-sky-800 transition"
+                  aria-expanded={profileSidebarOpen}
+                >
+                  Profile {profileSidebarOpen ? "←" : "→"}
+                </button>
               </div>
-            )}
+            </div>
             <div className="absolute inset-0 opacity-[0.04] pointer-events-none bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22%230ea5e9%22%3E%3Cpath d=%22M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z%22/%3E%3C/svg%3E')] bg-repeat bg-center" style={{ backgroundSize: "100px" }} />
             <div ref={chatScrollRef} className="flex-1 overflow-y-auto min-h-0 p-4 relative z-10 bg-[#e5ddd5]">
               {error && (
@@ -2305,6 +2377,40 @@ function LiveChatPage() {
                                       type: fmt === "IMAGE" ? "image" : fmt.toLowerCase(),
                                       url,
                                     },
+                                  },
+                                };
+                              });
+                              setInsertError("");
+                            }}
+                            onCarouselCardMediaChange={(cardIndex, url) => {
+                              setInsertPreviewItem((prev) => {
+                                if (!prev) return prev;
+                                const count =
+                                  templateCarouselCardCount(
+                                    templateCatalog.get(
+                                      normalizeTemplateKey(prev.templateName || "")
+                                    )
+                                  ) ||
+                                  (Array.isArray(prev.carouselCardMediaUrls)
+                                    ? prev.carouselCardMediaUrls.length
+                                    : 0);
+                                const nextUrls = Array.isArray(prev.carouselCardMediaUrls)
+                                  ? [...prev.carouselCardMediaUrls]
+                                  : Array(count).fill(null);
+                                nextUrls[cardIndex] = url;
+                                const basePreview = prev.templatePreview || {};
+                                const cards = Array.isArray(basePreview.carouselCards)
+                                  ? basePreview.carouselCards
+                                  : [];
+                                return {
+                                  ...prev,
+                                  carouselCardMediaUrls: nextUrls,
+                                  templatePreview: {
+                                    ...basePreview,
+                                    carouselCards: cards.map((card, idx) => ({
+                                      ...card,
+                                      headerImageUrl: nextUrls[idx] || card.headerImageUrl || null,
+                                    })),
                                   },
                                 };
                               });
@@ -2468,6 +2574,7 @@ function LiveChatPage() {
             )}
           </div>
 
+          {profileSidebarOpen && (
           <div className="w-80 flex flex-col overflow-y-auto flex-shrink-0 min-h-0 bg-white/90 backdrop-blur-sm border-l border-gray-200/80 shadow-sm">
             <div className="p-4 border-b border-gray-200/80 bg-gradient-to-r from-slate-50/80 to-sky-50/40">
               <h3 className="font-bold text-gray-900 tracking-tight">Chat Profile</h3>
@@ -2739,6 +2846,7 @@ function LiveChatPage() {
               </div>
             )}
           </div>
+          )}
           </div>
         </div>
       </div>

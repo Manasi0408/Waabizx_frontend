@@ -309,11 +309,16 @@ export default function PlanSubscriptionView({
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 {metricsDisplay.map((m) => (
                   <div
-                    key={m.label}
+                    key={m.key || m.label}
                     className="rounded-xl border border-slate-100 bg-gradient-to-b from-slate-50 to-white px-3 py-3 text-center shadow-sm ring-1 ring-slate-100/80"
                   >
                     <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{m.label}</p>
-                    <p className="mt-1.5 text-sm font-bold text-slate-800">{m.text}</p>
+                    {m.key !== 'service' || m.rate > 0 ? (
+                      <p className="mt-1 text-lg font-bold tabular-nums text-emerald-700">
+                        {isUsd ? `$${formatUsd(m.rate_usd ?? m.rate)}` : `₹ ${formatInr(m.rate)}`}
+                      </p>
+                    ) : null}
+                    <p className="mt-1 text-sm font-semibold text-slate-800">{m.text}</p>
                   </div>
                 ))}
               </div>

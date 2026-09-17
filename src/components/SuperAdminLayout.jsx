@@ -5,7 +5,8 @@ import HeaderRightActions from './HeaderRightActions';
 import BrandLogoMark from './BrandLogoMark';
 
 export const SUPER_ADMIN_SECTIONS = [
-  { id: 'admins', label: 'Admins & contacts', path: '/super-admin' },
+  { id: 'dashboard', label: 'Dashboard', path: '/super-admin' },
+  { id: 'admins', label: 'Admins & contacts', path: '/super-admin/admins' },
   { id: 'plans', label: 'Plans', path: '/super-admin/plans' },
   { id: 'leads', label: 'Website leads', path: '/super-admin/leads' },
   { id: 'demos', label: 'Demo bookings', path: '/super-admin/demos' },
@@ -14,8 +15,12 @@ export const SUPER_ADMIN_SECTIONS = [
 ];
 
 export function resolveSuperAdminSection(pathname) {
+  const normalizedPath = String(pathname || '').toLowerCase();
+  if (normalizedPath === '/admins') return 'admins';
+
   const tail = String(pathname || '')
     .replace(/^\/super-admin\/?/, '')
+    .replace(/^\//, '')
     .replace(/\/$/, '')
     .toLowerCase();
 
@@ -25,16 +30,18 @@ export function resolveSuperAdminSection(pathname) {
   });
 
   if (match) return match.id;
-  if (!tail) return 'admins';
+  if (!tail) return 'dashboard';
+  if (tail === 'admins') return 'admins';
   if (tail === 'plans') return 'plans';
   if (tail === 'leads') return 'leads';
   if (tail === 'demos') return 'demos';
   if (tail === 'blogs') return 'blogs';
   if (tail === 'businesses') return 'businesses';
-  return 'admins';
+  return 'dashboard';
 }
 
 const sectionSubtitle = {
+  dashboard: 'Platform overview and key metrics',
   admins: 'View admins and their uploaded contacts',
   plans: 'Manage subscription plans and pricing',
   leads: 'Website contact form submissions',

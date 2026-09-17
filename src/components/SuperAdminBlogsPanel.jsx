@@ -1,6 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from '../api/axios';
-import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
+import SuperAdminPagination, { BLOG_PAGE_SIZE, useSuperAdminPagination } from './SuperAdminPagination';
+import {
+  SuperAdminAlert,
+  SuperAdminHero,
+  SuperAdminPage,
+  SuperAdminPanel,
+  SuperAdminStatGrid,
+  SuperAdminStatTile,
+} from './SuperAdminUi';
+import {
+  ensureBlogGoogleFontsLoaded,
+  detectFontFamilyAtCursor,
+  FONT_FAMILY_OPTIONS,
+  ITALIC_FONT_VALUE,
+} from '../utils/blogEditorFonts';
 
 const API_ORIGIN = String(axios.defaults.baseURL || '')
   .replace(/\/api\/?$/, '')
@@ -74,19 +88,6 @@ const FONT_SIZE_OPTIONS = [
   { label: '32', value: '32px' },
   { label: '36', value: '36px' },
 ];
-
-const ITALIC_FONT_VALUE = '__italic__';
-
-const FONT_FAMILY_OPTIONS = [
-  { label: 'Inter', value: "'Inter', sans-serif" },
-  { label: 'Lato', value: "'Lato', sans-serif" },
-  { label: 'Poppins', value: "'Poppins', sans-serif" },
-  { label: 'Roboto', value: "'Roboto', sans-serif" },
-  { label: 'Italic', value: ITALIC_FONT_VALUE },
-];
-
-const BLOG_EDITOR_GOOGLE_FONTS_HREF =
-  'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Roboto:wght@400;500;700&display=swap';
 
 function AlignIcon({ type }) {
   const lines = {
@@ -267,14 +268,7 @@ function RichTextEditor({ value, onChange }) {
   const uploadingImageRef = useRef(false);
 
   useEffect(() => {
-    const linkId = 'blog-editor-google-fonts';
-    if (!document.getElementById(linkId)) {
-      const link = document.createElement('link');
-      link.id = linkId;
-      link.rel = 'stylesheet';
-      link.href = BLOG_EDITOR_GOOGLE_FONTS_HREF;
-      document.head.appendChild(link);
-    }
+    ensureBlogGoogleFontsLoaded();
   }, []);
 
   useEffect(() => {
@@ -303,6 +297,7 @@ function RichTextEditor({ value, onChange }) {
     const editor = editorRef.current;
     if (!editor || !editor.contains(range.commonAncestorContainer)) return;
     savedSelectionRef.current = range.cloneRange();
+    setSelectedFontFamily(detectFontFamilyAtCursor(editor));
   };
 
   const restoreSelection = () => {
@@ -459,39 +454,23 @@ function RichTextEditor({ value, onChange }) {
   const applyFontFamily = (fontFamily) => {
     if (!fontFamily) return;
     if (fontFamily === ITALIC_FONT_VALUE) {
-      withEditorSelection((editor) => {
-        const sel = window.getSelection();
-        if (!sel?.rangeCount) return;
-        const range = sel.getRangeAt(0);
+      withEditorSelection(() => {
         exec('styleWithCSS', true);
         if (!exec('italic')) {
-          if (!range.collapsed) {
-            wrapSelectionInline((node) => {
-              node.style.fontStyle = 'italic';
-            });
-          } else {
-            const block = getBlockElement(range.startContainer, editor) || ensureEditorHasBlock(editor);
-            if (block) block.style.fontStyle = 'italic';
-          }
+          wrapSelectionInline((node) => {
+            node.style.fontStyle = 'italic';
+          });
         }
       });
       return;
     }
-    withEditorSelection((editor) => {
-      const sel = window.getSelection();
-      if (!sel?.rangeCount) return;
-      const range = sel.getRangeAt(0);
-
-      if (!range.collapsed) {
-        wrapSelectionInline((node) => {
-          node.style.fontFamily = fontFamily;
-        });
-        return;
-      }
-
-      const block = getBlockElement(range.startContainer, editor) || ensureEditorHasBlock(editor);
-      if (block) block.style.fontFamily = fontFamily;
+    withEditorSelection(() => {
+      exec('styleWithCSS', true);
+      wrapSelectionInline((node) => {
+        node.style.fontFamily = fontFamily;
+      });
     });
+    setSelectedFontFamily(fontFamily);
   };
 
   const applyLineSpacing = (lineHeight) => {
@@ -540,6 +519,7 @@ function RichTextEditor({ value, onChange }) {
 
   const [textColor, setTextColor] = useState('#111827');
   const [highlightColor, setHighlightColor] = useState('#fef08a');
+  const [selectedFontFamily, setSelectedFontFamily] = useState('');
 
   const insertImageAtSelection = (url) => {
     if (!url) return;
@@ -711,8 +691,10 @@ function RichTextEditor({ value, onChange }) {
   };
 
   const handleSelectChange = (handler) => (e) => {
-    saveSelection();
-    handler(e);
+    const value = e.target.value;
+    e.target.selectedIndex = 0;
+    if (!value) return;
+    handler({ ...e, target: { ...e.target, value } });
   };
 
   const handleEditorFocus = () => {
@@ -764,18 +746,19 @@ function RichTextEditor({ value, onChange }) {
         </select>
 
         <select
-          className={`${selectClass} max-w-[96px]`}
-          defaultValue=""
+          className={`${selectClass} max-w-[132px]`}
+          value={selectedFontFamily}
           onMouseDown={saveSelectionForSelect}
           onFocus={saveSelectionForSelect}
-          onChange={handleSelectChange((e) => {
-            if (e.target.value) applyFontFamily(e.target.value);
-          })}
+          onChange={(e) => {
+            const value = e.target.value;
+            if (!value) return;
+            applyFontFamily(value);
+          }}
+          style={selectedFontFamily ? { fontFamily: selectedFontFamily } : undefined}
           title="Font family"
         >
-          <option value="" disabled>
-            Font
-          </option>
+          <option value="">Font</option>
           {FONT_FAMILY_OPTIONS.map((item) => (
             <option
               key={item.label}
@@ -983,7 +966,8 @@ function SuperAdminBlogsPanel() {
 
   const { page, setPage, totalPages, paginatedItems, totalItems, pageSize } = useSuperAdminPagination(
     filteredBlogs,
-    [search]
+    [search],
+    BLOG_PAGE_SIZE
   );
 
   const openCreate = () => {
@@ -1117,77 +1101,50 @@ function SuperAdminBlogsPanel() {
   };
 
   return (
-    <div className="motion-enter space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-amber-100/90 bg-white/95 p-5 md:p-6 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 backdrop-blur-sm">
-        <div
-          className="pointer-events-none absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-amber-400 via-orange-500 to-rose-500"
-          aria-hidden
-        />
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-xl">
-            <p className="mb-2 inline-flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em] text-amber-800 ring-1 ring-amber-200/70">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden />
-              Content
-            </p>
-            <h2 className="text-2xl font-bold tracking-tight text-gray-900 md:text-3xl">
-              <span className="bg-gradient-to-r from-gray-900 via-amber-800 to-orange-900 bg-clip-text text-transparent">
-                Blog management
-              </span>
-            </h2>
-            <p className="mt-2 text-sm leading-relaxed text-gray-600 md:text-base">
-              Create and edit blog posts with title, date, author, image, SEO meta fields, and rich text details.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+    <SuperAdminPage>
+      <SuperAdminHero
+        accent="amber"
+        badge="Content"
+        title="Blog management"
+        description="Create and edit blog posts with title, date, author, image, SEO meta fields, and rich text details."
+        actions={
+          <>
             <button
               type="button"
               onClick={loadBlogs}
               disabled={loading}
-              className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-white px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-60 transition"
+              className="motion-hover-lift inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-white px-4 py-2 text-sm font-semibold text-amber-800 transition hover:bg-amber-50 disabled:opacity-60"
             >
               {loading ? 'Refreshing…' : 'Refresh'}
             </button>
             <button
               type="button"
               onClick={openCreate}
-              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2 text-sm font-semibold text-white shadow-md hover:shadow-lg transition"
+              className="motion-hover-lift inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:shadow-lg"
             >
               + New blog
             </button>
-          </div>
-        </div>
-      </section>
+          </>
+        }
+      />
 
-      {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
-      ) : null}
-      {success ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-          {success}
-        </div>
-      ) : null}
+      {error ? <SuperAdminAlert>{error}</SuperAdminAlert> : null}
+      {success ? <SuperAdminAlert type="success">{success}</SuperAdminAlert> : null}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
-        <div className="rounded-2xl border border-gray-100/90 bg-white/90 p-4 shadow-lg shadow-gray-200/30 ring-1 ring-gray-100/80">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Total blogs</p>
-          <p className="mt-1 text-3xl font-bold tabular-nums text-gray-900">{blogs.length}</p>
-        </div>
-        <div className="rounded-2xl border border-emerald-100/90 bg-gradient-to-br from-emerald-50/80 via-white to-teal-50/40 p-4 shadow-lg">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-800/70">Active</p>
-          <p className="mt-1 text-3xl font-bold tabular-nums text-gray-900">
-            {blogs.filter((b) => b.is_active !== false).length}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-amber-100/90 bg-gradient-to-br from-amber-50/80 via-white to-orange-50/40 p-4 shadow-lg">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-amber-800/70">Showing</p>
-          <p className="mt-1 text-3xl font-bold tabular-nums text-gray-900">{filteredBlogs.length}</p>
-        </div>
-      </div>
+      <SuperAdminStatGrid className="sm:grid-cols-3">
+        <SuperAdminStatTile label="Total blogs" value={blogs.length} />
+        <SuperAdminStatTile
+          label="Active"
+          value={blogs.filter((b) => b.is_active !== false).length}
+          tone="emerald"
+        />
+        <SuperAdminStatTile label="Showing" value={filteredBlogs.length} tone="amber" />
+      </SuperAdminStatGrid>
 
       {showForm ? (
         <form
           onSubmit={handleSave}
-          className="rounded-2xl border border-gray-100/90 bg-white/95 p-5 md:p-6 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 space-y-4"
+          className="group motion-card-rich motion-hover-lift relative space-y-4 overflow-hidden rounded-2xl border border-gray-100/90 bg-white/95 p-5 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 md:p-6"
         >
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-lg font-bold text-gray-900">
@@ -1354,7 +1311,7 @@ function SuperAdminBlogsPanel() {
         </form>
       ) : null}
 
-      <section className="rounded-2xl border border-gray-100/90 bg-white/95 p-4 md:p-5 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80">
+      <SuperAdminPanel accent="amber" padding="p-4 md:p-5" interactive={false}>
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h3 className="text-sm font-bold text-gray-900">All blogs</h3>
           <input
@@ -1373,11 +1330,11 @@ function SuperAdminBlogsPanel() {
           </div>
         ) : (
           <>
-          <div className="space-y-3">
+          <div className="motion-stagger-children space-y-3">
             {paginatedItems.map((blog) => (
               <article
                 key={blog.id}
-                className="flex flex-col gap-3 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:flex-row sm:items-center"
+                className="group motion-card-rich motion-hover-lift flex flex-col gap-3 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm sm:flex-row sm:items-center"
               >
                 <div className="shrink-0 h-16 w-24 overflow-hidden rounded-xl border border-gray-100 bg-gray-50">
                   {blog.image_url ? (
@@ -1445,8 +1402,8 @@ function SuperAdminBlogsPanel() {
           />
           </>
         )}
-      </section>
-    </div>
+      </SuperAdminPanel>
+    </SuperAdminPage>
   );
 }
 

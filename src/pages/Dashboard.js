@@ -386,9 +386,19 @@ function Dashboard() {
           return;
         }
 
-        const live = Boolean(
-          data?.onboardingCompleted || data?.whatsappConnected || data?.metaLinked
-        );
+        const statusProjectId = data?.projectId != null ? Number(data.projectId) : null;
+        const scopedProjectId =
+          projectId != null && String(projectId).trim() !== "" ? Number(projectId) : null;
+        const projectMatches =
+          !scopedProjectId || !statusProjectId || statusProjectId === scopedProjectId;
+        const live =
+          projectMatches &&
+          Boolean(
+            data?.whatsappConnected === true ||
+              data?.onboardingCompleted === true ||
+              data?.metaLinked === true ||
+              data?.cloudApiMessagingLikelyReady === true
+          );
         setIsWhatsAppApiLive(live);
 
         const linkedProjectId = data?.projectId;
@@ -431,9 +441,6 @@ function Dashboard() {
         const res = await getQualityRating(projectId);
         if (!cancelled) {
           setQualityRating(res?.qualityRating || '');
-          if (res?.success !== false) {
-            setIsWhatsAppApiLive(true);
-          }
         }
       } catch (error) {
         if (!cancelled) setQualityRating('');

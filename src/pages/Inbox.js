@@ -31,8 +31,11 @@ import {
   extractTemplateHeaderMediaUrl,
   templateHasImageHeader,
   templateNeedsHeaderMedia,
+  templateNeedsCarouselMedia,
+  templateCarouselCardCount,
 } from '../utils/whatsappTemplatePreview';
 import { mergeChatMessages, messagesMatchForDedupe, messageHasTemplateCard, dedupeChatMessages } from '../utils/mergeChatMessages';
+import { normalizeMessage } from '../utils/messageParser';
 import { getApiOrigin } from '../utils/apiBase';
 
 const API_BASE = `${getApiOrigin()}/`;
@@ -494,6 +497,8 @@ function Inbox({ pageMode = 'inbox' }) {
   const fileInputRef = useRef(null);
   const lastOpenChatFromContactsRef = useRef(null);
   const handleContactSelectRef = useRef(null);
+  const fetchMessagesRef = useRef(null);
+  const selectedContactRef = useRef(null);
 
   useEffect(() => {
     inboxListRef.current = inboxList || [];
@@ -1035,8 +1040,26 @@ function Inbox({ pageMode = 'inbox' }) {
       const socket = initializeSocket(user.id, token);
 
       // Set up socket event listeners
-      const handleNewMessage = async (message) => {
-        console.log('📨 Socket: new-message received', message);
+      const handleNewMessage = async (rawMessage) => {
+        console.log('📨 Socket: new-message received', rawMessage);
+
+        const message = normalizeMessage(
+          {
+            ...rawMessage,
+            content: rawMessage?.content ?? rawMessage?.message ?? '',
+            type:
+              rawMessage?.type ||
+              (rawMessage?.direction === 'inbound' ? 'incoming' : rawMessage?.direction === 'outbound' ? 'outgoing' : 'incoming'),
+            payload: rawMessage?.payload,
+          },
+          'socket'
+        ) || {
+          ...rawMessage,
+          content: rawMessage?.content ?? rawMessage?.message ?? '',
+          type: rawMessage?.type || 'incoming',
+          source: 'socket',
+        };
+        message.source = 'socket';
         
         // Check if this message is for the currently selected contact
         const isForSelectedContact = selectedContact && (
@@ -1121,13 +1144,19 @@ function Inbox({ pageMode = 'inbox' }) {
               
               // For incoming messages: very strict matching to prevent duplicates
               if (message.type === 'incoming' && m.type === 'incoming') {
+                if (m.waMessageId && message.waMessageId) {
+                  return m.waMessageId === message.waMessageId;
+                }
+                if (m.waMessageId && message.waMessageId && m.waMessageId !== message.waMessageId) {
+                  return false;
+                }
                 const mContent = normalizeContent(m.content);
                 const mPhone = normalizePhone(m.phone || selectedContact?.phone || '');
                 const mContactId = String(m.contactId || '');
                 const mTimestamp = new Date(m.sentAt || m.createdAt || 0).getTime();
                 
                 // Check if content matches (normalized)
-                if (mContent === msgContent) {
+                if (mContent === msgContent && msgContent) {
                   // Check if same contact (by ID, phone, or normalized phone)
                   const sameContact = 
                     mContactId === msgContactId || 
@@ -1252,12 +1281,18 @@ function Inbox({ pageMode = 'inbox' }) {
             // Final check: make sure we're not adding a duplicate by content+time+contact
             const isDuplicate = prev.some(m => {
               if (message.type === 'incoming' && m.type === 'incoming') {
+                if (m.waMessageId && message.waMessageId && m.waMessageId === message.waMessageId) {
+                  return true;
+                }
+                if (m.waMessageId && message.waMessageId && m.waMessageId !== message.waMessageId) {
+                  return false;
+                }
                 const mContent = normalizeContent(m.content);
                 const mPhone = normalizePhone(m.phone || selectedContact?.phone || '');
                 const mContactId = String(m.contactId || '');
                 const mTimestamp = new Date(m.sentAt || m.createdAt || 0).getTime();
                 
-                if (mContent === msgContent) {
+                if (mContent === msgContent && msgContent) {
                   const sameContact = 
                     mContactId === msgContactId || 
                     mPhone === msgPhone ||
@@ -1410,6 +1445,10 @@ function Inbox({ pageMode = 'inbox' }) {
       const handleInboxUpdate = () => {
         fetchInboxList(false);
         fetchSectionChatsRef.current?.(false);
+        const phone = selectedContactRef.current?.phone;
+        if (phone && fetchMessagesRef.current) {
+          fetchMessagesRef.current(phone, false);
+        }
       };
 
       onSocketEvent('new-message', handleNewMessage);
@@ -1434,6 +1473,10 @@ function Inbox({ pageMode = 'inbox' }) {
       };
     }
   }, [user, selectedContact]);
+
+  useEffect(() => {
+    selectedContactRef.current = selectedContact;
+  }, [selectedContact]);
 
   useEffect(() => {
     if (notificationDropdownOpen && isAuthenticated()) {
@@ -2183,6 +2226,8 @@ function Inbox({ pageMode = 'inbox' }) {
     }
   };
 
+  fetchMessagesRef.current = fetchMessages;
+
   // Auto-scroll only when user is already near the bottom (manual scroll up stays put)
   useEffect(() => {
     if (userScrolledUpRef.current && !isNearBottomRef.current) return;
@@ -2847,11 +2892,17 @@ function Inbox({ pageMode = 'inbox' }) {
     if (!resolvedText && item?.mode !== 'template') return;
 
     let templatePreview = null;
+    let needsCarouselMedia = false;
+    let carouselCardCount = 0;
     if (item && typeof item === 'object' && item.mode === 'template') {
       const templateName = String(item.templateName || '').trim();
       const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
       const needsHeaderMedia =
         templateNeedsHeaderMedia(catalogHit) || templateNeedsHeaderMedia(item);
+      needsCarouselMedia =
+        templateNeedsCarouselMedia(catalogHit) || templateNeedsCarouselMedia(item);
+      carouselCardCount =
+        templateCarouselCardCount(catalogHit) || templateCarouselCardCount(item) || 0;
       const stripStoredHeaderMediaVars = (vars) => {
         if (!vars || typeof vars !== 'object' || Array.isArray(vars)) return {};
         const { headerMediaUrl, header_media_url, ...rest } = vars;
@@ -2896,7 +2947,7 @@ function Inbox({ pageMode = 'inbox' }) {
         templateName,
         isTemplate: true,
       });
-      if (templatePreview && needsHeaderMedia) {
+      if (templatePreview && needsHeaderMedia && !needsCarouselMedia) {
         const fmt =
           String(templatePreview.headerFormat || '').toUpperCase() ||
           (imageVars.templateType === 'video'
@@ -2917,6 +2968,9 @@ function Inbox({ pageMode = 'inbox' }) {
       ...(typeof item === 'object' && item ? item : { insertValue: raw }),
       resolvedText: resolvedText || String(item?.templateName || 'Template'),
       headerMediaUrl: null,
+      carouselCardMediaUrls: needsCarouselMedia
+        ? Array(carouselCardCount).fill(null)
+        : undefined,
       templatePreview,
     });
   };
@@ -2951,13 +3005,32 @@ function Inbox({ pageMode = 'inbox' }) {
         const resolvedBody = String(item.resolvedText || resolveTemplatePlaceholders(String(item?.insertValue || ''), selectedContact));
         const catalogHit = templateCatalog.get(normalizeTemplateKey(templateName));
         const headerMediaUrl = item.headerMediaUrl || null;
+        const needsCarouselMedia =
+          templateNeedsCarouselMedia(catalogHit) ||
+          templateNeedsCarouselMedia(item) ||
+          Boolean(item.templatePreview?.isCarousel);
+        const carouselCardCount =
+          templateCarouselCardCount(catalogHit) ||
+          templateCarouselCardCount(item) ||
+          (Array.isArray(item.carouselCardMediaUrls) ? item.carouselCardMediaUrls.length : 0);
+        const carouselCardMediaUrls = Array.isArray(item.carouselCardMediaUrls)
+          ? item.carouselCardMediaUrls
+          : [];
         const needsHeaderMedia =
-          templateNeedsHeaderMedia(catalogHit) ||
-          templateNeedsHeaderMedia(item) ||
-          templateHasImageHeader(catalogHit) ||
-          templateHasImageHeader(item) ||
-          String(item.templatePreview?.headerFormat || '').toUpperCase() === 'IMAGE';
-        if (needsHeaderMedia && !headerMediaUrl) {
+          !needsCarouselMedia &&
+          (templateNeedsHeaderMedia(catalogHit) ||
+            templateNeedsHeaderMedia(item) ||
+            templateHasImageHeader(catalogHit) ||
+            templateHasImageHeader(item) ||
+            ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(
+              String(item.templatePreview?.headerFormat || '').toUpperCase()
+            ));
+        if (needsCarouselMedia) {
+          const filled = carouselCardMediaUrls.filter((u) => String(u || '').trim());
+          if (filled.length !== carouselCardCount || carouselCardCount < 1) {
+            throw new Error('Upload image or video for each carousel card before sending.');
+          }
+        } else if (needsHeaderMedia && !headerMediaUrl) {
           throw new Error('Choose header media from Media Library before sending this template.');
         }
 
@@ -2966,11 +3039,26 @@ function Inbox({ pageMode = 'inbox' }) {
         setSelectedInterveneCannedId("");
         setSelectedInterveneTemplateId("");
 
-        const isImageTemplate = needsHeaderMedia;
-        const imageVars = isImageTemplate
+        const sendTemplateType =
+          String(item.templatePreview?.headerFormat || '').toUpperCase() === 'VIDEO'
+            ? 'video'
+            : String(item.templatePreview?.headerFormat || '').toUpperCase() === 'DOCUMENT'
+              ? 'document'
+              : String(catalogHit?.variables?.templateType || item?.variables?.templateType || 'image')
+                  .toLowerCase() || 'image';
+        const sendHeaderFormat =
+          sendTemplateType === 'video'
+            ? 'VIDEO'
+            : sendTemplateType === 'document'
+              ? 'DOCUMENT'
+              : 'IMAGE';
+        const headerMediaType =
+          sendHeaderFormat === 'VIDEO' ? 'video' : sendHeaderFormat === 'DOCUMENT' ? 'document' : 'image';
+        const isMediaTemplate = needsHeaderMedia;
+        const imageVars = isMediaTemplate
           ? {
               ...(headerMediaUrl ? { headerMediaUrl, header_media_url: headerMediaUrl } : {}),
-              templateType: 'image',
+              templateType: sendTemplateType,
             }
           : {};
         const previewSource = catalogHit
@@ -2993,21 +3081,33 @@ function Inbox({ pageMode = 'inbox' }) {
               isTemplate: true,
               mediaUrl: headerMediaUrl,
               headerImageUrl: headerMediaUrl,
+              carouselCardMediaUrls: needsCarouselMedia ? carouselCardMediaUrls : undefined,
             })
           : null;
-        if (templatePreview && isImageTemplate) {
+        if (templatePreview && isMediaTemplate) {
           templatePreview = {
             ...templatePreview,
-            headerFormat: templatePreview.headerFormat || 'IMAGE',
+            headerFormat: templatePreview.headerFormat || sendHeaderFormat,
             headerImageUrl: templatePreview.headerImageUrl || headerMediaUrl || null,
             header:
               templatePreview.header ||
-              (headerMediaUrl ? { type: 'image', url: headerMediaUrl } : null),
+              (headerMediaUrl ? { type: headerMediaType, url: headerMediaUrl } : { type: headerMediaType }),
           };
         }
+        const sendResult = await sendTemplateMessage(
+          phone,
+          templateName,
+          item.templateLanguage || 'en_US',
+          buildTemplateParams(item, selectedContact),
+          needsCarouselMedia ? null : headerMediaUrl,
+          needsCarouselMedia ? carouselCardMediaUrls : null
+        );
+        const serverPreview = sendResult?.templatePreview || sendResult?.templateSnapshot || templatePreview;
         const optimisticTemplateMessage = {
-          id: `template_quick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          content: resolvedBody,
+          id: sendResult?.messageId
+            ? `inbox_${sendResult.messageId}`
+            : `template_quick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          content: serverPreview?.body || resolvedBody,
           type: 'outgoing',
           messageType: 'template',
           status: 'sent',
@@ -3017,11 +3117,12 @@ function Inbox({ pageMode = 'inbox' }) {
           isTemplate: true,
           isTemplateSend: true,
           templateName,
-          templatePreview,
-          templateSnapshot: templatePreview,
-          mediaUrl: headerMediaUrl || null,
+          templatePreview: serverPreview,
+          templateSnapshot: serverPreview,
+          mediaUrl: headerMediaUrl || serverPreview?.headerImageUrl || null,
+          waMessageId: sendResult?.waMessageId || null,
           phone,
-          contactId: selectedContact?.id || null
+          contactId: selectedContact?.id || null,
         };
         setMessages((prev) => {
           const updated = [...prev, optimisticTemplateMessage].sort((a, b) => {
@@ -3031,13 +3132,6 @@ function Inbox({ pageMode = 'inbox' }) {
           });
           return updated;
         });
-        await sendTemplateMessage(
-          phone,
-          templateName,
-          item.templateLanguage || 'en_US',
-          buildTemplateParams(item, selectedContact),
-          headerMediaUrl
-        );
         fetchInboxList(false);
         setTimeout(() => {
           if (selectedContact?.phone) {
@@ -5077,6 +5171,39 @@ function Inbox({ pageMode = 'inbox' }) {
                                               type: fmt === 'IMAGE' ? 'image' : fmt.toLowerCase(),
                                               url,
                                             },
+                                          },
+                                        };
+                                      });
+                                    }}
+                                    onCarouselCardMediaChange={(cardIndex, url) => {
+                                      setIntervenePreviewItem((prev) => {
+                                        if (!prev) return prev;
+                                        const count =
+                                          templateCarouselCardCount(
+                                            templateCatalog.get(
+                                              normalizeTemplateKey(prev.templateName || '')
+                                            )
+                                          ) ||
+                                          (Array.isArray(prev.carouselCardMediaUrls)
+                                            ? prev.carouselCardMediaUrls.length
+                                            : 0);
+                                        const nextUrls = Array.isArray(prev.carouselCardMediaUrls)
+                                          ? [...prev.carouselCardMediaUrls]
+                                          : Array(count).fill(null);
+                                        nextUrls[cardIndex] = url;
+                                        const basePreview = prev.templatePreview || {};
+                                        const cards = Array.isArray(basePreview.carouselCards)
+                                          ? basePreview.carouselCards
+                                          : [];
+                                        return {
+                                          ...prev,
+                                          carouselCardMediaUrls: nextUrls,
+                                          templatePreview: {
+                                            ...basePreview,
+                                            carouselCards: cards.map((card, idx) => ({
+                                              ...card,
+                                              headerImageUrl: nextUrls[idx] || card.headerImageUrl || null,
+                                            })),
                                           },
                                         };
                                       });

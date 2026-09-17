@@ -1,4 +1,5 @@
 import { getApiUrl, getApiOrigin } from '../utils/apiBase';
+import { resolveActiveProjectId } from '../utils/activeProject';
 // const API_URL = 'https://wabizx.techwhizzc.com/api';
 const API_URL = getApiUrl();
 
@@ -7,17 +8,7 @@ const getToken = () => {
   return localStorage.getItem('token');
 };
 
-const getSelectedProjectId = () => {
-  try {
-    const raw = localStorage.getItem('selectedProject');
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const id = parsed?.id;
-    return id != null && String(id).trim() !== '' ? String(id) : null;
-  } catch (e) {
-    return null;
-  }
-};
+const getSelectedProjectId = () => resolveActiveProjectId();
 
 const buildHeaders = (token) => {
   const headers = {

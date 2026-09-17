@@ -1,6 +1,6 @@
 import React from 'react';
 
-export default function ImagePreviewModal({ src, onClose }) {
+export default function ImagePreviewModal({ src, onClose, onDownload }) {
   if (!src) return null;
   return (
     <div
@@ -9,14 +9,28 @@ export default function ImagePreviewModal({ src, onClose }) {
       role="dialog"
       aria-modal
     >
-      <button
-        type="button"
-        className="absolute top-4 right-4 text-white text-2xl w-10 h-10 rounded-full bg-white/10 hover:bg-white/20"
-        onClick={onClose}
-        aria-label="Close"
-      >
-        ×
-      </button>
+      <div className="absolute top-4 right-4 flex items-center gap-2">
+        {typeof onDownload === 'function' ? (
+          <button
+            type="button"
+            className="text-white text-sm font-semibold px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDownload(e);
+            }}
+          >
+            Download
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="text-white text-2xl w-10 h-10 rounded-full bg-white/10 hover:bg-white/20"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
       <img
         src={src}
         alt=""

@@ -57,27 +57,33 @@ function ProjectDashboard() {
     }
   };
 
-  const toggleProjectHidden = async (project, e) => {
+  const deleteProject = async (project, e) => {
     e?.stopPropagation?.();
-    const isHidden = Boolean(project.is_hidden === 1 || project.is_hidden === true);
-    const nextHidden = !isHidden;
+    const name = String(project.project_name || "").trim() || `Project #${project.id}`;
+    if (!window.confirm(`Delete "${name}"? This action cannot be undone.`)) {
+      return;
+    }
 
     try {
-      await axios.patch(`/projects/${project.id}/hidden`, { hidden: nextHidden });
-      setProjects((prev) =>
-        prev.map((p) =>
-          Number(p.id) === Number(project.id)
-            ? { ...p, is_hidden: nextHidden ? 1 : 0 }
-            : p
-        )
-      );
+      await axios.delete(`/projects/${project.id}`, {
+        headers: { 'x-project-id': String(project.id) },
+      });
+      try {
+        const raw = localStorage.getItem("selectedProject");
+        if (raw) {
+          const selected = JSON.parse(raw);
+          if (Number(selected?.id) === Number(project.id)) {
+            localStorage.removeItem("selectedProject");
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      setProjects((prev) => prev.filter((p) => Number(p.id) !== Number(project.id)));
     } catch (error) {
-      alert(error.response?.data?.message || "Failed to update project visibility");
+      alert(error.response?.data?.message || "Failed to delete project");
     }
   };
-
-  const isProjectHidden = (project) =>
-    Boolean(project?.is_hidden === 1 || project?.is_hidden === true);
 
   const sortProjects = (list) =>
     [...list].sort((a, b) => {
@@ -92,11 +98,8 @@ function ProjectDashboard() {
       return bDate - aDate;
     });
 
-  const visibleProjects = sortProjects(projects.filter((p) => !isProjectHidden(p)));
-  const hiddenProjects = sortProjects(projects.filter((p) => isProjectHidden(p)));
-  const count = visibleProjects.length;
-  const hiddenCount = hiddenProjects.length;
-  const totalCount = projects.length;
+  const sortedProjects = sortProjects(projects);
+  const totalCount = sortedProjects.length;
 
   const openProject = (project) => {
     try {
@@ -105,48 +108,26 @@ function ProjectDashboard() {
     navigate("/admin", { state: { project } });
   };
 
-  const renderProjectRow = (project, { dimmed = false, clickable = true } = {}) => (
+  const renderProjectRow = (project) => (
     <div
       key={project.id}
-      role={clickable ? "button" : undefined}
-      tabIndex={clickable ? 0 : -1}
-      aria-disabled={clickable ? undefined : true}
-      onClick={clickable ? () => openProject(project) : undefined}
-      onKeyDown={
-        clickable
-          ? (e) => {
-              if (e.key !== "Enter") return;
-              openProject(project);
-            }
-          : undefined
-      }
-      className={`group relative w-full overflow-hidden rounded-2xl border bg-white/95 shadow-md ring-1 transition-all duration-300 focus:outline-none ${
-        clickable
-          ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-xl focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
-          : "cursor-not-allowed pointer-events-none"
-      } ${
-        dimmed
-          ? "border-gray-200/90 opacity-75 shadow-gray-200/20 ring-gray-100/80"
-          : "border-gray-100/90 shadow-gray-200/25 ring-gray-100/80 hover:border-sky-200/90 hover:shadow-sky-500/15"
-      }`}
+      role="button"
+      tabIndex={0}
+      onClick={() => openProject(project)}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter") return;
+        openProject(project);
+      }}
+      className="group relative w-full overflow-hidden rounded-2xl border border-gray-100/90 bg-white/95 shadow-md shadow-gray-200/25 ring-1 ring-gray-100/80 transition-all duration-300 hover:-translate-y-0.5 hover:border-sky-200/90 hover:shadow-xl hover:shadow-sky-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 cursor-pointer"
     >
       <div
-        className={`pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r opacity-90 transition-transform duration-300 ${
-          clickable ? "group-hover:scale-x-[1.02]" : ""
-        } ${
-          dimmed ? "from-gray-400 via-gray-300 to-gray-400" : "from-sky-500 via-sky-400 to-blue-600"
-        }`}
+        className="pointer-events-none absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-sky-500 via-sky-400 to-blue-600 opacity-90 transition-transform duration-300 group-hover:scale-x-[1.02]"
         aria-hidden
       />
-      <div className={clickable ? undefined : "pointer-events-auto"}>
-        <ProjectCard
-          project={project}
-          clickable={clickable}
-          onToggleHidden={
-            canManageProjects ? (e) => toggleProjectHidden(project, e) : undefined
-          }
-        />
-      </div>
+      <ProjectCard
+        project={project}
+        onDelete={canManageProjects ? (e) => deleteProject(project, e) : undefined}
+      />
     </div>
   );
 
@@ -202,7 +183,7 @@ function ProjectDashboard() {
             <div className="grid w-full max-w-md grid-cols-2 gap-3 sm:max-w-lg lg:w-auto lg:max-w-none lg:shrink-0">
               <div className="rounded-2xl border border-sky-100/80 bg-gradient-to-br from-white via-white to-sky-50/70 p-4 shadow-md shadow-sky-200/35 ring-1 ring-sky-100/70 md:p-5">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Projects</p>
-                <p className="mt-1 text-3xl font-bold tabular-nums tracking-tight text-gray-900">{count}</p>
+                <p className="mt-1 text-3xl font-bold tabular-nums tracking-tight text-gray-900">{totalCount}</p>
                 <p className="mt-1 text-xs font-medium text-sky-600/90">In your workspace</p>
               </div>
               <div className="rounded-2xl border border-blue-100/90 bg-gradient-to-br from-sky-500/10 via-white to-blue-600/15 p-4 shadow-md shadow-blue-200/30 ring-1 ring-blue-100/70 md:p-5">
@@ -287,12 +268,12 @@ function ProjectDashboard() {
               <p className="mt-1 text-sm text-gray-500">
                 {totalCount === 0
                   ? "Nothing here yet — create one above."
-                  : `${count} visible workspace${count !== 1 ? "s" : ""}${hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}`}
+                  : `${totalCount} workspace${totalCount !== 1 ? "s" : ""}`}
               </p>
             </div>
             {totalCount > 0 && (
               <span className="rounded-full border border-sky-100/90 bg-gradient-to-r from-white to-sky-50/80 px-4 py-1.5 text-xs font-bold text-sky-900 shadow-sm ring-1 ring-sky-100/60">
-                {count} visible{hiddenCount > 0 ? ` / ${totalCount} total` : ""}
+                {totalCount} total
               </span>
             )}
           </div>
@@ -321,28 +302,7 @@ function ProjectDashboard() {
             </div>
           ) : (
             <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-              {visibleProjects.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50/80 px-6 py-10 text-center">
-                  <p className="text-sm font-semibold text-gray-700">All projects are hidden</p>
-                  <p className="mt-1 text-sm text-gray-500">Use Unhide below to show a project again.</p>
-                </div>
-              ) : (
-                visibleProjects.map((project) => renderProjectRow(project))
-              )}
-
-              {hiddenCount > 0 && (
-                <div className="mt-4 border-t border-gray-100 pt-6">
-                  <div className="mb-4">
-                    <h3 className="text-base font-bold text-gray-800">Hidden projects</h3>
-                    <p className="mt-1 text-sm text-gray-500">
-                      These are out of your main list. Click Unhide to bring one back.
-                    </p>
-                  </div>
-                  <div className="flex flex-col gap-4">
-                    {hiddenProjects.map((project) => renderProjectRow(project, { dimmed: true, clickable: false }))}
-                  </div>
-                </div>
-              )}
+              {sortedProjects.map((project) => renderProjectRow(project))}
             </div>
           )}
         </section>

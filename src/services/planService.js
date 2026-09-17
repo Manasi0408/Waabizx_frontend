@@ -69,6 +69,7 @@ export const updateConversationMetrics = async (payload) => {
   return {
     metrics: Array.isArray(res?.data?.metrics) ? res.data.metrics : [],
     rates: res?.data?.rates && typeof res.data.rates === 'object' ? res.data.rates : {},
+    config: res?.data?.config && typeof res.data.config === 'object' ? res.data.config : null,
   };
 };
 
@@ -95,4 +96,60 @@ export const updateAdminWhatsappPricing = async (payload) => {
 export const testWccPrice = async ({ countryCode, category = 'UTILITY', walletCurrency = 'INR' }) => {
   const res = await axios.post('/wcc/test-price', { countryCode, category, walletCurrency });
   return res.data;
+};
+
+export const fetchAdminWccSettings = async () => {
+  const res = await axios.get('/admin/wcc-settings');
+  return {
+    settings: Array.isArray(res?.data?.settings) ? res.data.settings : [],
+    categories: Array.isArray(res?.data?.categories) ? res.data.categories : [],
+  };
+};
+
+export const updateAdminWccSettings = async (payload) => {
+  const res = await axios.put('/admin/wcc-settings', payload);
+  return {
+    settings: Array.isArray(res?.data?.settings) ? res.data.settings : [],
+    categories: Array.isArray(res?.data?.categories) ? res.data.categories : [],
+  };
+};
+
+export const fetchProjectWccTransactions = async (projectId, { page = 1, limit = 10 } = {}) => {
+  const res = await axios.get(`/business-overview/${projectId}/wcc-transactions`, {
+    params: { page, limit },
+  });
+  return {
+    balance: Number(res?.data?.balance) || 0,
+    transactions: Array.isArray(res?.data?.transactions) ? res.data.transactions : [],
+    total: Number(res?.data?.total) || 0,
+    page: Number(res?.data?.page) || page,
+    limit: Number(res?.data?.limit) || limit,
+  };
+};
+
+export const downloadProjectWccTransactions = async (projectId, { filename } = {}) => {
+  const res = await axios.get(`/business-overview/${projectId}/wcc-transactions/download`, {
+    responseType: 'blob',
+  });
+  const contentType = String(res.headers?.['content-type'] || '');
+  if (contentType.includes('application/json')) {
+    const text = await res.data.text();
+    let message = 'Failed to download WCC wallet report';
+    try {
+      message = JSON.parse(text)?.message || message;
+    } catch (_) {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
+  const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const safeProject = String(projectId).replace(/[^\w.-]+/g, '_');
+  a.download = filename || `wcc-wallet_${safeProject}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
 };

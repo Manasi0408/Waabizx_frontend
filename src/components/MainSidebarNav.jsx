@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { hasManagerModuleAccess } from '../utils/managerAccess';
+import { useProjectWhatsAppConnected } from '../hooks/useProjectWhatsAppConnected';
 
 const linkClass = ({ isActive }) =>
   `flex flex-row md:flex-col items-center gap-2 md:gap-1 px-3 md:px-2 py-2.5 md:py-3 rounded-lg transition-all duration-300 ease-out will-change-transform group active:scale-[0.96] [&>svg]:shrink-0 [&>svg]:transition-transform [&>svg]:duration-300 [&>svg]:ease-out group-hover:[&>svg]:scale-110 md:group-hover:[&>svg]:-rotate-6 ${
@@ -202,6 +203,21 @@ const items = [
     ),
   },
   {
+    to: '/api-token',
+    label: 'API Token',
+    requiresWhatsApp: true,
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={2}
+          d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
+        />
+      </svg>
+    ),
+  },
+  {
     to: '/settings',
     label: 'Profile',
     icon: (
@@ -228,6 +244,7 @@ const items = [
  * @param {{ navClassName?: string; listClassName?: string }} props
  */
 export default function MainSidebarNav({ navClassName = '', listClassName = '', onNavigate }) {
+  const whatsappConnected = useProjectWhatsAppConnected();
   const navClasses = [
     'flex',
     'h-full',
@@ -257,7 +274,10 @@ export default function MainSidebarNav({ navClassName = '', listClassName = '', 
   ]
     .filter(Boolean)
     .join(' ');
-  const visibleItems = items.filter(({ moduleKey }) => hasManagerModuleAccess(moduleKey));
+  const visibleItems = items.filter(({ moduleKey, requiresWhatsApp }) => {
+    if (requiresWhatsApp && !whatsappConnected) return false;
+    return hasManagerModuleAccess(moduleKey);
+  });
   return (
     <nav className={navClasses}>
       <ul className={listClasses}>

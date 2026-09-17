@@ -53,7 +53,10 @@ function AgentSidebar({ open = true }) {
       className={`bg-sky-950 text-white border-r border-sky-900 h-full shrink-0 flex flex-col items-center py-6 transition-all duration-300 overflow-hidden ${
         open ? "w-20" : "w-0 md:w-20"
       }`}
-    ><div className="mb-10"><BrandLogoMark size="md" tone="contrast" /></div>
+    >
+      <div className="mb-10">
+        <BrandLogoMark size="md" tone="contrast" />
+      </div>
 
       <nav className="flex flex-col items-center gap-1 w-full px-2">
         {navItems.map((item) => {

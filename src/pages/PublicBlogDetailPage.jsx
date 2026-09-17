@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import axios from '../api/axios';
+import { ensureBlogGoogleFontsLoaded } from '../utils/blogEditorFonts';
 
 const formatDate = (value) => {
   if (!value) return '';
@@ -34,6 +35,10 @@ export default function PublicBlogDetailPage() {
   const [blog, setBlog] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    ensureBlogGoogleFontsLoaded();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

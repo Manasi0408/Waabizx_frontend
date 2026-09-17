@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import BrandLogoMark from '../components/BrandLogoMark';
 import { useNavigate, Link } from 'react-router-dom';
 import { getProfile, isAuthenticated, logout, readSessionUser } from '../services/authService';
@@ -14,12 +14,30 @@ import {
   uploadContactsCSV
 } from '../services/contactService';
 import { fetchTags } from '../services/tagService';
+import { fetchUserAttributes } from '../services/userAttributeService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
 import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
 import PlanLimitModal from '../components/PlanLimitModal';
 import { extractPlanLimitError, gatePlanLimit, assertCanAddResource } from '../services/planLimitService';
+import { resolveActiveProjectId } from '../utils/activeProject';
+
+function formatAttributeColumnLabel(name) {
+  return String(name || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function getContactCustomField(contact, key) {
+  const cf =
+    contact?.customFields && typeof contact.customFields === 'object' && !Array.isArray(contact.customFields)
+      ? contact.customFields
+      : {};
+  const v = cf[key];
+  if (v == null || String(v).trim() === '') return '—';
+  return String(v);
+}
 
 function Contacts() {
   const navigate = useNavigate();
@@ -34,6 +52,9 @@ function Contacts() {
   const [pagination, setPagination] = useState({ total: 0, page: 1, pages: 1, limit: 20 });
   const [filters, setFilters] = useState({ status: '', type: '', search: '', tag: '', page: 1 });
   const [projectTags, setProjectTags] = useState([]);
+  const [projectAttributes, setProjectAttributes] = useState([]);
+  const [activeProjectId, setActiveProjectId] = useState(() => resolveActiveProjectId());
+  const [attributeValues, setAttributeValues] = useState({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importFile, setImportFile] = useState(null);
@@ -89,6 +110,33 @@ function Contacts() {
     fetchTags()
       .then(setProjectTags)
       .catch((e) => console.warn('[Contacts] fetchTags', e?.message || e));
+  }, []);
+
+  const loadProjectAttributes = useCallback(async () => {
+    try {
+      const list = await fetchUserAttributes();
+      const names = (Array.isArray(list) ? list : [])
+        .map((item) => String(item?.name || '').trim())
+        .filter(Boolean);
+      setProjectAttributes(names);
+    } catch (e) {
+      console.warn('[Contacts] fetchUserAttributes', e?.message || e);
+      setProjectAttributes([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadProjectAttributes();
+  }, [loadProjectAttributes, activeProjectId]);
+
+  useEffect(() => {
+    const syncProject = () => setActiveProjectId(resolveActiveProjectId());
+    window.addEventListener('waabiz-project-changed', syncProject);
+    window.addEventListener('focus', syncProject);
+    return () => {
+      window.removeEventListener('waabiz-project-changed', syncProject);
+      window.removeEventListener('focus', syncProject);
+    };
   }, []);
 
   // Fetch notifications
@@ -153,7 +201,7 @@ function Contacts() {
     if (!loading && isAuthenticated()) {
       fetchContacts();
     }
-  }, [loading, filters]);
+  }, [loading, filters, activeProjectId]);
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -317,11 +365,20 @@ function Contacts() {
 
     try {
       const tagsArray = formData.tags ? formData.tags.split(',').map(tag => tag.trim()).filter(tag => tag) : [];
+      const nextCustomFields = {};
+      projectAttributes.forEach((attrName) => {
+        const value = attributeValues[attrName];
+        if (value != null && String(value).trim() !== '') {
+          nextCustomFields[attrName] = String(value).trim();
+        }
+      });
+
       await updateContact(selectedContact.id, {
         name: formData.name,
         email: formData.email || null,
         tags: tagsArray,
-        country: formData.country || null
+        country: formData.country || null,
+        customFields: nextCustomFields,
       });
       setSuccess('Contact updated successfully!');
       setShowEditModal(false);
@@ -396,6 +453,16 @@ function Contacts() {
   const openEditModal = async (contact) => {
     try {
       const fullContact = await getContactById(contact.id);
+      let attrNames = [];
+      try {
+        const list = await fetchUserAttributes();
+        attrNames = (Array.isArray(list) ? list : [])
+          .map((item) => String(item?.name || '').trim())
+          .filter(Boolean);
+      } catch (_) {
+        attrNames = [...projectAttributes];
+      }
+      setProjectAttributes(attrNames);
       setSelectedContact(fullContact);
       setFormData({
         phone: fullContact.phone || '',
@@ -404,6 +471,16 @@ function Contacts() {
         tags: Array.isArray(fullContact.tags) ? fullContact.tags.join(', ') : '',
         country: fullContact.country || ''
       });
+      const customFields =
+        fullContact?.customFields && typeof fullContact.customFields === 'object'
+          ? fullContact.customFields
+          : {};
+      const nextAttributeValues = {};
+      attrNames.forEach((attrName) => {
+        nextAttributeValues[attrName] =
+          customFields[attrName] != null ? String(customFields[attrName]) : '';
+      });
+      setAttributeValues(nextAttributeValues);
       setShowEditModal(true);
     } catch (error) {
       setError(error.message || 'Failed to load contact details');
@@ -892,165 +969,190 @@ function Contacts() {
               </div>
             ) : (
               <>
-                <div className="bg-white rounded-2xl shadow-lg shadow-gray-200/50 border border-gray-100/90 overflow-hidden ring-1 ring-gray-100/80">
-                  <div className="p-4 md:p-6 space-y-3 md:space-y-4">
-                    {contacts.map((contact) => (
-                      <article
-                        key={contact.id}
-                        className="group relative flex min-h-0 flex-row rounded-2xl border border-gray-100/90 bg-white shadow-sm shadow-gray-200/40 ring-1 ring-gray-100/80 overflow-hidden motion-hover-lift hover:shadow-xl hover:border-sky-100/90 transition-all duration-300"
-                      >
-                        <div
-                          className="w-1.5 shrink-0 self-stretch bg-gradient-to-b from-sky-400 via-sky-500 to-blue-600 opacity-95"
-                          aria-hidden
-                        />
-                        <div className="flex min-w-0 flex-1 flex-col gap-3 p-4 sm:p-4 lg:flex-row lg:items-center lg:gap-5 xl:gap-6">
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            className="min-w-0 flex-1 lg:max-w-md xl:max-w-lg text-left cursor-pointer rounded-xl -m-1 p-1 transition hover:bg-sky-50/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 focus-visible:ring-offset-2"
-                            onClick={() => openInboxChat(contact)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                openInboxChat(contact);
-                              }
-                            }}
+                <div className="bg-white/95 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-200/50 border border-gray-100/90 overflow-hidden ring-1 ring-gray-100/80 motion-enter motion-delay-2">
+                  <div className="px-4 md:px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-sky-50/90 via-white to-blue-50/40 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-bold text-gray-900 tracking-tight">Contact directory</h3>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {pagination.total} contact{pagination.total === 1 ? '' : 's'}
+                        {projectAttributes.length > 0
+                          ? ` · ${projectAttributes.length} project attribute column${projectAttributes.length === 1 ? '' : 's'}`
+                          : ' · no custom attribute columns (add under Manage → User attributes)'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-sm text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-gray-200 bg-gray-50/80">
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap">
+                            Name
+                          </th>
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap">
+                            Phone
+                          </th>
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap">
+                            Email
+                          </th>
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap">
+                            Country
+                          </th>
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap">
+                            Status
+                          </th>
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap min-w-[120px]">
+                            Tags
+                          </th>
+                          {projectAttributes.map((attr) => (
+                            <th
+                              key={attr}
+                              className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-teal-800 whitespace-nowrap"
+                              title={attr}
+                            >
+                              {formatAttributeColumnLabel(attr)}
+                            </th>
+                          ))}
+                          <th className="px-4 py-3.5 text-xs font-bold uppercase tracking-wide text-sky-800 whitespace-nowrap text-right sticky right-0 bg-gray-50/95 backdrop-blur-sm shadow-[-8px_0_12px_-8px_rgba(0,0,0,0.08)]">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {contacts.map((contact, rowIdx) => (
+                          <tr
+                            key={contact.id}
+                            className={`group transition-colors hover:bg-sky-50/50 ${rowIdx % 2 === 1 ? 'bg-slate-50/40' : 'bg-white'}`}
                           >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500 via-sky-600 to-blue-700 text-white font-bold text-xs flex items-center justify-center shadow-md shadow-sky-500/30 ring-2 ring-white">
-                                {getContactInitials(contact.name, contact.phone)}
-                              </div>
-                              <div className="min-w-0">
-                                <div className="flex flex-wrap items-center gap-2 gap-y-1">
-                                  <h3 className="text-base font-semibold text-gray-900 leading-snug line-clamp-2 min-w-0">
-                                    {contact.name || 'N/A'}
-                                  </h3>
-                                  <span className={`shrink-0 px-2.5 py-0.5 text-xs font-semibold rounded-full ${getStatusColor(contact.status)}`}>
-                                    {getStatusLabel(contact.status)}
-                                  </span>
+                            <td className="px-4 py-3.5 align-middle">
+                              <div className="flex items-center gap-2.5 min-w-0 max-w-[220px]">
+                                <div className="shrink-0 w-9 h-9 rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 text-white text-[10px] font-bold flex items-center justify-center shadow-sm ring-2 ring-white">
+                                  {getContactInitials(contact.name, contact.phone)}
                                 </div>
-                                <p className="text-xs text-gray-500 mt-1 line-clamp-2 break-all">
-                                  {contact.phone}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-2 text-xs text-gray-600">
-                              <span>
-                                <span className="font-medium text-gray-500">Email</span>{' '}
-                                {contact.email || 'N/A'}
-                              </span>
-                              <span className="text-gray-300" aria-hidden>
-                                |
-                              </span>
-                              <span>
-                                <span className="font-medium text-gray-500">Country</span>{' '}
-                                {contact.country || 'N/A'}
-                              </span>
-                            </div>
-                            <div className="flex flex-wrap gap-1.5 mt-2">
-                              {Array.isArray(contact.tags) && contact.tags.length > 0 ? (
-                                contact.tags.map((tag, idx) => (
-                                  <span key={idx} className="px-2 py-0.5 bg-sky-50 text-sky-800 text-xs font-medium rounded-lg border border-sky-100/80">
-                                    {tag}
-                                  </span>
-                                ))
-                              ) : (
-                                <span className="text-xs text-gray-400">No tags</span>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3 lg:flex-nowrap lg:justify-end lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0 xl:min-w-[190px]">
-                            {(() => {
-                              const optedOut = contact.status === 'unsubscribed' || !contact.whatsappOptInAt;
-                              if (optedOut) {
-                                return (
-                                  <button
-                                    type="button"
-                                    onClick={(ev) => {
-                                      ev.stopPropagation();
-                                      handleOptInContact(contact.id);
-                                    }}
-                                    className="px-3 py-1.5 bg-sky-600 text-white text-xs font-medium rounded-lg hover:bg-sky-700 transition-all duration-200 active:scale-95 shadow-sm hover:shadow"
-                                    title="Opt-in"
-                                  >
-                                    Opt-in
-                                  </button>
-                                );
-                              }
-
-                              return (
                                 <button
                                   type="button"
-                                  onClick={(ev) => {
-                                    ev.stopPropagation();
-                                    setSelectedContact(contact);
-                                    setShowOptOutModal(true);
-                                  }}
-                                  className="px-3 py-1.5 bg-orange-600 text-white text-xs font-medium rounded-lg hover:bg-orange-700 transition-all duration-200 active:scale-95 shadow-sm hover:shadow"
-                                  title="Opt-out"
+                                  onClick={() => openInboxChat(contact)}
+                                  className="text-left font-semibold text-sky-700 hover:text-sky-900 hover:underline truncate min-w-0"
+                                  title={contact.name || 'Open chat'}
                                 >
-                                  Opt-out
+                                  {contact.name || '—'}
                                 </button>
-                              );
-                            })()}
-                            <button
-                              type="button"
-                              onClick={(ev) => {
-                                ev.stopPropagation();
-                                openEditModal(contact);
-                              }}
-                              className="p-2 text-gray-600 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-all duration-200 active:scale-95"
-                              title="Edit"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(ev) => {
-                                ev.stopPropagation();
-                                setSelectedContact(contact);
-                                setShowDeleteModal(true);
-                              }}
-                              className="p-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200 active:scale-95"
-                              title="Delete"
-                            >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-                      </article>
-                    ))}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3.5 align-middle text-gray-800 whitespace-nowrap font-medium">{contact.phone || '—'}</td>
+                            <td className="px-4 py-3.5 align-middle text-gray-700 max-w-[200px] truncate" title={contact.email || ''}>
+                              {contact.email || '—'}
+                            </td>
+                            <td className="px-4 py-3.5 align-middle text-gray-700 whitespace-nowrap">{contact.country || '—'}</td>
+                            <td className="px-4 py-3.5 align-middle">
+                              <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-full ${getStatusColor(contact.status)}`}>
+                                {getStatusLabel(contact.status)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3.5 align-middle">
+                              <div className="flex flex-wrap gap-1 max-w-[200px]">
+                                {Array.isArray(contact.tags) && contact.tags.length > 0 ? (
+                                  contact.tags.map((tag, idx) => (
+                                    <span
+                                      key={idx}
+                                      className="px-2 py-0.5 bg-sky-50 text-sky-800 text-xs font-medium rounded-lg border border-sky-100/80"
+                                    >
+                                      {tag}
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="text-xs text-gray-400">—</span>
+                                )}
+                              </div>
+                            </td>
+                            {projectAttributes.map((attr) => (
+                              <td
+                                key={`${contact.id}-${attr}`}
+                                className="px-4 py-3.5 align-middle text-gray-700 max-w-[160px] truncate"
+                                title={getContactCustomField(contact, attr)}
+                              >
+                                {getContactCustomField(contact, attr)}
+                              </td>
+                            ))}
+                            <td className="px-4 py-3.5 align-middle whitespace-nowrap sticky right-0 bg-white/95 backdrop-blur-sm group-hover:bg-sky-50/60 shadow-[-8px_0_12px_-8px_rgba(0,0,0,0.06)]">
+                              <div className="flex items-center justify-end gap-1">
+                                {(() => {
+                                  const optedOut = contact.status === 'unsubscribed' || !contact.whatsappOptInAt;
+                                  if (optedOut) {
+                                    return (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOptInContact(contact.id)}
+                                        className="px-3 py-1.5 bg-sky-600 text-white text-xs font-medium rounded-lg hover:bg-sky-700 transition-all duration-200 active:scale-95 shadow-sm"
+                                        title="Opt-in"
+                                      >
+                                        Opt-in
+                                      </button>
+                                    );
+                                  }
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedContact(contact);
+                                        setShowOptOutModal(true);
+                                      }}
+                                      className="px-3 py-1.5 bg-orange-600 text-white text-xs font-medium rounded-lg hover:bg-orange-700 transition-all duration-200 active:scale-95 shadow-sm"
+                                      title="Opt-out"
+                                    >
+                                      Opt-out
+                                    </button>
+                                  );
+                                })()}
+                                <button
+                                  type="button"
+                                  onClick={() => openEditModal(contact)}
+                                  className="p-2 text-gray-600 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-all duration-200"
+                                  title="Edit"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  </svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedContact(contact);
+                                    setShowDeleteModal(true);
+                                  }}
+                                  className="p-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200"
+                                  title="Delete"
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
 
                 {pagination.pages > 1 && (
-                  <div className="mt-6 md:mt-8 rounded-2xl border border-gray-100/90 bg-white/90 backdrop-blur-sm px-4 py-4 md:px-6 shadow-md shadow-gray-200/30 ring-1 ring-gray-100/80 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="text-sm text-gray-700">
-                      Showing {((pagination.page - 1) * pagination.limit) + 1} to {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} contacts
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => handlePageChange(filters.page - 1)}
-                        disabled={filters.page === 1}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Previous
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePageChange(filters.page + 1)}
-                        disabled={filters.page >= pagination.pages}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Next
-                      </button>
-                    </div>
+                  <div className="mt-6 md:mt-8 flex justify-end gap-2 rounded-2xl border border-gray-100/90 bg-white/90 px-4 py-4 md:px-6 shadow-md shadow-gray-200/30 ring-1 ring-gray-100/80">
+                    <button
+                      type="button"
+                      onClick={() => handlePageChange(filters.page - 1)}
+                      disabled={filters.page === 1}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handlePageChange(filters.page + 1)}
+                      disabled={filters.page >= pagination.pages}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Next
+                    </button>
                   </div>
                 )}
               </>
@@ -1353,6 +1455,7 @@ function Contacts() {
                     setShowEditModal(false);
                     setSelectedContact(null);
                     setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
+                    setAttributeValues({});
                     setError('');
                   }}
                   className="shrink-0 text-gray-400 hover:text-gray-700 rounded-xl p-2 transition-all duration-200 hover:bg-white/90 active:scale-95 ring-1 ring-transparent hover:ring-gray-200/80"
@@ -1417,6 +1520,41 @@ function Contacts() {
                   </div>
                 </div>
               </div>
+              <div className="rounded-2xl border border-gray-100/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-gray-100/70 space-y-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-gray-900">Attributes</h4>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Assign project attributes to this contact (saved per project).
+                  </p>
+                </div>
+                {projectAttributes.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    No attributes defined. Add them under Manage → User attributes.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {projectAttributes.map((attrName) => (
+                      <div key={attrName}>
+                        <label className="block text-sm font-semibold text-gray-800 mb-2 capitalize">
+                          {attrName.replace(/_/g, ' ')}
+                        </label>
+                        <input
+                          type="text"
+                          value={attributeValues[attrName] || ''}
+                          onChange={(e) =>
+                            setAttributeValues((prev) => ({
+                              ...prev,
+                              [attrName]: e.target.value,
+                            }))
+                          }
+                          className="w-full px-4 py-2.5 border-2 border-gray-200 rounded-xl bg-gray-50/70 hover:bg-white focus:ring-2 focus:ring-sky-400/45 focus:border-sky-400 outline-none transition-all shadow-sm text-sm"
+                          placeholder={`Enter ${attrName.replace(/_/g, ' ')}`}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100">
                 <button
                   type="button"
@@ -1424,6 +1562,7 @@ function Contacts() {
                     setShowEditModal(false);
                     setSelectedContact(null);
                     setFormData({ phone: '', name: '', email: '', tags: '', country: '' });
+                    setAttributeValues({});
                     setError('');
                   }}
                   className="px-6 py-2.5 border-2 border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-all duration-200 active:scale-[0.98]"

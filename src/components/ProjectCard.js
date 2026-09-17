@@ -9,7 +9,7 @@ function statusStyles(status) {
   return { dot: "bg-slate-400", pill: "bg-slate-100 text-slate-700 ring-slate-200/80" };
 }
 
-function ProjectCard({ project, onToggleHidden, clickable = true }) {
+function ProjectCard({ project, onToggleHidden, onDelete, clickable = true }) {
   const status = project.status || "N/A";
   const { dot, pill } = statusStyles(status);
   const statusNormalized = String(status).toLowerCase();
@@ -135,6 +135,15 @@ function ProjectCard({ project, onToggleHidden, clickable = true }) {
                 }`}
               >
                 {isHidden ? "Unhide" : "Hide"}
+              </button>
+            ) : null}
+            {typeof onDelete === "function" ? (
+              <button
+                type="button"
+                onClick={onDelete}
+                className="relative z-10 shrink-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700 transition-all pointer-events-auto hover:border-red-300 hover:bg-red-100"
+              >
+                Delete
               </button>
             ) : null}
           </div>

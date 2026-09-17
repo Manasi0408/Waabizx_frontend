@@ -12,7 +12,8 @@ import {
   resumeCampaign,
   getCampaignById,
   getCampaignAudience,
-  getCampaignRetryPrefill
+  getCampaignRetryPrefill,
+  getCampaignReplies
 } from '../services/campaignService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
@@ -54,6 +55,64 @@ const RECHURN_STATUS_META = {
   read: { label: 'Read', title: 'Rebroadcast to read recipients' },
   failed: { label: 'Failed', title: 'Rebroadcast to failed recipients' },
 };
+
+const REPLY_HOUR_OPTIONS = [
+  { value: 1, label: '1 Hour' },
+  { value: 3, label: '3 Hours' },
+  { value: 24, label: '24 Hours' },
+];
+
+function formatCampaignDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function sortReplyAudienceRows(rows = [], sortKey = 'name', sortDir = 'asc') {
+  const list = [...(Array.isArray(rows) ? rows : [])];
+  const dir = sortDir === 'desc' ? -1 : 1;
+  list.sort((a, b) => {
+    if (sortKey === 'name') {
+      return dir * String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
+    }
+    const aTime = a[sortKey] ? new Date(a[sortKey]).getTime() : 0;
+    const bTime = b[sortKey] ? new Date(b[sortKey]).getTime() : 0;
+    return dir * (aTime - bTime);
+  });
+  return list;
+}
+
+function buildReplyAudienceColumns() {
+  return [
+    { key: 'name', label: 'Name' },
+    { key: 'phone', label: 'Mobile Number' },
+    { key: 'readAt', label: 'Read At' },
+    { key: 'repliedAt', label: 'Replied At' },
+  ];
+}
+
+function exportReplyAudienceCsv(rows = [], campaignName = 'campaign') {
+  const list = Array.isArray(rows) ? rows : [];
+  const exportRows = list.map((row) => ({
+    name: row.name || '',
+    phone: row.phone || '',
+    readAt: formatCampaignDateTime(row.readAt),
+    repliedAt: formatCampaignDateTime(row.repliedAt),
+  }));
+  exportRetryAudienceCsv(
+    exportRows,
+    buildReplyAudienceColumns(),
+    `${String(campaignName || 'campaign').replace(/[^\w.-]+/g, '_')}-replied-contacts.csv`
+  );
+}
 
 function buildRetryAudienceColumns(audience = [], variableMapping = null) {
   const rows = Array.isArray(audience) ? audience : [];
@@ -209,6 +268,12 @@ function Campaigns() {
   const [retryPrefill, setRetryPrefill] = useState(null);
   const [retryStatus, setRetryStatus] = useState('failed');
   const [loadingRetryPrefill, setLoadingRetryPrefill] = useState(false);
+  const [showReplyModal, setShowReplyModal] = useState(false);
+  const [loadingReplyAudience, setLoadingReplyAudience] = useState(false);
+  const [replyAudienceData, setReplyAudienceData] = useState(null);
+  const [replyHours, setReplyHours] = useState(24);
+  const [selectedReplyPhones, setSelectedReplyPhones] = useState([]);
+  const [replySort, setReplySort] = useState({ key: 'name', dir: 'asc' });
   const [isRetryCreate, setIsRetryCreate] = useState(false);
   const [retryTemplates, setRetryTemplates] = useState([]);
   const [loadingRetryTemplates, setLoadingRetryTemplates] = useState(false);
@@ -424,7 +489,7 @@ function Campaigns() {
         const uploaded = await uploadBroadcastHeaderMedia(uploadFile);
         headerMediaUrl = uploaded.url;
       } else if (needsHeaderMedia && !headerMediaUrl) {
-        setError('Upload header image/media before creating this campaign.');
+        setError('Upload header media (image, video, or document) before creating this campaign.');
         setSaving(false);
         return;
       }
@@ -615,6 +680,97 @@ function Campaigns() {
     } finally {
       setLoadingRetryPrefill(false);
     }
+  };
+
+  const loadReplyAudience = async (campaign, hours = replyHours) => {
+    setLoadingReplyAudience(true);
+    setError('');
+    try {
+      const data = await getCampaignReplies(campaign.id, hours);
+      setReplyAudienceData(data);
+      setSelectedReplyPhones((data.audience || []).map((row) => row.phone));
+    } catch (err) {
+      setError(err.message || 'Failed to load reply audience');
+      setReplyAudienceData(null);
+      setSelectedReplyPhones([]);
+    } finally {
+      setLoadingReplyAudience(false);
+    }
+  };
+
+  const handleClickReplies = async (campaign) => {
+    const count = parseInt(campaign.replied, 10) || 0;
+    if (count <= 0) return;
+
+    setSelectedCampaign(campaign);
+    setReplyHours(24);
+    setReplySort({ key: 'name', dir: 'asc' });
+    setReplyAudienceData(null);
+    setSelectedReplyPhones([]);
+    setShowReplyModal(true);
+    await loadReplyAudience(campaign, 24);
+  };
+
+  const handleReplyHoursChange = async (hours) => {
+    if (!selectedCampaign || replyHours === hours) return;
+    setReplyHours(hours);
+    await loadReplyAudience(selectedCampaign, hours);
+  };
+
+  const toggleReplyPhoneSelection = (phone) => {
+    setSelectedReplyPhones((prev) =>
+      prev.includes(phone) ? prev.filter((item) => item !== phone) : [...prev, phone]
+    );
+  };
+
+  const toggleAllReplyPhones = (rows = []) => {
+    const phones = rows.map((row) => row.phone);
+    setSelectedReplyPhones((prev) => {
+      const allSelected = phones.length > 0 && phones.every((phone) => prev.includes(phone));
+      return allSelected ? prev.filter((phone) => !phones.includes(phone)) : [...new Set([...prev, ...phones])];
+    });
+  };
+
+  const handleReplySort = (key) => {
+    setReplySort((prev) => ({
+      key,
+      dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc',
+    }));
+  };
+
+  const handleReplyBroadcast = async () => {
+    if (!replyAudienceData || !selectedCampaign) return;
+
+    const selectedRows = (replyAudienceData.audience || []).filter((row) =>
+      selectedReplyPhones.includes(row.phone)
+    );
+    if (!selectedRows.length) return;
+
+    setHeaderMediaFile(null);
+    setHeaderMediaPreviewUrl('');
+    setFormData({
+      name: `${selectedCampaign.name} (reply broadcast)`,
+      template_name: '',
+      template_language: 'en_US',
+      schedule_time: null,
+      header_media_url: null,
+      template_header_format: null,
+      needs_header_media: false,
+      variable_mapping: replyAudienceData.variable_mapping || null,
+      audience: selectedRows.map((row) => ({
+        phone: row.phone || '',
+        var1: row.var1 || '',
+        var2: row.var2 || '',
+        var3: row.var3 || '',
+        var4: row.var4 || '',
+        var5: row.var5 || '',
+      })),
+    });
+    setIsRetryCreate(true);
+    setShowReplyModal(false);
+    setShowCreateModal(true);
+    setReplyAudienceData(null);
+    await fetchRetryTemplates();
   };
 
   const fetchRetryTemplates = async () => {
@@ -1174,6 +1330,26 @@ function Campaigns() {
                                 {parseInt(campaign.failed, 10) || 0}
                               </span>
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => handleClickReplies(campaign)}
+                              disabled={(parseInt(campaign.replied, 10) || 0) <= 0}
+                              className={`flex min-h-[2.75rem] min-w-[4.25rem] flex-1 flex-col justify-center rounded-lg border border-teal-100/80 bg-teal-50/80 px-2 py-1 text-left sm:flex-none sm:min-w-[4.5rem] ${
+                                (parseInt(campaign.replied, 10) || 0) > 0
+                                  ? 'cursor-pointer hover:bg-teal-100/90 hover:border-teal-200 transition-colors'
+                                  : 'cursor-default'
+                              }`}
+                              title={
+                                (parseInt(campaign.replied, 10) || 0) > 0
+                                  ? 'View contacts who replied'
+                                  : undefined
+                              }
+                            >
+                              <span className="text-[9px] font-medium uppercase text-teal-700/90">Replied</span>
+                              <span className="text-sm font-semibold tabular-nums text-teal-700">
+                                {parseInt(campaign.replied, 10) || 0}
+                              </span>
+                            </button>
                           </div>
                         </div>
 
@@ -1270,26 +1446,21 @@ function Campaigns() {
 
                 {/* Pagination */}
                 {pagination.pages > 1 && (
-                  <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="text-sm text-gray-700">
-                      Showing {((pagination.page - 1) * pagination.limit) + 1} to {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} campaigns
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setFilters({ ...filters, page: filters.page - 1 })}
-                        disabled={filters.page === 1}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Previous
-                      </button>
-                      <button
-                        onClick={() => setFilters({ ...filters, page: filters.page + 1 })}
-                        disabled={filters.page >= pagination.pages}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Next
-                      </button>
-                    </div>
+                  <div className="flex justify-end gap-2 border-t border-gray-100 bg-gray-50/50 px-6 py-4">
+                    <button
+                      onClick={() => setFilters({ ...filters, page: filters.page - 1 })}
+                      disabled={filters.page === 1}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      onClick={() => setFilters({ ...filters, page: filters.page + 1 })}
+                      disabled={filters.page >= pagination.pages}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Next
+                    </button>
                   </div>
                 )}
               </>
@@ -1437,7 +1608,7 @@ function Campaigns() {
                       <p className="text-xs text-amber-900/80 leading-relaxed">
                         {isRetryCreate
                           ? 'This template requires header media. Choose from Media Library before creating the broadcast.'
-                          : 'This template requires header media. Choose from Media Library before creating the campaign.'}
+                          : `This template requires a ${String(formData.template_header_format || 'media').toLowerCase()} header. Choose from Media Library before creating the campaign.`}
                       </p>
                     </div>
                     <FlowMediaAttachField
@@ -1707,6 +1878,220 @@ function Campaigns() {
                   </div>
                 </>
               ) : null}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Smart Segregation — Reply Audience Modal */}
+      {showReplyModal && selectedCampaign && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-5xl w-full max-h-[90vh] flex flex-col ring-1 ring-black/5">
+            <div className="p-6 overflow-hidden flex flex-col min-h-0">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <h3 className="text-xl font-bold text-teal-800">Smart segregation</h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowReplyModal(false);
+                    setReplyAudienceData(null);
+                    setSelectedReplyPhones([]);
+                  }}
+                  className="text-gray-400 hover:text-gray-700 rounded-lg p-1 transition-all duration-200 hover:bg-gray-100 active:scale-95"
+                  aria-label="Close"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 mb-5">
+                <span className="text-sm font-medium text-gray-700">Replied In</span>
+                <div className="flex flex-wrap items-center gap-4">
+                  {REPLY_HOUR_OPTIONS.map((option) => (
+                    <label key={option.value} className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={replyHours === option.value}
+                        onChange={() => handleReplyHoursChange(option.value)}
+                        className="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                      />
+                      <span>{option.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {loadingReplyAudience ? (
+                <div className="py-10 text-center">
+                  <div className="animate-spin rounded-full h-10 w-10 border-2 border-teal-200 border-t-teal-600 mx-auto" />
+                  <p className="mt-4 text-gray-600 text-sm">Loading reply audience…</p>
+                </div>
+              ) : replyAudienceData ? (
+                <>
+                  {(() => {
+                    const replyRows = sortReplyAudienceRows(
+                      replyAudienceData.audience || [],
+                      replySort.key,
+                      replySort.dir
+                    );
+                    const replyHourLabel =
+                      REPLY_HOUR_OPTIONS.find((option) => option.value === replyHours)?.label ||
+                      `${replyHours} Hours`;
+                    const allSelected =
+                      replyRows.length > 0 &&
+                      replyRows.every((row) => selectedReplyPhones.includes(row.phone));
+                    const selectedCount = replyRows.filter((row) =>
+                      selectedReplyPhones.includes(row.phone)
+                    ).length;
+
+                    return (
+                      <>
+                        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">Audience</p>
+                            <p className="text-sm text-gray-600">
+                              Selected response replied by{' '}
+                              <span className="font-semibold text-teal-700">{replyRows.length}</span>{' '}
+                              contact{replyRows.length !== 1 ? 's' : ''} within {replyHourLabel}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                exportReplyAudienceCsv(replyRows, selectedCampaign?.name)
+                              }
+                              disabled={replyRows.length <= 0}
+                              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed border-2 border-sky-200 text-sky-700 hover:bg-sky-50 disabled:hover:bg-transparent"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                                />
+                              </svg>
+                              Download
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleReplyBroadcast}
+                              disabled={selectedCount <= 0}
+                              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold uppercase tracking-wide transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-teal-700 text-white hover:bg-teal-800 disabled:hover:bg-teal-700"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                                />
+                              </svg>
+                              Broadcast
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-gray-200 bg-gray-50/80 overflow-hidden flex flex-col min-h-0 max-h-[52vh]">
+                          <div className="overflow-auto">
+                            <table className="min-w-full text-sm text-left">
+                              <thead className="bg-gray-100/90 sticky top-0 z-[1]">
+                                <tr>
+                                  <th className="px-3 py-2 w-10 border-b border-gray-200">
+                                    <input
+                                      type="checkbox"
+                                      checked={allSelected}
+                                      onChange={() => toggleAllReplyPhones(replyRows)}
+                                      className="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                                    />
+                                  </th>
+                                  <th className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap border-b border-gray-200">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleReplySort('name')}
+                                      className="inline-flex items-center gap-1 hover:text-teal-700"
+                                    >
+                                      Name
+                                      <span className="text-xs text-gray-400">
+                                        {replySort.key === 'name' ? (replySort.dir === 'asc' ? '↓' : '↑') : '↕'}
+                                      </span>
+                                    </button>
+                                  </th>
+                                  <th className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap border-b border-gray-200">
+                                    Mobile Number
+                                  </th>
+                                  <th className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap border-b border-gray-200">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleReplySort('readAt')}
+                                      className="inline-flex items-center gap-1 hover:text-teal-700"
+                                    >
+                                      Read At
+                                      <span className="text-xs text-gray-400">
+                                        {replySort.key === 'readAt' ? (replySort.dir === 'asc' ? '↓' : '↑') : '↕'}
+                                      </span>
+                                    </button>
+                                  </th>
+                                  <th className="px-3 py-2 font-semibold text-gray-700 whitespace-nowrap border-b border-gray-200">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleReplySort('repliedAt')}
+                                      className="inline-flex items-center gap-1 hover:text-teal-700"
+                                    >
+                                      Replied At
+                                      <span className="text-xs text-gray-400">
+                                        {replySort.key === 'repliedAt' ? (replySort.dir === 'asc' ? '↓' : '↑') : '↕'}
+                                      </span>
+                                    </button>
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {replyRows.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={5} className="px-3 py-8 text-center text-gray-500">
+                                      No replies found within {replyHourLabel}.
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  replyRows.map((row) => (
+                                    <tr
+                                      key={row.phone}
+                                      className="border-b border-gray-100 last:border-0 odd:bg-white even:bg-gray-50/50"
+                                    >
+                                      <td className="px-3 py-2.5">
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedReplyPhones.includes(row.phone)}
+                                          onChange={() => toggleReplyPhoneSelection(row.phone)}
+                                          className="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                                        />
+                                      </td>
+                                      <td className="px-3 py-2.5 text-gray-800 whitespace-nowrap">{row.name || '—'}</td>
+                                      <td className="px-3 py-2.5 text-gray-800 whitespace-nowrap">{row.phone || '—'}</td>
+                                      <td className="px-3 py-2.5 text-gray-800 whitespace-nowrap">
+                                        {formatCampaignDateTime(row.readAt)}
+                                      </td>
+                                      <td className="px-3 py-2.5 text-gray-800 whitespace-nowrap">
+                                        {formatCampaignDateTime(row.repliedAt)}
+                                      </td>
+                                    </tr>
+                                  ))
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </>
+              ) : (
+                <p className="text-sm text-gray-500 py-6 text-center">Unable to load reply audience.</p>
+              )}
             </div>
           </div>
         </div>

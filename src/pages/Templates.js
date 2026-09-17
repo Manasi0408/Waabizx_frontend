@@ -16,7 +16,7 @@ import AdminHeaderProjectSwitch from '../components/AdminHeaderProjectSwitch';
 import HeaderRightActions from '../components/HeaderRightActions';
 import CreateLocalTemplateModal, { templateToLocalForm } from '../components/CreateLocalTemplateModal';
 import TemplateFullViewModal from '../components/TemplateFullViewModal';
-import { resolvePublicMediaUrl } from '../utils/mediaUrl';
+import { buildTemplatePreview } from '../utils/whatsappTemplatePreview';
 import PlanLimitModal from '../components/PlanLimitModal';
 import { extractPlanLimitError, gatePlanLimit, assertCanAddResource } from '../services/planLimitService';
 
@@ -825,28 +825,23 @@ function Templates() {
 
                 {/* Pagination */}
                 {pagination.pages > 1 && (
-                  <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="text-sm text-gray-700">
-                      Showing {((pagination.page - 1) * pagination.limit) + 1} to {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} templates
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setFilters({ ...filters, page: filters.page - 1 })}
-                        disabled={filters.page === 1}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Previous
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFilters({ ...filters, page: filters.page + 1 })}
-                        disabled={filters.page >= pagination.pages}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Next
-                      </button>
-                    </div>
+                  <div className="flex justify-end gap-2 border-t border-gray-100 bg-gray-50/50 px-6 py-4">
+                    <button
+                      type="button"
+                      onClick={() => setFilters({ ...filters, page: filters.page - 1 })}
+                      disabled={filters.page === 1}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFilters({ ...filters, page: filters.page + 1 })}
+                      disabled={filters.page >= pagination.pages}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Next
+                    </button>
                   </div>
                 )}
               </>
@@ -877,51 +872,7 @@ function Templates() {
         }}
         previewParts={
           selectedTemplate
-            ? (() => {
-                const vars =
-                  selectedTemplate.variables &&
-                  typeof selectedTemplate.variables === 'object' &&
-                  !Array.isArray(selectedTemplate.variables)
-                    ? selectedTemplate.variables
-                    : {};
-                const components = Array.isArray(selectedTemplate.components)
-                  ? selectedTemplate.components
-                  : Array.isArray(vars.components)
-                    ? vars.components
-                    : [];
-                const find = (type) =>
-                  components.find((c) => String(c?.type || '').toUpperCase() === type);
-                const body = find('BODY');
-                const footer = find('FOOTER');
-                const header = find('HEADER');
-                const buttonsComp = find('BUTTONS');
-                let headerFormat = String(header?.format || '').toUpperCase() || null;
-                if (!headerFormat) {
-                  const rawType = String(vars.templateType || '').toLowerCase();
-                  if (rawType === 'image') headerFormat = 'IMAGE';
-                  else if (rawType === 'video') headerFormat = 'VIDEO';
-                  else if (rawType === 'document') headerFormat = 'DOCUMENT';
-                }
-                return {
-                  headerFormat,
-                  headerText: header?.text || '',
-                  headerImageUrl:
-                    resolvePublicMediaUrl(
-                      vars.headerMediaUrl ||
-                        vars.header_media_url ||
-                        selectedTemplate.headerMediaUrl ||
-                        selectedTemplate.header_media_url ||
-                        ''
-                    ) || '',
-                  body: body?.text || selectedTemplate.content || '',
-                  footer: footer?.text || vars.footer || '',
-                  buttons: Array.isArray(buttonsComp?.buttons)
-                    ? buttonsComp.buttons
-                    : Array.isArray(vars.interactiveButtons)
-                      ? vars.interactiveButtons
-                      : [],
-                };
-              })()
+            ? buildTemplatePreview(selectedTemplate, { content: selectedTemplate.content || '' })
             : null
         }
       />

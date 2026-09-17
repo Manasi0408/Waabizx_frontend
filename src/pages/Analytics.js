@@ -3,7 +3,7 @@ import BrandLogoMark from '../components/BrandLogoMark';
 import { useNavigate, Link } from 'react-router-dom';
 import { getProfile, isAuthenticated, logout, readSessionUser } from '../services/authService';
 import { getNotifications, markAsRead, markAllAsRead } from '../services/notificationService';
-import { getOverview, getCampaignAnalytics, getMessageAnalytics, getContactAnalytics, getCostAnalytics } from '../services/analyticsService';
+import { getOverview, getCampaignAnalytics, getMessageAnalytics, getContactAnalytics } from '../services/analyticsService';
 import { getCampaigns } from '../services/campaignService';
 import MainSidebarNav from '../components/MainSidebarNav';
 import AppShellSidebar from '../components/AppShellSidebar';
@@ -41,13 +41,6 @@ function Analytics() {
     activeUsers: 0,
     optedOutUsers: 0,
     newContacts: 0
-  });
-  const [costAnalytics, setCostAnalytics] = useState({
-    conversationsStarted: 0,
-    marketingConversations: 0,
-    utilityConversations: 0,
-    costToday: 0,
-    costThisMonth: 0
   });
   const [loadingAnalytics, setLoadingAnalytics] = useState(true);
   const notificationRef = useRef(null);
@@ -128,7 +121,7 @@ function Analytics() {
                 : 'all';
         
         // Fetch all analytics in parallel with timeRange filter
-        const [overview, campaignsData, messages, contacts, cost] = await Promise.all([
+        const [overview, campaignsData, messages, contacts] = await Promise.all([
           getOverview(backendTimeRange).catch(err => {
             console.error('Error fetching overview:', err);
             return { messagesSent: 0, delivered: 0, read: 0, failed: 0, replies: 0 };
@@ -144,10 +137,6 @@ function Analytics() {
           getContactAnalytics(backendTimeRange).catch(err => {
             console.error('Error fetching contact analytics:', err);
             return { totalContacts: 0, activeUsers: 0, optedOutUsers: 0, newContactsToday: 0 };
-          }),
-          getCostAnalytics(backendTimeRange).catch(err => {
-            console.error('Error fetching cost analytics:', err);
-            return { conversationsStarted: 0, marketing: 0, utility: 0, costToday: 0, costThisMonth: 0 };
           })
         ]);
 
@@ -207,14 +196,6 @@ function Analytics() {
           newContacts: contacts.newContactsToday || 0
         });
 
-        // Set cost analytics
-        setCostAnalytics({
-          conversationsStarted: cost.conversationsStarted || 0,
-          marketingConversations: cost.marketing || 0,
-          utilityConversations: cost.utility || 0,
-          costToday: parseFloat(cost.costToday || 0),
-          costThisMonth: parseFloat(cost.costThisMonth || 0)
-        });
       } catch (error) {
         console.error('Error fetching analytics:', error);
       } finally {
@@ -685,33 +666,23 @@ function Analytics() {
                   })}
                 </div>
                 {campaignTotalPages > 1 && (
-                  <div className="mt-4 pt-4 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div className="text-sm text-gray-700">
-                      Showing {(campaignPage - 1) * CAMPAIGN_ANALYTICS_PAGE_SIZE + 1} to{' '}
-                      {Math.min(campaignPage * CAMPAIGN_ANALYTICS_PAGE_SIZE, campaignAnalytics.length)} of{' '}
-                      {campaignAnalytics.length} campaigns
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setCampaignPage((p) => Math.max(1, p - 1))}
-                        disabled={campaignPage === 1}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Previous
-                      </button>
-                      <span className="px-3 py-2 text-sm text-gray-600 tabular-nums">
-                        Page {campaignPage} of {campaignTotalPages}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setCampaignPage((p) => Math.min(campaignTotalPages, p + 1))}
-                        disabled={campaignPage >= campaignTotalPages}
-                        className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
-                      >
-                        Next
-                      </button>
-                    </div>
+                  <div className="mt-4 flex justify-end gap-2 border-t border-gray-100 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setCampaignPage((p) => Math.max(1, p - 1))}
+                      disabled={campaignPage === 1}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCampaignPage((p) => Math.min(campaignTotalPages, p + 1))}
+                      disabled={campaignPage >= campaignTotalPages}
+                      className="px-4 py-2 border-2 border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-white hover:border-sky-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98]"
+                    >
+                      Next
+                    </button>
                   </div>
                 )}
                 </>
@@ -854,44 +825,6 @@ function Analytics() {
             </div>
           </div>
 
-          {/* 5. Cost / Billing Analytics */}
-          <div className="motion-enter motion-delay-5 bg-white rounded-2xl shadow-lg shadow-gray-200/50 border border-gray-100/90 ring-1 ring-gray-100/80 p-5 md:p-6 motion-hover-lift hover:shadow-xl transition-all duration-300">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4 md:mb-5">
-              <h3 className="text-lg md:text-xl font-bold text-gray-900 tracking-tight">Cost / Billing Analytics</h3>
-              <p className="text-sm text-gray-500">WhatsApp conversation costs</p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 md:gap-5 motion-stagger-children">
-              <div className="p-4 md:p-5 bg-blue-50 rounded-xl border border-blue-100/80 ring-1 ring-blue-100/50 motion-hover-lift hover:shadow-md transition-all duration-300">
-                <p className="text-sm font-medium text-gray-600 mb-1">Conversations Started</p>
-                <p className="text-2xl font-bold text-gray-900">{costAnalytics.conversationsStarted.toLocaleString()}</p>
-                <p className="text-xs text-gray-500 mt-1">Chargeable conversations</p>
-              </div>
-
-              <div className="p-4 md:p-5 bg-purple-50 rounded-xl border border-purple-100/80 ring-1 ring-purple-100/50 motion-hover-lift hover:shadow-md transition-all duration-300">
-                <p className="text-sm font-medium text-gray-600 mb-1">Marketing Conversations</p>
-                <p className="text-2xl font-bold text-gray-900">{costAnalytics.marketingConversations.toLocaleString()}</p>
-                <p className="text-xs text-gray-500 mt-1">Promo messages</p>
-              </div>
-
-              <div className="p-4 md:p-5 bg-green-50 rounded-xl border border-green-100/80 ring-1 ring-green-100/50 motion-hover-lift hover:shadow-md transition-all duration-300">
-                <p className="text-sm font-medium text-gray-600 mb-1">Utility Conversations</p>
-                <p className="text-2xl font-bold text-gray-900">{costAnalytics.utilityConversations.toLocaleString()}</p>
-                <p className="text-xs text-gray-500 mt-1">Transactional</p>
-              </div>
-
-              <div className="p-4 md:p-5 bg-orange-50 rounded-xl border border-orange-100/80 ring-1 ring-orange-100/50 motion-hover-lift hover:shadow-md transition-all duration-300">
-                <p className="text-sm font-medium text-gray-600 mb-1">Cost Today</p>
-                <p className="text-2xl font-bold text-gray-900">₹{costAnalytics.costToday.toLocaleString()}</p>
-                <p className="text-xs text-gray-500 mt-1">Spent today</p>
-              </div>
-
-              <div className="p-4 md:p-5 bg-red-50 rounded-xl border border-red-100/80 ring-1 ring-red-100/50 motion-hover-lift hover:shadow-md transition-all duration-300">
-                <p className="text-sm font-medium text-gray-600 mb-1">Cost This Month</p>
-                <p className="text-2xl font-bold text-gray-900">₹{costAnalytics.costThisMonth.toLocaleString()}</p>
-                <p className="text-xs text-gray-500 mt-1">Monthly cost</p>
-              </div>
-            </div>
-          </div>
           </>
           )}
           </div>

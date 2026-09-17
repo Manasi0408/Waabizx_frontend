@@ -3,9 +3,10 @@ import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import axios from "../api/axios";
 import { readSessionUser } from "../services/authService";
+import { connectWhatsAppOnboarding } from "../services/onboardingService";
 import { fetchActivePlans, fetchConversationMetrics } from "../services/planService";
 import PlanSubscriptionView, { PlanGstBreakdown } from "./PlanSubscriptionView";
-import { getApiOrigin } from '../utils/apiBase';
+import { getApiOrigin, getApiUrl } from '../utils/apiBase';
 import {
   PLAN_MONTHLY_DEFAULT,
   buildConversationMetrics,
@@ -23,6 +24,17 @@ import {
   resolvePayableAmount,
   resolvePlanBillingAmount,
 } from "../utils/planPricing";
+import {
+  META_APP_ID,
+  META_EMBEDDED_CONFIG_ID,
+  META_SDK_VERSION,
+  META_SOLUTION_ID,
+  buildFbEmbeddedSignupLoginOptions,
+  openMetaOAuthPopupWindow,
+  readClientIdFromStorage,
+  resolveMetaAppOrigin,
+  sanitizeMetaOAuthUrl,
+} from "../utils/metaWhatsAppConnect";
 
 const PLAN_MONTHLY_PRICE = PLAN_MONTHLY_DEFAULT;
 
@@ -51,6 +63,7 @@ const buildFallbackCatalog = () => [
 
 const wccGstAmount = gstAmount;
 const wccPayableTotal = payableWithGst;
+const WCC_DIRECT_PAYMENT_LIMIT = 3000;
 
 const ADDON_PRICES = {
   INR: {
@@ -134,6 +147,87 @@ const addMonthsIso = (fromDate, monthsToAdd) => {
 
 const WA_META_LIVE_PREFIX = "wa_wb_meta_live_";
 const META_POPUP_STORAGE_KEY = "waabiz-meta-popup-result";
+const META_POPUP_MESSAGE_SOURCE = "waabiz-meta-oauth-popup";
+const WA_EMBEDDED_SIGNUP_EVENT = "WA_EMBEDDED_SIGNUP";
+
+const extractEmbeddedSignupCode = (data) => {
+  if (!data || typeof data !== "object") return "";
+  const candidates = [
+    data.code,
+    data.authorization_code,
+    data.oauth_code,
+    data?.authResponse?.code,
+    data?.data?.code,
+    data?.data?.authorization_code,
+    data?.data?.oauth_code,
+    data?.data?.authResponse?.code,
+  ];
+  for (const candidate of candidates) {
+    const code = String(candidate || "").trim();
+    if (code) return code;
+  }
+  return "";
+};
+
+const isMetaOAuthPopupOrigin = (origin) => {
+  const value = String(origin || "").toLowerCase();
+  if (value === String(window.location?.origin || "").toLowerCase()) return true;
+  try {
+    const callbackOrigin = String(resolveMetaAppOrigin() || "").toLowerCase();
+    if (callbackOrigin && value === callbackOrigin) return true;
+  } catch (_) {
+    /* ignore */
+  }
+  return false;
+};
+
+const ensureFacebookSdk = () =>
+  new Promise((resolve, reject) => {
+    const initSdk = () => {
+      if (!window.FB) return false;
+      try {
+        if (!window.__waabizFbSdkInitialized) {
+          window.FB.init({
+            appId: String(META_APP_ID),
+            autoLogAppEvents: true,
+            xfbml: true,
+            version: META_SDK_VERSION,
+          });
+          window.__waabizFbSdkInitialized = true;
+        }
+      } catch (_) {
+        window.__waabizFbSdkInitialized = true;
+      }
+      return typeof window.FB.login === "function";
+    };
+
+    if (initSdk()) {
+      resolve();
+      return;
+    }
+
+    const existingScript = document.querySelector('script[src*="connect.facebook.net"]');
+    if (!existingScript) {
+      const script = document.createElement("script");
+      script.src = "https://connect.facebook.net/en_US/sdk.js";
+      script.async = true;
+      script.defer = true;
+      script.crossOrigin = "anonymous";
+      document.body.appendChild(script);
+    }
+
+    let attempts = 0;
+    const poll = window.setInterval(() => {
+      attempts += 1;
+      if (initSdk()) {
+        window.clearInterval(poll);
+        resolve();
+      } else if (attempts > 40) {
+        window.clearInterval(poll);
+        reject(new Error("Facebook SDK not ready"));
+      }
+    }, 300);
+  });
 
 const readMetaLiveFromStorage = (clientId, projectId = null) => {
   const cid = Number(clientId);
@@ -199,13 +293,38 @@ const writeCachedWhatsappDisplayName = (projectId, name) => {
   }
 };
 
-const parseOnboardingLiveFromStatus = (data) =>
-  Boolean(
-    data?.onboardingCompleted ||
-      data?.whatsappConnected ||
-      data?.metaLinked ||
-      data?.connected
+const parseOnboardingLiveFromStatus = (data, activeProjectId = null) => {
+  const statusProjectId = data?.projectId != null ? Number(data.projectId) : null;
+  const scopedProjectId =
+    activeProjectId != null && String(activeProjectId).trim() !== ""
+      ? Number(activeProjectId)
+      : null;
+  if (
+    scopedProjectId &&
+    statusProjectId &&
+    statusProjectId !== scopedProjectId
+  ) {
+    return false;
+  }
+  return Boolean(
+    data?.whatsappConnected === true ||
+      data?.onboardingCompleted === true ||
+      data?.metaLinked === true ||
+      data?.cloudApiMessagingLikelyReady === true
   );
+};
+
+const clearWhatsAppConnectedLatch = (clientId, projectId) => {
+  const cid = Number(clientId);
+  const pid = Number(projectId);
+  if (!Number.isInteger(cid) || cid <= 0 || !Number.isInteger(pid) || pid <= 0) return;
+  try {
+    localStorage.removeItem(`${WA_CONNECTED_PREFIX}${cid}_p${pid}`);
+    localStorage.removeItem(`${WA_META_LIVE_PREFIX}${cid}_p${pid}`);
+  } catch (_) {
+    /* ignore */
+  }
+};
 
 const extractWhatsappDisplayName = (payload) => {
   const row = Array.isArray(payload?.profileData) ? payload.profileData[0] : null;
@@ -394,43 +513,11 @@ function AgentRightPanel({
   const location = useLocation();
   const API_BASE = getApiOrigin();
   const API_URL = API_BASE;
-  const [metaOnboardingLive, setMetaOnboardingLive] = useState(() =>
-    readMetaLiveFromStorage(
-      (() => {
-        try {
-          const raw = localStorage.getItem("user");
-          return raw ? JSON.parse(raw)?.id : null;
-        } catch (_) {
-          return null;
-        }
-      })(),
-      selectedProject?.id
-    ) ||
-      readWhatsAppConnectedLatch(
-        (() => {
-          try {
-            const raw = localStorage.getItem("user");
-            return raw ? JSON.parse(raw)?.id : null;
-          } catch (_) {
-            return null;
-          }
-        })(),
-        selectedProject?.id
-      )
-  );
-  const [whatsappConnectedLatch, setWhatsappConnectedLatch] = useState(() =>
-    readWhatsAppConnectedLatch(
-      (() => {
-        try {
-          const raw = localStorage.getItem("user");
-          return raw ? JSON.parse(raw)?.id : null;
-        } catch (_) {
-          return null;
-        }
-      })(),
-      selectedProject?.id
-    )
-  );
+  const [metaOnboardingLive, setMetaOnboardingLive] = useState(false);
+  const [whatsappConnectedLatch, setWhatsappConnectedLatch] = useState(false);
+  const [whatsappConnectBusy, setWhatsappConnectBusy] = useState(false);
+  const metaPopupRef = useRef(null);
+  const embeddedSignupCodeHandlerRef = useRef(null);
 
   const paymentJsonHeaders = () => {
     const token = localStorage.getItem("token");
@@ -454,6 +541,7 @@ function AgentRightPanel({
   };
 
   const [showWccModal, setShowWccModal] = useState(false);
+  const [showWccDirectPayModal, setShowWccDirectPayModal] = useState(false);
   const [showAdsModal, setShowAdsModal] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
 
@@ -570,9 +658,8 @@ function AgentRightPanel({
     const savedProfile = readProjectProfile(selectedProjectId);
     setAccountProfile(savedProfile);
     setWhatsappDisplayName(readCachedWhatsappDisplayName(selectedProjectId));
-    setWhatsappConnectedLatch(
-      readWhatsAppConnectedLatch(Number(user?.id), selectedProjectId)
-    );
+    setWhatsappConnectedLatch(false);
+    setMetaOnboardingLive(false);
     setLogoFile(null);
     setLogoRemoved(false);
 
@@ -691,32 +778,16 @@ function AgentRightPanel({
 
     if (!Number.isInteger(clientId) || clientId <= 0 || !projectId) {
       setMetaOnboardingLive(false);
+      setWhatsappConnectedLatch(false);
       return;
-    }
-
-    const storedLive =
-      readMetaLiveFromStorage(clientId, projectId) ||
-      readWhatsAppConnectedLatch(clientId, projectId);
-    setMetaOnboardingLive(storedLive);
-    if (storedLive) {
-      setWhatsappConnectedLatch(true);
     }
 
     const token = localStorage.getItem("token");
     const headers = {};
     if (token) headers.Authorization = `Bearer ${token}`;
+    headers["x-project-id"] = projectId;
 
-    try {
-      let url = `${API_BASE.replace(/\/$/, "")}/meta/onboarding-status?client_id=${clientId}`;
-      url += `&projectId=${encodeURIComponent(projectId)}`;
-      headers["x-project-id"] = projectId;
-      const res = await fetch(url, { headers });
-      const data = await res.json().catch(() => ({}));
-      if (res.status === 401 || !res.ok) {
-        setMetaOnboardingLive((prev) => prev || storedLive);
-        return;
-      }
-      const live = parseOnboardingLiveFromStatus(data);
+    const applyLiveState = (live) => {
       if (live) {
         writeWhatsAppConnectedLatch(clientId, projectId);
         setWhatsappConnectedLatch(true);
@@ -724,11 +795,278 @@ function AgentRightPanel({
         refreshWhatsappDisplayName(projectId);
         return;
       }
-      setMetaOnboardingLive((prev) => live || prev || storedLive);
+      clearWhatsAppConnectedLatch(clientId, projectId);
+      setWhatsappConnectedLatch(false);
+      setMetaOnboardingLive(false);
+    };
+
+    try {
+      const statusUrl = `${getApiUrl()}/project-api-token/status?projectId=${encodeURIComponent(projectId)}`;
+      const statusRes = await fetch(statusUrl, { headers });
+      const statusData = await statusRes.json().catch(() => ({}));
+      if (statusRes.status === 403 && /connect whatsapp/i.test(String(statusData?.message || ""))) {
+        applyLiveState(false);
+        return;
+      }
+      if (statusRes.ok && statusData?.success === true) {
+        applyLiveState(true);
+        return;
+      }
+
+      let url = `${API_BASE.replace(/\/$/, "")}/meta/onboarding-status?client_id=${clientId}`;
+      url += `&projectId=${encodeURIComponent(projectId)}`;
+      const res = await fetch(url, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || !res.ok) {
+        applyLiveState(false);
+        return;
+      }
+      applyLiveState(parseOnboardingLiveFromStatus(data, projectId));
     } catch (_) {
-      setMetaOnboardingLive((prev) => prev || storedLive);
+      applyLiveState(false);
     }
   }, [API_BASE, user?.id, selectedProject?.id, refreshWhatsappDisplayName]);
+
+  const cleanupMetaPopup = useCallback(() => {
+    const popup = metaPopupRef.current;
+    if (popup && !popup.closed) {
+      try {
+        popup.close();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    metaPopupRef.current = null;
+  }, []);
+
+  const completeMetaOnboardWithCode = useCallback(
+    async (code, projectIdForOnboard) => {
+      const cid = readClientIdFromStorage() || Number(user?.id);
+      if (!cid || !code) return;
+
+      try {
+        const res = await fetch(`${API_BASE.replace(/\/$/, "")}/meta/onboard`, {
+          method: "POST",
+          headers: paymentJsonHeaders(),
+          body: JSON.stringify({
+            code,
+            client_id: cid,
+            redirect_uri: "",
+            projectId:
+              projectIdForOnboard != null && Number(projectIdForOnboard) > 0
+                ? Number(projectIdForOnboard)
+                : null,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.message || data?.error || "Failed to complete WhatsApp onboarding.");
+        }
+
+        const clientId = Number(user?.id);
+        const projectId = Number(selectedProject?.id);
+        if (Number.isInteger(clientId) && Number.isInteger(projectId)) {
+          writeWhatsAppConnectedLatch(clientId, projectId);
+          setWhatsappConnectedLatch(true);
+          setMetaOnboardingLive(true);
+        }
+        await refreshWhatsAppLiveStatus();
+      } catch (error) {
+        alert(error?.message || "Failed to complete WhatsApp onboarding.");
+      } finally {
+        setWhatsappConnectBusy(false);
+        embeddedSignupCodeHandlerRef.current = null;
+      }
+    },
+    [API_BASE, refreshWhatsAppLiveStatus, selectedProject?.id, user?.id]
+  );
+
+  const handlePopupConnectResult = useCallback(
+    (payload) => {
+      if (!payload || payload.source !== META_POPUP_MESSAGE_SOURCE) return;
+      cleanupMetaPopup();
+      setWhatsappConnectBusy(false);
+
+      if (payload.type === "WHATSAPP_CONNECTION_FAILED" || payload.type === "error") {
+        alert(payload.message || "WhatsApp connection failed.");
+        return;
+      }
+
+      const clientId = Number(user?.id);
+      const projectId = Number(selectedProject?.id);
+      if (
+        parseOnboardingLiveFromStatus(payload, projectId) ||
+        payload.whatsappConnected ||
+        payload.onboardingCompleted
+      ) {
+        if (Number.isInteger(clientId) && Number.isInteger(projectId)) {
+          writeWhatsAppConnectedLatch(clientId, projectId);
+          setWhatsappConnectedLatch(true);
+          setMetaOnboardingLive(true);
+        }
+        refreshWhatsAppLiveStatus();
+      }
+    },
+    [cleanupMetaPopup, refreshWhatsAppLiveStatus, selectedProject?.id, user?.id]
+  );
+
+  const handleWhatsAppConnect = useCallback(async () => {
+    if (whatsappConnectBusy) return;
+
+    const cid = readClientIdFromStorage() || Number(user?.id);
+    if (!Number.isInteger(cid) || cid <= 0) {
+      alert("Please log in again before connecting WhatsApp.");
+      return;
+    }
+    if (!META_EMBEDDED_CONFIG_ID) {
+      alert("Meta Embedded Signup config_id is missing.");
+      return;
+    }
+
+    let projectId = null;
+    let projectName = "";
+    const pid = selectedProject?.id != null ? Number(selectedProject.id) : null;
+    if (Number.isInteger(pid) && pid > 0) projectId = pid;
+    projectName = String(selectedProject?.project_name || selectedProject?.name || "").trim();
+
+    setWhatsappConnectBusy(true);
+    cleanupMetaPopup();
+
+    try {
+      const sessionUser = readSessionUser() || user || {};
+      const onboard = await connectWhatsAppOnboarding({
+        companyName: sessionUser?.name || "",
+        email: sessionUser?.email || "",
+        mobile: sessionUser?.mobileNumber || "",
+        projectId,
+        projectName,
+        returnOrigin: String(window.location?.origin || "").trim(),
+      });
+
+      if (onboard?.localProjectId) {
+        projectId = Number(onboard.localProjectId) || projectId;
+      }
+
+      const solutionId = String(onboard?.solutionId || META_SOLUTION_ID || "").trim();
+      if (!solutionId) {
+        throw new Error("Meta Solution ID missing for AiSensy partner billing.");
+      }
+
+      await ensureFacebookSdk();
+
+      if (window.FB?.login) {
+        await new Promise((resolve) => {
+          embeddedSignupCodeHandlerRef.current = (code) => {
+            completeMetaOnboardWithCode(code, projectId);
+          };
+          const loginOptions = buildFbEmbeddedSignupLoginOptions(solutionId);
+          window.FB.login((response) => {
+            if (response?.authResponse?.code) {
+              completeMetaOnboardWithCode(response.authResponse.code, projectId);
+              resolve();
+              return;
+            }
+            if (response?.status === "unknown" || !response?.authResponse) {
+              setWhatsappConnectBusy(false);
+              embeddedSignupCodeHandlerRef.current = null;
+              alert("Meta signup was cancelled or failed. Please try again.");
+            }
+            resolve();
+          }, loginOptions);
+        });
+        return;
+      }
+
+      const signupUrl = onboard?.signupUrl || onboard?.embeddedSignupUrl;
+      if (!signupUrl) {
+        throw new Error(onboard?.message || "No embedded signup URL returned");
+      }
+
+      const popup = openMetaOAuthPopupWindow(sanitizeMetaOAuthUrl(String(signupUrl)));
+      metaPopupRef.current = popup;
+      if (!popup) {
+        throw new Error("Popup blocked. Allow popups for this site and try again.");
+      }
+    } catch (error) {
+      setWhatsappConnectBusy(false);
+      alert(error?.response?.data?.message || error?.message || "Could not start WhatsApp onboarding.");
+    }
+  }, [
+    cleanupMetaPopup,
+    completeMetaOnboardWithCode,
+    selectedProject?.id,
+    selectedProject?.name,
+    selectedProject?.project_name,
+    user,
+    whatsappConnectBusy,
+  ]);
+
+  useEffect(() => {
+    const handleMessage = (event) => {
+      if (isMetaOAuthPopupOrigin(event.origin)) {
+        const data = event.data;
+        if (data?.source === META_POPUP_MESSAGE_SOURCE) {
+          handlePopupConnectResult(data);
+          return;
+        }
+      }
+
+      const origin = String(event.origin || "");
+      const isFacebookOrigin = /facebook\.com$/i.test(origin) || origin.endsWith(".facebook.com");
+      if (!isFacebookOrigin) return;
+
+      let data = event.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch (_) {
+          return;
+        }
+      }
+      if (!data || data.type !== WA_EMBEDDED_SIGNUP_EVENT) return;
+
+      const code = extractEmbeddedSignupCode(data);
+      if (!code) return;
+
+      cleanupMetaPopup();
+      const handler = embeddedSignupCodeHandlerRef.current;
+      if (typeof handler === "function") {
+        handler(code);
+        return;
+      }
+
+      const projectId = selectedProject?.id != null ? Number(selectedProject.id) : null;
+      completeMetaOnboardWithCode(code, projectId);
+    };
+
+    const handleStorage = (event) => {
+      if (event.key !== META_POPUP_STORAGE_KEY || !event.newValue) return;
+      try {
+        const payload = JSON.parse(event.newValue);
+        handlePopupConnectResult(payload);
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        localStorage.removeItem(META_POPUP_STORAGE_KEY);
+      } catch (_) {
+        /* ignore */
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      window.removeEventListener("storage", handleStorage);
+      cleanupMetaPopup();
+    };
+  }, [
+    cleanupMetaPopup,
+    completeMetaOnboardWithCode,
+    handlePopupConnectResult,
+    selectedProject?.id,
+  ]);
 
   useEffect(() => {
     refreshWhatsAppLiveStatus();
@@ -1020,12 +1358,7 @@ function AgentRightPanel({
   // Prefer account mobile for Razorpay — not WhatsApp Business / sandbox sender number.
   const paymentContactDigits = userMobileDigits || businessPhoneDigits;
 
-  const whatsappConnected = Boolean(
-    whatsappConnectedLatch ||
-      isWhatsAppApiLive ||
-      metaOnboardingLive ||
-      (projectPhoneLoaded && projectPhoneApproved && showBusinessPhoneNumber && businessPhoneDigits)
-  );
+  const whatsappConnected = Boolean(metaOnboardingLive || isWhatsAppApiLive);
 
   useEffect(() => {
     const clientId = Number(user?.id);
@@ -1236,6 +1569,10 @@ function AgentRightPanel({
   const purchaseWcc = () => {
     if (wccBaseAmount < 100) {
       alert("Minimum amount of 100 credits is allowed.");
+      return;
+    }
+    if (wccBaseAmount > WCC_DIRECT_PAYMENT_LIMIT) {
+      setShowWccDirectPayModal(true);
       return;
     }
     return openRazorpayCheckout({
@@ -1637,17 +1974,19 @@ function AgentRightPanel({
           <button
             type="button"
             onClick={() => {
-              if (!whatsappConnected) navigate("/connect-whatsapp?autoConnect=1");
+              if (!whatsappConnected && !whatsappConnectBusy) handleWhatsAppConnect();
             }}
-            disabled={whatsappConnected}
-            aria-disabled={whatsappConnected}
+            disabled={whatsappConnected || whatsappConnectBusy}
+            aria-disabled={whatsappConnected || whatsappConnectBusy}
             className={`shrink-0 px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
               whatsappConnected
                 ? "text-emerald-800 bg-emerald-50 border border-emerald-200/90 cursor-not-allowed opacity-90 pointer-events-none"
-                : "text-white bg-gradient-to-r from-emerald-600 to-green-600 shadow-md shadow-emerald-600/25 hover:from-emerald-500 hover:to-green-500"
+                : whatsappConnectBusy
+                  ? "text-emerald-800 bg-emerald-50 border border-emerald-200/90 cursor-wait opacity-90"
+                  : "text-white bg-gradient-to-r from-emerald-600 to-green-600 shadow-md shadow-emerald-600/25 hover:from-emerald-500 hover:to-green-500"
             }`}
           >
-            {whatsappConnected ? "Connected" : "Connect"}
+            {whatsappConnected ? "Connected" : whatsappConnectBusy ? "Connecting…" : "Connect"}
           </button>
         </div>
       </div>
@@ -1949,6 +2288,41 @@ function AgentRightPanel({
                     </button>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {showWccDirectPayModal &&
+        createPortal(
+          <div className="fixed inset-0 z-[400] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+            <div className="motion-pop w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+              <div className="border-b border-amber-100 bg-gradient-to-r from-amber-50 via-white to-orange-50 px-5 py-4">
+                <h3 className="text-lg font-bold text-gray-900">Direct payment required</h3>
+                <p className="mt-1 text-sm text-gray-600">
+                  WCC recharge above {formatPlanAmount(WCC_DIRECT_PAYMENT_LIMIT, pricingCurrency)}
+                </p>
+              </div>
+              <div className="space-y-3 px-5 py-5 text-sm leading-relaxed text-gray-700">
+                <p>
+                  You are recharging WCC for more than {formatPlanAmount(WCC_DIRECT_PAYMENT_LIMIT, pricingCurrency)} (
+                  {formatPlanAmount(wccBaseAmount, pricingCurrency)} selected).
+                </p>
+                <p>
+                  For this amount, payment must be made directly to our account. Online checkout is not available for
+                  recharges above {formatPlanAmount(WCC_DIRECT_PAYMENT_LIMIT, pricingCurrency)}.
+                </p>
+                <p className="font-semibold text-gray-900">Please contact Waabizx customer support to complete this recharge.</p>
+              </div>
+              <div className="flex justify-end gap-2 border-t border-gray-100 bg-gray-50/80 px-5 py-4">
+                <button
+                  type="button"
+                  onClick={() => setShowWccDirectPayModal(false)}
+                  className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-sky-700"
+                >
+                  OK
+                </button>
               </div>
             </div>
           </div>,

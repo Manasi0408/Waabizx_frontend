@@ -20,6 +20,7 @@ import FormsPage from './pages/FormsPage';
 import FormBuilderPage from './pages/FormBuilderPage';
 import WhatsAppButtonPage from './pages/WhatsAppButtonPage';
 import RcsPage from './pages/RcsPage';
+import ApiTokenPage from './pages/ApiTokenPage';
 import Chatbot from './components/Chatbot';
 import MainSidebarNav from './components/MainSidebarNav';
 import AppShellSidebar from './components/AppShellSidebar';
@@ -1990,6 +1991,15 @@ function App() {
           element={
             <ProtectedRoute>
               <RcsPage />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/api-token"
+          element={
+            <ProtectedRoute>
+              <ApiTokenPage />
             </ProtectedRoute>
           }
         />

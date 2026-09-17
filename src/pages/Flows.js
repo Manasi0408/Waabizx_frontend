@@ -25,6 +25,7 @@ import { uploadFlowMedia, getFlowMediaLibrary, deleteFlowMedia } from "../servic
 import { resolveDisplayableHeaderMediaUrl, resolveHeaderImageFromComponents, resolvePublicMediaUrl } from "../utils/mediaUrl";
 import PlanLimitModal from "../components/PlanLimitModal";
 import { extractPlanLimitError, gatePlanLimit, assertCanAddResource } from "../services/planLimitService";
+import { fetchUserAttributes } from "../services/userAttributeService";
 
 const FLOW_HANDLE =
   "!w-[14px] !h-[14px] !min-w-[14px] !min-h-[14px] !bg-sky-600 !border-[3px] !border-white !shadow-md !opacity-100 !z-20";
@@ -1140,6 +1141,84 @@ function FlowAiKeywordField({ value, onChange }) {
   );
 }
 
+function FlowKeywordField({
+  value,
+  onChange,
+  compact = true,
+  hint = "Type, press Tab or Enter to add keyword",
+  placeholder = "Enter keywords",
+}) {
+  const [draft, setDraft] = useState("");
+  const keywords = parseCommaList(value);
+
+  const commitKeyword = (raw) => {
+    const next = String(raw || "").trim();
+    if (!next) return;
+    const lower = next.toLowerCase();
+    if (keywords.some((k) => String(k).toLowerCase() === lower)) {
+      setDraft("");
+      return;
+    }
+    onChange?.([...keywords, next].join(", "));
+    setDraft("");
+  };
+
+  const removeKeyword = (index) => {
+    onChange?.(keywords.filter((_, i) => i !== index).join(", "));
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Tab" || e.key === "Enter") {
+      e.preventDefault();
+      commitKeyword(draft);
+      return;
+    }
+    if (e.key === "Backspace" && !draft && keywords.length) {
+      e.preventDefault();
+      removeKeyword(keywords.length - 1);
+    }
+  };
+
+  const hintClass = compact ? "text-[11px] text-gray-600" : "text-xs font-semibold text-gray-600";
+  const boxClass = compact
+    ? "nodrag mt-1 rounded-md bg-white border border-gray-300 px-2 py-1.5 min-h-[36px] flex flex-wrap gap-1 items-center"
+    : "nodrag mt-1 w-full rounded-xl border border-gray-200/80 bg-white px-3 py-2 min-h-[42px] flex flex-wrap gap-1.5 items-center focus-within:ring-2 focus-within:ring-sky-300/70";
+  const chipClass = compact
+    ? "inline-flex items-center gap-1 rounded-md bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-800"
+    : "inline-flex items-center gap-1 rounded-lg bg-emerald-50 border border-emerald-200 px-2 py-1 text-xs font-semibold text-emerald-800";
+  const inputClass = compact
+    ? "nodrag flex-1 min-w-[80px] border-0 bg-transparent px-1 py-0.5 text-[11px] text-gray-800 placeholder:text-gray-400 focus:outline-none"
+    : "nodrag flex-1 min-w-[96px] border-0 bg-transparent px-1 py-0.5 text-sm text-gray-800 placeholder:text-gray-400 focus:outline-none";
+
+  return (
+    <div>
+      <div className={hintClass}>{hint}</div>
+      <div className={boxClass}>
+        {keywords.map((kw, i) => (
+          <span key={`${kw}-${i}`} className={chipClass}>
+            {kw}
+            <button
+              type="button"
+              className="nodrag leading-none text-emerald-600 hover:text-rose-600"
+              onClick={() => removeKeyword(i)}
+              aria-label={`Remove ${kw}`}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          className={inputClass}
+          placeholder={keywords.length ? "Add keyword…" : placeholder}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+      </div>
+    </div>
+  );
+}
+
 function parseCommaList(value) {
   return String(value || "")
     .split(",")
@@ -1439,16 +1518,22 @@ function StartNode({ data }) {
   const templateParts = resolveNodeTemplateParts(data);
 
   return (
-    <div className={`rounded-2xl border-4 border-emerald-600 bg-[#f2f2f2] shadow-sm p-2 overflow-visible ${hasTemplate ? 'min-w-[320px]' : 'min-w-[190px]'}`}>
-      <div className="rounded-lg bg-white border border-gray-300 px-2 py-1.5 text-[11px] font-bold text-teal-700 flex items-center justify-between gap-2">
+    <div className={`rounded-2xl border-4 border-emerald-600 bg-[#f2f2f2] shadow-sm p-2 relative overflow-visible ${hasTemplate ? 'min-w-[320px]' : 'min-w-[190px]'}`}>
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="start-header-source"
+        className={`${FLOW_HANDLE_SIDE_PROMINENT} flow-start-header-handle`}
+        style={{ right: -14, top: 20, transform: "none" }}
+      />
+      <div className="rounded-lg bg-white border border-gray-300 px-2 py-1.5 text-[11px] font-bold text-teal-700 flex items-center justify-between gap-2 pr-6">
         <span className="truncate">Flow Start</span>
-        <span className="text-xs text-gray-500">○</span>
       </div>
-      <div className="mt-2 rounded-md bg-white border border-gray-300 px-2 py-1.5 text-[11px] text-gray-600">
-        Type, press enter to add keyword
-      </div>
-      <div className="mt-2 rounded-md bg-white border border-gray-300 px-2 py-2 text-[11px] text-gray-500">
-        {data?.keywords || "Enter keywords"}
+      <div className="mt-2">
+        <FlowKeywordField
+          value={data?.keywords}
+          onChange={(v) => data?.onChange?.({ keywords: v })}
+        />
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-gray-600">
         <span className="leading-snug">Enter regex to match substring trigger.</span>
@@ -1467,7 +1552,7 @@ function StartNode({ data }) {
             <button
               type="button"
               onClick={() => data?.onDeleteTemplate?.()}
-              className="shrink-0 inline-flex items-center justify-center h-5 w-5 rounded text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+              className="nodrag shrink-0 inline-flex items-center justify-center h-5 w-5 rounded text-rose-600 hover:text-rose-700 hover:bg-rose-50"
               title="Delete selected template"
               aria-label="Delete selected template"
             >
@@ -1482,7 +1567,7 @@ function StartNode({ data }) {
         <button
           type="button"
           onClick={() => data?.onChooseTemplate?.()}
-          className="mt-1 w-full rounded-md bg-white border border-gray-300 px-2 py-2 text-[12px] font-semibold text-gray-700 hover:bg-gray-50 transition"
+          className="nodrag mt-1 w-full rounded-md bg-white border border-gray-300 px-2 py-2 text-[12px] font-semibold text-gray-700 hover:bg-gray-50 transition"
         >
           Choose Template
         </button>
@@ -1491,7 +1576,12 @@ function StartNode({ data }) {
       <div className="mt-1 w-full rounded-md bg-white border border-gray-300 px-2 py-2 text-[12px] font-semibold text-gray-700 text-center">
         Choose Facebook Ad
       </div>
-      <Handle type="source" position={Position.Bottom} className={FLOW_HANDLE_PROMINENT} />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="start-bottom-source"
+        className={FLOW_HANDLE_PROMINENT}
+      />
     </div>
   );
 }
@@ -1624,30 +1714,351 @@ function FlowInlineButtonsEditor({ buttonsList, onChange, showHandles = false })
   );
 }
 
-function ButtonNode({ data }) {
+function newFlowContentBlockId() {
+  return `cb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function defaultButtonContentBlock() {
+  return {
+    id: newFlowContentBlockId(),
+    aiKeywords: "",
+    message: "",
+    text: "",
+    buttonsList: [""],
+    delaySeconds: "",
+    timeoutEnabled: false,
+  };
+}
+
+function defaultSingleProductContentBlock() {
+  return {
+    id: newFlowContentBlockId(),
+    aiKeywords: "",
+    productName: "",
+    mediaUrl: "",
+    imageUrl: "",
+    mediaFilename: "",
+    body: "",
+    footer: "",
+    text: "",
+  };
+}
+
+function defaultMultiProductContentBlock() {
+  return {
+    id: newFlowContentBlockId(),
+    aiKeywords: "",
+    header: "",
+    title: "",
+    body: "",
+    footer: "",
+    productsList: [],
+    products: "",
+    sections: [],
+  };
+}
+
+function normalizeButtonContentBlocks(data) {
+  if (Array.isArray(data?.contentBlocks) && data.contentBlocks.length) {
+    return data.contentBlocks.map((b, i) => ({
+      ...defaultButtonContentBlock(),
+      ...b,
+      id: b?.id || `cb-${i}`,
+      buttonsList: Array.isArray(b?.buttonsList)
+        ? b.buttonsList
+        : parseCommaList(b?.buttons).length
+          ? parseCommaList(b?.buttons)
+          : [""],
+    }));
+  }
   const buttonsList = Array.isArray(data?.buttonsList)
     ? data.buttonsList
     : parseCommaList(data?.buttons).length
       ? parseCommaList(data?.buttons)
       : [""];
+  return [
+    {
+      id: "cb-0",
+      aiKeywords: data?.aiKeywords || "",
+      message: data?.message || data?.text || "",
+      text: data?.text || data?.message || "",
+      buttonsList,
+      delaySeconds: "",
+      timeoutEnabled: false,
+    },
+  ];
+}
+
+function syncButtonNodeFromContentBlocks(blocks) {
+  const first = blocks[0] || defaultButtonContentBlock();
+  const btnPatch = syncButtonsData(first.buttonsList || [""]);
+  return {
+    contentBlocks: blocks,
+    aiKeywords: first.aiKeywords || "",
+    message: first.message || first.text || "",
+    text: first.text || first.message || "",
+    ...btnPatch,
+  };
+}
+
+function normalizeSingleProductContentBlocks(data) {
+  if (Array.isArray(data?.contentBlocks) && data.contentBlocks.length) {
+    return data.contentBlocks.map((b, i) => ({
+      ...defaultSingleProductContentBlock(),
+      ...b,
+      id: b?.id || `cb-${i}`,
+    }));
+  }
+  return [
+    {
+      id: "cb-0",
+      aiKeywords: data?.aiKeywords || "",
+      productName: data?.productName || "",
+      mediaUrl: data?.mediaUrl || data?.imageUrl || "",
+      imageUrl: data?.imageUrl || data?.mediaUrl || "",
+      mediaFilename: data?.mediaFilename || "",
+      body: data?.body || data?.text || "",
+      footer: data?.footer || "",
+      text: data?.text || data?.body || "",
+    },
+  ];
+}
+
+function syncSingleProductFromContentBlocks(blocks) {
+  const first = blocks[0] || defaultSingleProductContentBlock();
+  return {
+    contentBlocks: blocks,
+    aiKeywords: first.aiKeywords || "",
+    productName: first.productName || "",
+    mediaUrl: first.mediaUrl || first.imageUrl || "",
+    imageUrl: first.imageUrl || first.mediaUrl || "",
+    mediaFilename: first.mediaFilename || "",
+    body: first.body || first.text || "",
+    footer: first.footer || "",
+    text: first.text || first.body || "",
+  };
+}
+
+function normalizeMultiProductContentBlocks(data) {
+  if (Array.isArray(data?.contentBlocks) && data.contentBlocks.length) {
+    return data.contentBlocks.map((b, i) => ({
+      ...defaultMultiProductContentBlock(),
+      ...b,
+      id: b?.id || `cb-${i}`,
+      productsList: Array.isArray(b?.productsList)
+        ? b.productsList
+        : parseCommaList(b?.products),
+    }));
+  }
+  const productsList = Array.isArray(data?.productsList)
+    ? data.productsList
+    : parseCommaList(data?.products);
+  return [
+    {
+      id: "cb-0",
+      aiKeywords: data?.aiKeywords || "",
+      header: data?.header || data?.title || "",
+      title: data?.title || data?.header || "",
+      body: data?.body || "",
+      footer: data?.footer || "",
+      productsList,
+      products: data?.products || productsList.join(", "),
+      sections: Array.isArray(data?.sections) ? data.sections : [],
+    },
+  ];
+}
+
+function syncMultiProductFromContentBlocks(blocks) {
+  const first = blocks[0] || defaultMultiProductContentBlock();
+  const productsList = Array.isArray(first.productsList) ? first.productsList : [];
+  return {
+    contentBlocks: blocks,
+    aiKeywords: first.aiKeywords || "",
+    header: first.header || first.title || "",
+    title: first.title || first.header || "",
+    body: first.body || "",
+    footer: first.footer || "",
+    productsList,
+    products: first.products || productsList.join(", "),
+    sections: Array.isArray(first.sections) ? first.sections : [],
+  };
+}
+
+function FlowContentBlockFrame({ children, onRemove, showRemove }) {
+  return (
+    <div className="rounded-lg border-2 border-red-300/90 bg-white/80 p-2 mb-2 space-y-2">
+      {showRemove ? (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="nodrag text-[10px] font-semibold text-rose-600 hover:text-rose-700"
+            onClick={onRemove}
+          >
+            Remove block
+          </button>
+        </div>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
+function FlowAddContentButton({ onClick }) {
+  return (
+    <button
+      type="button"
+      className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2 py-2.5 text-xs font-semibold text-gray-800 hover:bg-gray-50 shadow-sm"
+      onClick={onClick}
+    >
+      + Add Content
+    </button>
+  );
+}
+
+function FlowDelayTimeoutFields({ delaySeconds, timeoutEnabled, onChange }) {
+  return (
+    <div className="space-y-2 pt-1 border-t border-gray-200">
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-[11px] text-gray-600">Set Delay</span>
+          <span className="text-[9px] font-bold uppercase tracking-wide text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded">
+            PRO
+          </span>
+        </div>
+        <input
+          className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+          placeholder="Type delay in seconds..."
+          value={delaySeconds || ""}
+          onChange={(e) => onChange?.({ delaySeconds: e.target.value })}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-gray-600">Set Timeout</span>
+          <span className="text-[9px] font-bold uppercase tracking-wide text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded">
+            PRO
+          </span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={Boolean(timeoutEnabled)}
+          className={`relative w-9 h-5 rounded-full transition-colors ${timeoutEnabled ? "bg-emerald-500" : "bg-gray-300"}`}
+          onClick={() => onChange?.({ timeoutEnabled: !timeoutEnabled })}
+        >
+          <span
+            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${timeoutEnabled ? "left-4" : "left-0.5"}`}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SingleProductMediaPick({ block, onBlockChange }) {
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const preview = resolveFlowMediaPreviewUrl(block?.mediaUrl || block?.imageUrl || "");
+
+  const applyMedia = (item) => {
+    const stored = toStoredFlowMediaUrl(item?.url);
+    onBlockChange?.({
+      mediaUrl: stored,
+      imageUrl: stored,
+      mediaFilename: item?.filename || stored.split("/").pop() || "",
+      productName: block?.productName || item?.filename || "Product",
+    });
+    setLibraryOpen(false);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        className="nodrag w-full rounded-lg border border-gray-300 bg-white min-h-[88px] flex flex-col items-center justify-center text-xs text-gray-600 hover:bg-gray-50 overflow-hidden"
+        onClick={() => setLibraryOpen(true)}
+      >
+        {preview ? (
+          <img src={preview} alt="" className="w-full h-24 object-cover" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+        ) : (
+          <>
+            <span className="text-lg mb-1">🛒</span>
+            {block?.productName ? block.productName : "+ Add Product"}
+          </>
+        )}
+      </button>
+      <FlowMediaLibraryModal
+        open={libraryOpen}
+        mediaType="IMAGE"
+        onClose={() => setLibraryOpen(false)}
+        onSelect={applyMedia}
+        onUploadFile={async (file) => {
+          const result = await uploadFlowMedia(file);
+          const stored = toStoredFlowMediaUrl(result.storedPath || result.url);
+          applyMedia({
+            url: stored,
+            filename: result.filename || file.name,
+            mediaType: "IMAGE",
+          });
+        }}
+        uploading={false}
+        uploadPct={0}
+        refreshKey={0}
+      />
+    </>
+  );
+}
+
+function ButtonNode({ data }) {
+  const blocks = normalizeButtonContentBlocks(data);
+
+  const updateBlocks = (nextBlocks) => {
+    data?.onChange?.(syncButtonNodeFromContentBlocks(nextBlocks));
+  };
+
+  const patchBlock = (index, patch) => {
+    const next = blocks.map((b, i) => (i === index ? { ...b, ...patch } : b));
+    updateBlocks(next);
+  };
 
   return (
     <FlowNodeShell selected={data?.selected} minWidth="min-w-[300px]" overflowVisible>
-      <FlowAiKeywordField value={data?.aiKeywords} onChange={(v) => data?.onChange?.({ aiKeywords: v })} />
-      <div className="relative rounded-lg border border-gray-300 bg-white mb-2">
-        <textarea
-          className="nodrag w-full rounded-lg bg-white px-2.5 py-2 text-xs text-gray-800 min-h-[88px] resize-none focus:outline-none focus:ring-2 focus:ring-sky-300/60"
-          placeholder="Type message..."
-          value={data?.message || data?.text || ""}
-          onChange={(e) => data?.onChange?.({ message: e.target.value, text: e.target.value })}
-        />
-        <CharCounter value={data?.message || data?.text} max={1024} />
-      </div>
-      <FlowInlineButtonsEditor
-        buttonsList={buttonsList}
-        onChange={(patch) => data?.onChange?.(patch)}
-        showHandles
-      />
+      {blocks.map((block, blockIndex) => {
+        const buttonsList = Array.isArray(block.buttonsList) ? block.buttonsList : [""];
+        return (
+          <FlowContentBlockFrame
+            key={block.id || `btn-block-${blockIndex}`}
+            showRemove={blocks.length > 1}
+            onRemove={() => updateBlocks(blocks.filter((_, i) => i !== blockIndex))}
+          >
+            <FlowAiKeywordField
+              value={block.aiKeywords}
+              onChange={(v) => patchBlock(blockIndex, { aiKeywords: v })}
+            />
+            <div className="relative rounded-lg border border-gray-300 bg-white">
+              <textarea
+                className="nodrag w-full rounded-lg bg-white px-2.5 py-2 text-xs text-gray-800 min-h-[88px] resize-none focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+                placeholder="Type message..."
+                value={block.message || block.text || ""}
+                onChange={(e) =>
+                  patchBlock(blockIndex, { message: e.target.value, text: e.target.value })
+                }
+              />
+              <CharCounter value={block.message || block.text} max={1024} />
+            </div>
+            <FlowInlineButtonsEditor
+              buttonsList={buttonsList}
+              onChange={(patch) => patchBlock(blockIndex, patch)}
+              showHandles={blockIndex === 0}
+            />
+            <FlowDelayTimeoutFields
+              delaySeconds={block.delaySeconds}
+              timeoutEnabled={block.timeoutEnabled}
+              onChange={(patch) => patchBlock(blockIndex, patch)}
+            />
+          </FlowContentBlockFrame>
+        );
+      })}
+      <FlowAddContentButton onClick={() => updateBlocks([...blocks, defaultButtonContentBlock()])} />
       <Handle type="source" position={Position.Bottom} className={FLOW_HANDLE} />
     </FlowNodeShell>
   );
@@ -1895,31 +2306,46 @@ function ListMessageNode({ data }) {
 }
 
 function SingleProductNode({ data }) {
+  const blocks = normalizeSingleProductContentBlocks(data);
+
+  const updateBlocks = (nextBlocks) => {
+    data?.onChange?.(syncSingleProductFromContentBlocks(nextBlocks));
+  };
+
+  const patchBlock = (index, patch) => {
+    const next = blocks.map((b, i) => (i === index ? { ...b, ...patch } : b));
+    updateBlocks(next);
+  };
+
   return (
     <FlowNodeShell selected={data?.selected} minWidth="min-w-[280px]">
-      <FlowAiKeywordField value={data?.aiKeywords} onChange={(v) => data?.onChange?.({ aiKeywords: v })} />
-      <button
-        type="button"
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white min-h-[88px] flex flex-col items-center justify-center text-xs text-gray-600 hover:bg-gray-50 mb-2"
-        onClick={() => {
-          const name = window.prompt("Product name");
-          if (name) data?.onChange?.({ productName: name });
-        }}
-      >
-        <span className="text-lg mb-1">🛒</span>
-        {data?.productName ? data.productName : "+ Add Product"}
-      </button>
-      <input
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs mb-2 focus:outline-none focus:ring-2 focus:ring-sky-300/60"
-        placeholder="Body"
-        value={data?.body || data?.text || ""}
-        onChange={(e) => data?.onChange?.({ body: e.target.value, text: e.target.value })}
-      />
-      <input
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sky-300/60"
-        placeholder="Footer"
-        value={data?.footer || ""}
-        onChange={(e) => data?.onChange?.({ footer: e.target.value })}
+      {blocks.map((block, blockIndex) => (
+        <FlowContentBlockFrame
+          key={block.id || `sp-block-${blockIndex}`}
+          showRemove={blocks.length > 1}
+          onRemove={() => updateBlocks(blocks.filter((_, i) => i !== blockIndex))}
+        >
+          <FlowAiKeywordField
+            value={block.aiKeywords}
+            onChange={(v) => patchBlock(blockIndex, { aiKeywords: v })}
+          />
+          <SingleProductMediaPick block={block} onBlockChange={(patch) => patchBlock(blockIndex, patch)} />
+          <input
+            className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs mb-2 focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+            placeholder="Body"
+            value={block.body || block.text || ""}
+            onChange={(e) => patchBlock(blockIndex, { body: e.target.value, text: e.target.value })}
+          />
+          <input
+            className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+            placeholder="Footer"
+            value={block.footer || ""}
+            onChange={(e) => patchBlock(blockIndex, { footer: e.target.value })}
+          />
+        </FlowContentBlockFrame>
+      ))}
+      <FlowAddContentButton
+        onClick={() => updateBlocks([...blocks, defaultSingleProductContentBlock()])}
       />
       <Handle type="source" position={Position.Bottom} className={FLOW_HANDLE} />
     </FlowNodeShell>
@@ -1927,54 +2353,122 @@ function SingleProductNode({ data }) {
 }
 
 function MultiProductNode({ data }) {
-  const productsList = Array.isArray(data?.productsList)
-    ? data.productsList
-    : parseCommaList(data?.products);
+  const blocks = normalizeMultiProductContentBlocks(data);
+
+  const updateBlocks = (nextBlocks) => {
+    data?.onChange?.(syncMultiProductFromContentBlocks(nextBlocks));
+  };
+
+  const patchBlock = (index, patch) => {
+    const next = blocks.map((b, i) => (i === index ? { ...b, ...patch } : b));
+    updateBlocks(next);
+  };
 
   return (
     <FlowNodeShell selected={data?.selected} minWidth="min-w-[300px]" overflowVisible>
-      <FlowAiKeywordField value={data?.aiKeywords} onChange={(v) => data?.onChange?.({ aiKeywords: v })} />
-      <input
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs font-semibold mb-2 focus:outline-none focus:ring-2 focus:ring-sky-300/60"
-        placeholder="Header"
-        value={data?.header || data?.title || ""}
-        onChange={(e) => data?.onChange?.({ header: e.target.value, title: e.target.value })}
-      />
-      <textarea
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs min-h-[56px] resize-none mb-2 focus:outline-none focus:ring-2 focus:ring-sky-300/60"
-        placeholder="Body"
-        value={data?.body || ""}
-        onChange={(e) => data?.onChange?.({ body: e.target.value })}
-      />
-      <button
-        type="button"
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white min-h-[72px] flex flex-col items-center justify-center text-xs text-gray-600 hover:bg-gray-50 mb-2"
-        onClick={() => {
-          const name = window.prompt("Product name");
-          if (name) data?.onChange?.({ productsList: [...productsList, name], products: [...productsList, name].join(", ") });
-        }}
-      >
-        <span className="text-lg mb-1">🛒</span>
-        + Add Products
-      </button>
-      {productsList.length > 0 ? (
-        <div className="grid grid-cols-2 gap-1 mb-2">
-          {productsList.map((p) => (
-            <div key={p} className="rounded border border-gray-200 bg-white px-2 py-1 text-[11px] truncate">
-              {p}
+      {blocks.map((block, blockIndex) => {
+        const productsList = Array.isArray(block.productsList) ? block.productsList : [];
+        const sections = Array.isArray(block.sections) ? block.sections : [];
+        return (
+          <FlowContentBlockFrame
+            key={block.id || `mp-block-${blockIndex}`}
+            showRemove={blocks.length > 1}
+            onRemove={() => updateBlocks(blocks.filter((_, i) => i !== blockIndex))}
+          >
+            <FlowAiKeywordField
+              value={block.aiKeywords}
+              onChange={(v) => patchBlock(blockIndex, { aiKeywords: v })}
+            />
+            <div className="rounded-lg border border-gray-300 bg-white overflow-hidden">
+              <div className="relative border-b border-gray-200">
+                <input
+                  className="nodrag w-full bg-white px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+                  placeholder="Header"
+                  value={block.header || block.title || ""}
+                  onChange={(e) =>
+                    patchBlock(blockIndex, { header: e.target.value, title: e.target.value })
+                  }
+                />
+                <CharCounter value={block.header || block.title} max={20} />
+              </div>
+              <div className="relative">
+                <textarea
+                  className="nodrag w-full bg-white px-2.5 py-2 text-xs min-h-[72px] resize-none focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+                  placeholder="Body"
+                  value={block.body || ""}
+                  onChange={(e) => patchBlock(blockIndex, { body: e.target.value })}
+                />
+                <CharCounter value={block.body} max={1024} />
+              </div>
             </div>
-          ))}
-        </div>
-      ) : null}
-      <input
-        className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2.5 py-2 text-xs mb-2 focus:outline-none focus:ring-2 focus:ring-sky-300/60"
-        placeholder="Footer"
-        value={data?.footer || ""}
-        onChange={(e) => data?.onChange?.({ footer: e.target.value })}
+            <button
+              type="button"
+              className="nodrag w-full rounded-lg border border-gray-300 bg-white px-2 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              onClick={() => {
+                const title = window.prompt("Section title");
+                if (title) {
+                  patchBlock(blockIndex, { sections: [...sections, { title, items: [] }] });
+                }
+              }}
+            >
+              + Add Section
+            </button>
+            {sections.length > 0 ? (
+              <div className="space-y-1">
+                {sections.map((s, si) => (
+                  <div
+                    key={`sec-${blockIndex}-${si}`}
+                    className="text-[11px] text-gray-700 rounded border border-gray-200 bg-white px-2 py-1"
+                  >
+                    {s.title || `Section ${si + 1}`}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className="nodrag w-full rounded-lg border border-gray-300 bg-white min-h-[72px] flex flex-col items-center justify-center text-xs text-gray-600 hover:bg-gray-50"
+              onClick={() => {
+                const name = window.prompt("Product name");
+                if (name) {
+                  const nextList = [...productsList, name];
+                  patchBlock(blockIndex, {
+                    productsList: nextList,
+                    products: nextList.join(", "),
+                  });
+                }
+              }}
+            >
+              <span className="text-lg mb-1">🛒</span>
+              + Add Products
+            </button>
+            {productsList.length > 0 ? (
+              <div className="grid grid-cols-2 gap-1">
+                {productsList.map((p) => (
+                  <div key={p} className="rounded border border-gray-200 bg-white px-2 py-1 text-[11px] truncate">
+                    {p}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <div className="relative rounded-lg border border-gray-300 bg-white">
+              <input
+                className="nodrag w-full bg-white px-2.5 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+                placeholder="Footer"
+                value={block.footer || ""}
+                onChange={(e) => patchBlock(blockIndex, { footer: e.target.value })}
+              />
+              <CharCounter value={block.footer} max={60} />
+            </div>
+            <div className="rounded-lg border border-gray-300 bg-white px-2 py-2.5 text-center text-sm font-semibold text-sky-700">
+              View Items
+            </div>
+          </FlowContentBlockFrame>
+        );
+      })}
+      <FlowAddContentButton
+        onClick={() => updateBlocks([...blocks, defaultMultiProductContentBlock()])}
       />
-      <div className="rounded-lg border border-gray-300 bg-white px-2 py-2.5 text-center text-sm font-semibold text-sky-700">
-        View Items
-      </div>
       <Handle type="source" position={Position.Bottom} className={FLOW_HANDLE} />
     </FlowNodeShell>
   );
@@ -2015,8 +2509,51 @@ function TemplateNode({ data }) {
   );
 }
 
+const SET_ATTRIBUTE_DEFAULTS = [
+  "name",
+  "phone",
+  "email",
+  "city",
+  "order_id",
+  "custom_field_1",
+  "custom_field_2",
+];
+
 function SetAttributeNode({ data }) {
-  const attributes = ["name", "phone", "email", "city", "order_id", "custom_field_1", "custom_field_2"];
+  const [userAttributes, setUserAttributes] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await fetchUserAttributes();
+        if (!cancelled) {
+          setUserAttributes(
+            (Array.isArray(list) ? list : [])
+              .map((item) => String(item?.name || "").trim())
+              .filter(Boolean)
+          );
+        }
+      } catch (_) {
+        if (!cancelled) setUserAttributes([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const attributes = useMemo(() => {
+    const merged = [...SET_ATTRIBUTE_DEFAULTS];
+    userAttributes.forEach((name) => {
+      if (name && !merged.includes(name)) merged.push(name);
+    });
+    const selected = String(data?.attribute || "").trim();
+    if (selected && !merged.includes(selected)) {
+      merged.push(selected);
+    }
+    return merged;
+  }, [userAttributes, data?.attribute]);
 
   return (
     <FlowNodeShell selected={data?.selected} minWidth="min-w-[260px]">
@@ -2990,8 +3527,35 @@ function Flows() {
           background: #0284c7 !important;
           box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.35) !important;
         }
+        .react-flow__handle.flow-start-header-handle {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .react-flow__handle.flow-start-header-handle::after {
+          content: "+";
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #ffffff;
+          font-size: 14px;
+          font-weight: 700;
+          line-height: 1;
+          opacity: 0;
+          transition: opacity 0.15s ease;
+          pointer-events: none;
+        }
+        .react-flow__handle.flow-start-header-handle:hover::after,
+        .react-flow__handle.flow-start-header-handle.connecting::after {
+          opacity: 1;
+        }
         .react-flow__connection-path {
           stroke-width: 3px;
+        }
+        .react-flow__connectionline path {
+          stroke-dasharray: 6 4;
         }
       `}</style>
       <div className="h-screen flex flex-row bg-gray-50 overflow-hidden">
@@ -3348,12 +3912,10 @@ function Flows() {
                         {selectedNode.type === "start" ? (
                           <div className="space-y-2">
                             <div>
-                              <label className="text-xs font-semibold text-gray-600">Keywords</label>
-                              <input
+                              <FlowKeywordField
+                                compact={false}
                                 value={selectedNode.data?.keywords || ""}
-                                onChange={(e) => updateSelectedNodeData({ keywords: e.target.value })}
-                                className="mt-1 w-full px-3 py-2 rounded-xl border border-gray-200/80 bg-white focus:outline-none focus:ring-2 focus:ring-sky-300/70 text-sm"
-                                placeholder="keyword1, keyword2"
+                                onChange={(v) => updateSelectedNodeData({ keywords: v })}
                               />
                             </div>
                             <div>

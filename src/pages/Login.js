@@ -3,6 +3,7 @@ import BrandLogoMark, { BrandLogoWatermark } from '../components/BrandLogoMark';
 import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { login, requestPasswordReset, resetPassword, getProfile, logout, markAuthSessionIssued } from '../services/authService';
 import { getConversationQuota } from '../services/dashboardService';
+import { ensureSelectedProjectFromUser } from '../utils/activeProject';
 import ThemeToggle from '../components/ThemeToggle';
 import PasswordInput from '../components/PasswordInput';
 
@@ -117,7 +118,9 @@ function Login() {
           .replace(/\s+/g, '_');
         localStorage.setItem('role', normalizedRole);
 
-
+        if (normalizedRole === 'agent' || normalizedRole === 'manager') {
+          ensureSelectedProjectFromUser();
+        }
         try {
           const uid = Number(resolvedUser?.id);
           let selectedProjectId = null;

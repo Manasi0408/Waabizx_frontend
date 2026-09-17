@@ -3,6 +3,7 @@ import {
   maybeHandleUnauthorizedResponse,
 } from "../services/sessionExpiryService";
 import { getApiUrl } from "../utils/apiBase";
+import { resolveActiveProjectId } from "../utils/activeProject";
 
 const instance = axios.create({
   baseURL: getApiUrl(),
@@ -15,16 +16,10 @@ instance.interceptors.request.use((config) => {
     config.headers.Authorization = `Bearer ${token}`;
   }
   config.__hadAuthToken = Boolean(token);
-  try {
-    const raw = localStorage.getItem("selectedProject");
-    if (raw) {
-      const selectedProject = JSON.parse(raw);
-      const projectId = selectedProject?.id;
-      if (projectId != null && String(projectId).trim() !== "") {
-        config.headers["x-project-id"] = String(projectId);
-      }
-    }
-  } catch (_) {}
+  const projectId = resolveActiveProjectId();
+  if (projectId) {
+    config.headers["x-project-id"] = projectId;
+  }
   return config;
 });
 

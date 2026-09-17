@@ -1,4 +1,5 @@
 import React from 'react';
+import MessageFailureIndicator from './MessageFailureIndicator';
 
 export function StatusTicks({ status }) {
   const s = String(status || '').toLowerCase();
@@ -17,7 +18,7 @@ export function StatusTicks({ status }) {
     );
   }
   if (s === 'failed') {
-    return <span className="text-[10px] text-red-500">!</span>;
+    return null;
   }
   return (
     <svg className="w-[15px] h-[15px] text-[#667781]" viewBox="0 0 12 11" fill="currentColor" aria-hidden>
@@ -26,13 +27,21 @@ export function StatusTicks({ status }) {
   );
 }
 
-/** Time + read receipts — bottom right like WhatsApp */
-export default function MessageMeta({ formatTime, status, outgoing = false }) {
+/** Time + delivery status — bottom right like WhatsApp */
+export default function MessageMeta({ formatTime, status, outgoing = false, message }) {
   if (typeof formatTime !== 'function') return null;
+
+  const deliveryStatus = String(status || message?.status || '').toLowerCase();
+  const isFailed = outgoing && deliveryStatus === 'failed';
+
   return (
     <div className="flex items-center justify-end gap-0.5 -mt-0.5 pb-0.5 px-0.5 text-[#667781]">
       <span className="text-[11px] leading-none">{formatTime()}</span>
-      {outgoing && <StatusTicks status={status} />}
+      {isFailed ? (
+        <MessageFailureIndicator message={message} status={status || message?.status} formatTime={formatTime} />
+      ) : outgoing ? (
+        <StatusTicks status={status || message?.status} />
+      ) : null}
     </div>
   );
 }

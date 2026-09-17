@@ -55,37 +55,87 @@ export const MESSAGE_CATEGORY_RATES = {
 
 export const formatConversationRateText = (rate, currency = 'INR') => {
   const n = Math.max(0, Number(rate) || 0);
-  const formatted = Number.isInteger(n) ? String(n) : String(n);
+  const formatted = Number.isInteger(n)
+    ? String(n)
+    : parseFloat(n.toFixed(4)).toString();
   if (String(currency).toUpperCase() === 'USD') {
     return `$${formatted} /msg`;
   }
   return `Rs. ${formatted} /msg`;
 };
 
+export const buildAdminMetricsPreview = (config = {}) =>
+  CONVERSATION_METRICS.map((metric) => {
+    const cfg = config[metric.key] || {};
+    const rate = Math.max(0, Number(cfg.rate ?? metric.rate) || 0);
+    const rateUsd = Math.max(0, Number(cfg.rate_usd ?? metric.rate_usd) || 0);
+    if (metric.key === 'service') {
+      return {
+        key: metric.key,
+        label: cfg.label || metric.label,
+        rate,
+        rate_usd: rateUsd,
+        text:
+          rate > 0
+            ? formatConversationRateText(rate, 'INR')
+            : String(cfg.text || metric.text).trim() || metric.text,
+      };
+    }
+    return {
+      key: metric.key,
+      label: cfg.label || metric.label,
+      rate,
+      rate_usd: rateUsd,
+      text:
+        rateUsd > 0
+          ? `${formatConversationRateText(rate, 'INR')} · ${formatConversationRateText(rateUsd, 'USD')}`
+          : formatConversationRateText(rate, 'INR'),
+    };
+  });
+
 export const buildConversationMetrics = (metrics = null, rates = null) => {
   if (Array.isArray(metrics) && metrics.length) {
-    return metrics.map((metric) => ({
-      key: metric.key,
-      label: metric.label,
-      text: metric.text,
-      rate: Number(metric.rate) || 0,
-    }));
-  }
-  if (rates && typeof rates === 'object') {
-    return CONVERSATION_METRICS.map((metric) => {
-      const rate = Number(rates[metric.key]);
+    return metrics.map((metric) => {
+      const rate = Math.max(0, Number(metric.rate) || 0);
+      const rateUsd = Math.max(0, Number(metric.rate_usd) || 0);
       if (metric.key === 'service') {
-        return { ...metric, rate: Number.isFinite(rate) ? rate : metric.rate };
+        return {
+          key: metric.key,
+          label: metric.label || 'Service',
+          rate,
+          rate_usd: rateUsd,
+          text:
+            rate > 0
+              ? formatConversationRateText(rate, 'INR')
+              : String(metric.text || '').trim() ||
+                CONVERSATION_METRICS.find((m) => m.key === 'service')?.text ||
+                'Free',
+        };
       }
-      if (!Number.isFinite(rate)) return metric;
       return {
-        ...metric,
+        key: metric.key,
+        label: metric.label,
         rate,
-        text: formatConversationRateText(rate),
+        rate_usd: rateUsd,
+        text:
+          rateUsd > 0
+            ? `${formatConversationRateText(rate, 'INR')} · ${formatConversationRateText(rateUsd, 'USD')}`
+            : formatConversationRateText(rate, 'INR'),
       };
     });
   }
-  return CONVERSATION_METRICS;
+  if (rates && typeof rates === 'object') {
+    return buildAdminMetricsPreview(
+      CONVERSATION_METRICS.reduce((acc, metric) => {
+        const rate = Number(rates[metric.key]);
+        if (Number.isFinite(rate)) {
+          acc[metric.key] = { rate, rate_usd: metric.rate_usd };
+        }
+        return acc;
+      }, {})
+    );
+  }
+  return buildAdminMetricsPreview({});
 };
 
 export const buildMessageCategoryRates = (rates = null) => ({

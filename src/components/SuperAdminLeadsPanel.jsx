@@ -1,6 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from '../api/axios';
 import SuperAdminPagination, { useSuperAdminPagination } from './SuperAdminPagination';
+import {
+  SuperAdminAlert,
+  SuperAdminHero,
+  SuperAdminPage,
+  SuperAdminPanel,
+  SuperAdminStatGrid,
+  SuperAdminStatTile,
+} from './SuperAdminUi';
 
 const formatDate = (value) => {
   if (!value) return '—';
@@ -110,59 +118,38 @@ function SuperAdminLeadsPanel() {
   }, [leads]);
 
   return (
-    <div className="motion-enter space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-violet-100/90 bg-white/95 p-5 md:p-6 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 backdrop-blur-sm">
-        <div
-          className="pointer-events-none absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-violet-400 via-sky-500 to-blue-600"
-          aria-hidden
-        />
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-xl">
-            <p className="mb-2 inline-flex items-center gap-2 rounded-full bg-violet-50 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em] text-violet-800 ring-1 ring-violet-200/70">
-              <span className="h-1.5 w-1.5 rounded-full bg-violet-500" aria-hidden />
-              Website inquiries
-            </p>
-            <h2 className="text-2xl font-bold tracking-tight text-gray-900 md:text-3xl">
-              <span className="bg-gradient-to-r from-gray-900 via-violet-800 to-blue-900 bg-clip-text text-transparent">
-                Website leads
-              </span>
-            </h2>
-            <p className="mt-2 text-sm leading-relaxed text-gray-600 md:text-base">
-              Contact form submissions from{' '}
-              <strong className="font-semibold text-gray-800">techwhizzc.com/waabizx</strong> appear here for follow-up.
-            </p>
-          </div>
+    <SuperAdminPage>
+      <SuperAdminHero
+        accent="violet"
+        badge="Website inquiries"
+        title="Website leads"
+        description={
+          <>
+            Contact form submissions from{' '}
+            <strong className="font-semibold text-gray-800">techwhizzc.com/waabizx</strong> appear here for follow-up.
+          </>
+        }
+        actions={
           <button
             type="button"
             onClick={loadLeads}
             disabled={loading}
-            className="inline-flex items-center gap-2 self-start rounded-xl border border-violet-200 bg-white px-4 py-2 text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-60 transition"
+            className="motion-hover-lift inline-flex items-center gap-2 self-start rounded-xl border border-violet-200 bg-white px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-50 disabled:opacity-60"
           >
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
-        </div>
-      </section>
+        }
+      />
 
-      {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
-      ) : null}
+      {error ? <SuperAdminAlert>{error}</SuperAdminAlert> : null}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
-        <div className="rounded-2xl border border-gray-100/90 bg-white/90 p-4 shadow-lg shadow-gray-200/30 ring-1 ring-gray-100/80 motion-hover-lift">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Total leads</p>
-          <p className="mt-1 text-3xl font-bold tabular-nums text-gray-900">{stats.total}</p>
-        </div>
-        <div className="rounded-2xl border border-emerald-100/90 bg-gradient-to-br from-emerald-50/80 via-white to-teal-50/40 p-4 shadow-lg shadow-emerald-100/30 ring-1 ring-emerald-100/60 motion-hover-lift">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-800/70">New leads</p>
-          <p className="mt-1 text-3xl font-bold tabular-nums text-emerald-700">{stats.newCount}</p>
-        </div>
-        <div className="rounded-2xl border border-violet-100/90 bg-gradient-to-br from-violet-500/10 via-white to-blue-500/10 p-4 shadow-lg shadow-violet-200/25 ring-1 ring-violet-100/60 motion-hover-lift">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-violet-800/70">Submitted today</p>
-          <p className="mt-1 text-3xl font-bold tabular-nums text-violet-800">{stats.today}</p>
-        </div>
-      </div>
+      <SuperAdminStatGrid className="sm:grid-cols-3">
+        <SuperAdminStatTile label="Total leads" value={stats.total} />
+        <SuperAdminStatTile label="New leads" value={stats.newCount} tone="emerald" />
+        <SuperAdminStatTile label="Submitted today" value={stats.today} tone="violet" />
+      </SuperAdminStatGrid>
 
-      <section className="rounded-2xl border border-gray-100/90 bg-white/95 backdrop-blur-sm shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 overflow-hidden">
+      <SuperAdminPanel accent="violet" padding="p-0" interactive={false}>
         <div className="px-4 md:px-5 py-4 border-b border-gray-100/90 bg-gradient-to-r from-white via-violet-50/40 to-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-gray-900">All website leads</h3>
@@ -244,7 +231,7 @@ function SuperAdminLeadsPanel() {
                   {paginatedItems.map((lead) => (
                     <tr
                       key={lead.id}
-                      className="hover:bg-violet-50/30 transition-colors cursor-pointer"
+                      className="cursor-pointer transition-all duration-200 hover:bg-violet-50/40 hover:shadow-[inset_3px_0_0_0_rgb(139,92,246)]"
                       onClick={() => setSelectedLead(lead)}
                     >
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
@@ -270,7 +257,7 @@ function SuperAdminLeadsPanel() {
                 return (
                   <article
                     key={lead.id}
-                    className="rounded-2xl border border-gray-100/90 bg-white p-4 shadow-sm ring-1 ring-gray-100/80"
+                    className="group motion-card-rich motion-hover-lift rounded-2xl border border-gray-100/90 bg-white p-4 shadow-sm ring-1 ring-gray-100/80"
                   >
                     <div className="flex items-start gap-3">
                       <div className="shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 via-violet-600 to-blue-700 text-white flex items-center justify-center shadow-sm">
@@ -337,11 +324,11 @@ function SuperAdminLeadsPanel() {
             />
           </>
         )}
-      </section>
+      </SuperAdminPanel>
 
       {selectedLead ? (
         <div className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-slate-950/55 backdrop-blur-sm">
-          <div className="w-full max-w-2xl max-h-[92vh] overflow-hidden rounded-2xl bg-white shadow-2xl border border-gray-200/90 ring-1 ring-black/5 flex flex-col">
+          <div className="motion-pop flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-gray-200/90 bg-white shadow-2xl ring-1 ring-black/5">
             <div className="shrink-0 px-5 py-4 border-b border-violet-100/90 bg-gradient-to-r from-violet-50 via-white to-blue-50 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-blue-700 text-base font-bold text-white">
@@ -387,7 +374,7 @@ function SuperAdminLeadsPanel() {
           </div>
         </div>
       ) : null}
-    </div>
+    </SuperAdminPage>
   );
 }
 

@@ -163,9 +163,9 @@ export default function ManageAnalyticsPage() {
         <div className="motion-enter motion-delay-2 motion-hover-lift bg-white/95 backdrop-blur-sm border border-gray-100/90 rounded-2xl p-4 md:p-6 shadow-lg shadow-gray-200/35 ring-1 ring-gray-100/80 transition-all duration-300 hover:shadow-xl">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
             <div>
-              <h3 className="text-sm md:text-base font-bold text-gray-900">Agent Activity [year]</h3>
+              <h3 className="text-sm md:text-base font-bold text-gray-900">Login Admin Activity [year]</h3>
               <div className="text-xs text-gray-600 mt-1">
-                Active / Requesting / Intervened / Closed
+                Login admin — Active / Requesting / Intervened / Closed
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">

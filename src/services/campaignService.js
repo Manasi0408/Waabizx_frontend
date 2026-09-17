@@ -396,6 +396,37 @@ export const getCampaignRetryPrefill = async (campaignId, status = 'failed') => 
   }
 };
 
+export const getCampaignReplies = async (campaignId, hours = 24) => {
+  try {
+    const token = getToken();
+    if (!token) {
+      throw new Error('No token found');
+    }
+
+    const params = new URLSearchParams();
+    if (hours != null) params.set('hours', String(hours));
+
+    const response = await fetch(`${API_URL}/campaigns/${campaignId}/replies?${params.toString()}`, {
+      method: 'GET',
+      headers: buildAuthHeaders(),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || data.message || 'Failed to load reply data');
+    }
+
+    if (data.success) {
+      return data;
+    }
+
+    throw new Error(data.message || 'Failed to load reply data');
+  } catch (error) {
+    throw error;
+  }
+};
+
 export const estimateCampaignCost = async ({ phones = [], audience = [], category = 'marketing', campaignId = null } = {}) => {
   try {
     const token = getToken();

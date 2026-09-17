@@ -29,3 +29,10 @@ export function getApiUrl() {
 export function getApiOrigin() {
   return getApiRoot().replace(/\/$/, '');
 }
+
+/** Public direct-api host (production). Used for API Token page docs. */
+export function getPublicApiOrigin() {
+  const publicUrl = String(process.env.REACT_APP_PUBLIC_API_URL || '').trim().replace(/\/$/, '');
+  if (publicUrl) return publicUrl;
+  return DEFAULT_API_ROOT;
+}

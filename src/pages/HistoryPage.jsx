@@ -84,6 +84,7 @@ function HistoryPage() {
   const [agentsList, setAgentsList] = useState([]);
   const [selectedAgent, setSelectedAgentState] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [profileSidebarOpen, setProfileSidebarOpen] = useState(true);
   const [templateCatalog, setTemplateCatalog] = useState(() => new Map());
   const [contactCampaigns, setContactCampaigns] = useState([]);
   const [contactPayments, setContactPayments] = useState([]);
@@ -596,9 +597,14 @@ function HistoryPage() {
                     <span className="text-xs text-sky-700/80 font-medium">Read-only history</span>
                   )}
                 </div>
-                <span className="text-[10px] font-bold text-sky-600 uppercase tracking-wider shrink-0 hidden sm:inline">
-                  Profile →
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setProfileSidebarOpen((open) => !open)}
+                  className="text-[10px] font-bold text-sky-600 uppercase tracking-wider shrink-0 hidden sm:inline hover:text-sky-800 transition"
+                  aria-expanded={profileSidebarOpen}
+                >
+                  Profile {profileSidebarOpen ? "←" : "→"}
+                </button>
               </div>
 
               <div className="flex-1 flex min-h-0">
@@ -635,6 +641,7 @@ function HistoryPage() {
                   </div>
                 </div>
 
+                {profileSidebarOpen && (
                 <div className="w-80 flex flex-col overflow-y-auto flex-shrink-0 min-h-0 bg-white/90 backdrop-blur-sm border-l border-gray-200/80 shadow-sm">
                   <div className="p-4 border-b border-gray-200/80 bg-gradient-to-r from-slate-50/80 to-sky-50/40">
                     <h3 className="font-bold text-gray-900 tracking-tight">Chat Profile</h3>
@@ -884,6 +891,7 @@ function HistoryPage() {
                     </div>
                   )}
                 </div>
+                )}
               </div>
             </div>
           </div>

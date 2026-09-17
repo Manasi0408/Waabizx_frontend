@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 export function useMediaSrc(mediaUrl, apiBase) {
   const [src, setSrc] = useState('');
   const [failed, setFailed] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -15,6 +16,8 @@ export function useMediaSrc(mediaUrl, apiBase) {
     async function load() {
       if (!mediaUrl) {
         setSrc('');
+        setFailed(false);
+        setLoading(false);
         return;
       }
 
@@ -25,8 +28,13 @@ export function useMediaSrc(mediaUrl, apiBase) {
       if (!isProtectedApi) {
         setSrc(mediaUrl);
         setFailed(false);
+        setLoading(false);
         return;
       }
+
+      setLoading(true);
+      setFailed(false);
+      setSrc('');
 
       try {
         const token = localStorage.getItem('token');
@@ -53,6 +61,8 @@ export function useMediaSrc(mediaUrl, apiBase) {
           setSrc('');
           setFailed(true);
         }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -64,5 +74,5 @@ export function useMediaSrc(mediaUrl, apiBase) {
     };
   }, [mediaUrl, apiBase]);
 
-  return { src, failed, setFailed };
+  return { src, failed, setFailed, loading };
 }

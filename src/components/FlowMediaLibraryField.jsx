@@ -27,7 +27,9 @@ function normalizeFlowMediaType(value) {
 function mediaTypeFromFile(file) {
   const mime = String(file?.type || "").toLowerCase();
   const name = String(file?.name || "").toLowerCase();
-  if (mime.startsWith("video/") || /\.(mp4|3gp|mov|avi|mkv|webm)$/.test(name)) return "VIDEO";
+  if (mime.startsWith("video/") || /\.(mp4|3gp|mov|avi|mkv|webm|m4v|mpeg|mpg|wmv|flv|ogv)$/i.test(name)) {
+    return "VIDEO";
+  }
   if (mime === "application/pdf" || name.endsWith(".pdf")) return "DOCUMENT";
   return "IMAGE";
 }
@@ -84,7 +86,9 @@ function mediaTypeToLibraryTab(mediaType) {
 }
 
 function acceptForMediaLibraryTab(tab) {
-  if (tab === "VIDEO") return "video/mp4,video/3gpp,video/quicktime,video/webm,.mp4,.3gp,.mov,.avi,.mkv,.webm";
+  if (tab === "VIDEO") {
+    return "video/*,.mp4,.3gp,.mov,.avi,.mkv,.webm,.m4v,.mpeg,.mpg,.wmv,.flv,.ogv";
+  }
   if (tab === "AUDIO") return "audio/mpeg,audio/wav,audio/ogg,audio/mp4,.mp3,.wav,.ogg,.m4a,.aac,.amr";
   if (tab === "DOCUMENT") return "application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv";
   return "image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif";

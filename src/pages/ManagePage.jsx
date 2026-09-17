@@ -7,6 +7,7 @@ import ManageAnalyticsPage from "./ManageAnalyticsPage";
 import CannedMessagesPage from "./CannedMessagesPage";
 import OptinManagementPage from "./OptinManagementPage";
 import TagsPage from "./TagsPage";
+import UserAttributesPage from "./UserAttributesPage";
 import MainSidebarNav from "../components/MainSidebarNav";
 import AppShellSidebar from "../components/AppShellSidebar";
 import AdminHeaderProjectSwitch from "../components/AdminHeaderProjectSwitch";
@@ -315,6 +316,7 @@ function ManagePage() {
     { id: "canned", label: "Canned Message" },
     { id: "optin", label: "Opt-in Management" },
     { id: "tags", label: "Tags" },
+    { id: "userAttributes", label: "User attributes" },
     { id: "agents", label: "Agents" },
     { id: "analytics", label: "Analytics" },
   ].filter((item) => {
@@ -459,6 +461,10 @@ function ManagePage() {
             ) : activeSub === "tags" ? (
               <div className="p-6 md:p-8 motion-enter">
                 <TagsPage embedded />
+              </div>
+            ) : activeSub === "userAttributes" ? (
+              <div className="p-6 md:p-8 motion-enter">
+                <UserAttributesPage embedded />
               </div>
             ) : activeSub !== "agents" ? (
               <div className="p-6 md:p-8 motion-enter">

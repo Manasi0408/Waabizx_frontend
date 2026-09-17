@@ -35,6 +35,10 @@ export default function TemplateFullViewModal({ open, template, onClose, preview
       template.header_media_url ||
       ''
   );
+  const isCarousel = Boolean(previewParts?.isCarousel);
+  const carouselCards = Array.isArray(previewParts?.carouselCards) ? previewParts.carouselCards : [];
+  const carouselMediaType = String(previewParts?.carouselMediaType || 'IMAGE').toUpperCase();
+  const carouselMediaLabel = carouselMediaType === 'VIDEO' ? 'Video' : 'Image';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -60,7 +64,11 @@ export default function TemplateFullViewModal({ open, template, onClose, preview
                   {String(language)}
                 </span>
               ) : null}
-              {headerFormat ? (
+              {isCarousel ? (
+                <span className="rounded-full bg-amber-50 px-2.5 py-0.5 font-medium text-amber-900 ring-1 ring-amber-100">
+                  Carousel · {carouselMediaLabel}
+                </span>
+              ) : headerFormat ? (
                 <span className="rounded-full bg-amber-50 px-2.5 py-0.5 font-medium text-amber-900 ring-1 ring-amber-100">
                   Header: {headerFormat}
                 </span>
@@ -82,13 +90,13 @@ export default function TemplateFullViewModal({ open, template, onClose, preview
         <div className="min-h-0 flex-1 overflow-y-auto bg-gradient-to-b from-white to-sky-50/20 p-5 md:p-6">
           <div className="mx-auto max-w-[340px] rounded-[1.75rem] border-[6px] border-slate-900 bg-[#e5ddd5] p-3 shadow-lg">
             <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
-              {headerFormat === 'IMAGE' && headerImageUrl ? (
+              {!isCarousel && headerFormat === 'IMAGE' && headerImageUrl ? (
                 <img
                   src={headerImageUrl}
                   alt=""
                   className="w-full max-h-56 object-cover block bg-gray-100"
                 />
-              ) : ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerFormat) ? (
+              ) : !isCarousel && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerFormat) ? (
                 <div className="flex aspect-[4/3] flex-col items-center justify-center gap-1 bg-gray-100 text-gray-400">
                   <span className="text-2xl" aria-hidden>
                     {headerFormat === 'VIDEO' ? '🎬' : headerFormat === 'DOCUMENT' ? '📄' : '🖼'}
@@ -104,6 +112,49 @@ export default function TemplateFullViewModal({ open, template, onClose, preview
               <div className="px-3.5 py-3 text-[13px] leading-relaxed text-gray-800 whitespace-pre-wrap break-words">
                 {body}
               </div>
+              {isCarousel && carouselCards.length > 0 ? (
+                <div className="px-3.5 pb-3 border-t border-gray-100 pt-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-2">
+                    {carouselMediaLabel} cards
+                  </p>
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {carouselCards.map((card, idx) => {
+                      const cardUrl = resolvePublicMediaUrl(card?.headerImageUrl || '');
+                      const cardButtons = Array.isArray(card.buttons) ? card.buttons : [];
+                      return (
+                        <div
+                          key={card.index ?? idx}
+                          className="shrink-0 w-[140px] rounded-lg border border-gray-200 bg-gray-50 overflow-hidden"
+                        >
+                          {cardUrl ? (
+                            carouselMediaType === 'VIDEO' ? (
+                              <video src={cardUrl} className="w-full h-20 object-cover bg-black/5" muted playsInline />
+                            ) : (
+                              <img src={cardUrl} alt="" className="w-full h-20 object-cover bg-gray-100" />
+                            )
+                          ) : (
+                            <div className="w-full h-20 flex items-center justify-center text-[10px] font-semibold uppercase text-gray-400 bg-gray-100">
+                              {carouselMediaLabel} {idx + 1}
+                            </div>
+                          )}
+                          <div className="px-2 py-1.5 space-y-0.5">
+                            {card.body ? (
+                              <p className="text-[11px] text-gray-800 line-clamp-3 whitespace-pre-wrap break-words">
+                                {card.body}
+                              </p>
+                            ) : null}
+                            {cardButtons.slice(0, 2).map((btn, bi) => (
+                              <p key={bi} className="text-[10px] font-semibold text-[#008069] truncate text-center">
+                                {btn.text || btn.label || 'Button'}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
               {footer ? (
                 <p className="px-3.5 pb-2 text-[11px] text-gray-500 whitespace-pre-wrap break-words">{footer}</p>
               ) : null}
