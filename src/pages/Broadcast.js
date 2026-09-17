@@ -447,6 +447,22 @@ function templateHasMedia(template) {
   return false;
 }
 
+function templateNeedsCarouselMedia(template) {
+  if (!templateIsCarousel(template)) return false;
+  const cards = getTemplatePreviewParts(template)?.carouselCards;
+  return Array.isArray(cards) && cards.length > 0;
+}
+
+function carouselCardMediaReady(template, carouselCardMediaUrls) {
+  if (!templateNeedsCarouselMedia(template)) return true;
+  const count = getTemplatePreviewParts(template)?.carouselCards?.length || 0;
+  const urls = Array.isArray(carouselCardMediaUrls) ? carouselCardMediaUrls : [];
+  for (let i = 0; i < count; i += 1) {
+    if (!resolveStoredHeaderMediaUrl(urls[i])) return false;
+  }
+  return true;
+}
+
 function templateIsImage(template) {
   const parts = getTemplatePreviewParts(template);
   return String(parts.headerFormat || '').toUpperCase() === 'IMAGE';
@@ -799,6 +815,7 @@ function Broadcast() {
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
   const [headerMediaFile, setHeaderMediaFile] = useState(null);
+  const [carouselCardMediaUrls, setCarouselCardMediaUrls] = useState([]);
   const [wccCredits, setWccCredits] = useState(null);
   const [costEstimate, setCostEstimate] = useState(null);
   const [costBreakdown, setCostBreakdown] = useState([]);
@@ -1087,7 +1104,12 @@ function Broadcast() {
     setMediaUrl('');
     setMediaPreviewUrl('');
     setHeaderMediaFile(null);
-    
+    const carouselParts = getTemplatePreviewParts(resolved);
+    const cardCount = templateNeedsCarouselMedia(resolved)
+      ? (carouselParts?.carouselCards?.length || 0)
+      : 0;
+    setCarouselCardMediaUrls(Array.from({ length: cardCount }, () => ''));
+
     // Parse template variables from content
     const content = resolved.content || template.content || '';
     const matches = content.match(/\{\{(\d+)\}\}/g) || [];
@@ -1300,6 +1322,10 @@ function Broadcast() {
         return;
       }
     }
+    if (selectedTemplate && templateNeedsCarouselMedia(selectedTemplate) && !carouselCardMediaReady(selectedTemplate, carouselCardMediaUrls)) {
+      setError('This carousel template needs image or video for every card. Choose media from the Media Library.');
+      return;
+    }
 
     setSaving(true);
     setError('');
@@ -1322,6 +1348,12 @@ function Broadcast() {
         }
       }
 
+      const storedCarouselUrls = templateNeedsCarouselMedia(selectedTemplate)
+        ? (carouselCardMediaUrls || []).map(
+            (u) => toPermanentUploadPath(u) || (String(u || '').trim() && !String(u).startsWith('blob:') ? String(u).trim() : null)
+          )
+        : null;
+
       const broadcastData = {
         name: campaignName,
         template_name: selectedTemplate.name,
@@ -1332,6 +1364,9 @@ function Broadcast() {
         variable_mapping: variableMapping,
         segment_tag: null,
         header_media_url: resolvedHeaderMediaUrl,
+        ...(Array.isArray(storedCarouselUrls) && storedCarouselUrls.length
+          ? { carousel_card_media_urls: storedCarouselUrls }
+          : {}),
       };
 
       const campaign = await createBroadcast(broadcastData);
@@ -2380,6 +2415,48 @@ function Broadcast() {
                       />
                     </div>
                   )}
+
+                  {selectedTemplate && templateNeedsCarouselMedia(selectedTemplate) && (() => {
+                    const parts = getTemplatePreviewParts(selectedTemplate);
+                    const carouselMediaType = String(parts?.carouselMediaType || 'IMAGE').toUpperCase();
+                    const carouselMediaLabel = carouselMediaType === 'VIDEO' ? 'Video' : 'Image';
+                    const cards = parts?.carouselCards || [];
+                    return (
+                      <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-4 space-y-3 shadow-sm">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">
+                            Carousel {carouselMediaLabel.toLowerCase()} (each card) *
+                          </p>
+                          <p className="text-xs text-gray-600 mt-0.5">
+                            {headerMediaHint(carouselMediaType)}
+                          </p>
+                        </div>
+                        {cards.map((card, idx) => {
+                          const stored = toPermanentUploadPath(carouselCardMediaUrls[idx]) || carouselCardMediaUrls[idx] || '';
+                          return (
+                            <FlowMediaAttachField
+                              key={`broadcast-carousel-${card.index ?? idx}`}
+                              mediaType={carouselMediaType === 'VIDEO' ? 'VIDEO' : 'IMAGE'}
+                              label={`Card ${idx + 1} ${carouselMediaLabel.toLowerCase()}${!stored ? ' *' : ''}`}
+                              mediaUrl={stored}
+                              mediaFilename={stored ? String(stored).split('/').pop() : ''}
+                              onChange={({ mediaUrl: storedUrl }) => {
+                                const permanent = toPermanentUploadPath(storedUrl) || storedUrl || '';
+                                setCarouselCardMediaUrls((prev) => {
+                                  const len = cards.length;
+                                  const next = Array.from({ length: len }, (_, i) =>
+                                    i === idx ? permanent : (prev[i] || '')
+                                  );
+                                  return next;
+                                });
+                                setError('');
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="lg:sticky lg:top-4">
@@ -2387,6 +2464,7 @@ function Broadcast() {
                     <BroadcastWhatsAppPreview
                       template={selectedTemplate}
                       mediaPreviewUrl={effectiveMediaPreview}
+                      carouselCardMediaUrls={carouselCardMediaUrls}
                       templateVariables={templateVariables}
                       variableMapping={variableMapping}
                       sampleRow={previewSampleRow}
@@ -2415,7 +2493,10 @@ function Broadcast() {
                     (selectedTemplate &&
                       templateHasMedia(selectedTemplate) &&
                       !headerMediaFile &&
-                      !resolveStoredHeaderMediaUrl(mediaUrl))
+                      !resolveStoredHeaderMediaUrl(mediaUrl)) ||
+                    (selectedTemplate &&
+                      templateNeedsCarouselMedia(selectedTemplate) &&
+                      !carouselCardMediaReady(selectedTemplate, carouselCardMediaUrls))
                   }
                   className="px-6 py-2.5 bg-sky-600 text-white rounded-xl font-semibold shadow-md shadow-sky-600/25 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.98] disabled:active:scale-100"
                 >
@@ -2499,6 +2580,7 @@ function Broadcast() {
                     <BroadcastWhatsAppPreview
                       template={selectedTemplate}
                       mediaPreviewUrl={effectiveMediaPreview}
+                      carouselCardMediaUrls={carouselCardMediaUrls}
                       templateVariables={templateVariables}
                       variableMapping={variableMapping}
                       sampleRow={previewSampleRow}

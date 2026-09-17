@@ -174,6 +174,22 @@ function templateHasMedia(template) {
   return /\[image\]|\[video\]|\[document\]/i.test(String(template?.content || ''));
 }
 
+function templateNeedsCarouselMedia(template) {
+  if (!templateIsCarousel(template)) return false;
+  const cards = getTemplatePreviewParts(template)?.carouselCards;
+  return Array.isArray(cards) && cards.length > 0;
+}
+
+function carouselCardMediaReady(template, carouselCardMediaUrls) {
+  if (!templateNeedsCarouselMedia(template)) return true;
+  const count = getTemplatePreviewParts(template)?.carouselCards?.length || 0;
+  const urls = Array.isArray(carouselCardMediaUrls) ? carouselCardMediaUrls : [];
+  for (let i = 0; i < count; i += 1) {
+    if (!resolveStoredHeaderMediaUrl(urls[i])) return false;
+  }
+  return true;
+}
+
 function normalizeTemplateButtons(buttons) {
   return (buttons || [])
     .map((b) => {
@@ -853,6 +869,7 @@ function CampaignCarouselCardsPreview({ parts, compact = false }) {
 function WhatsAppPreview({
   template,
   mediaPreviewUrl,
+  carouselCardMediaUrls,
   templateVarMap = {},
   templateVarCustom = {},
   columnMapping = {},
@@ -861,6 +878,7 @@ function WhatsAppPreview({
 }) {
   const parts = getTemplatePreviewParts(template);
   const isCarousel = Boolean(parts?.isCarousel);
+  const cardUrls = Array.isArray(carouselCardMediaUrls) ? carouselCardMediaUrls : [];
   const firstRow = csvRows[0] || {};
   const applySub = (text) =>
     applyPreviewSubstitutions(
@@ -877,9 +895,13 @@ function WhatsAppPreview({
     ? {
         ...parts,
         body: bodyText,
-        carouselCards: (parts.carouselCards || []).map((card) => ({
+        carouselCards: (parts.carouselCards || []).map((card, idx) => ({
           ...card,
           body: applySub(card.body),
+          headerImageUrl:
+            resolvePublicMediaUrl(cardUrls[idx] || card.headerImageUrl || '') ||
+            card.headerImageUrl ||
+            '',
         })),
       }
     : parts;
@@ -955,6 +977,7 @@ export default function CreateCampaignPage() {
   const [mediaFile, setMediaFile] = useState(null);
   const [headerMediaUrl, setHeaderMediaUrl] = useState('');
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState('');
+  const [carouselCardMediaUrls, setCarouselCardMediaUrls] = useState([]);
   const [resolvingTemplate, setResolvingTemplate] = useState(false);
 
   const [scheduleTime, setScheduleTime] = useState('');
@@ -970,6 +993,10 @@ export default function CreateCampaignPage() {
   const handleSelectTemplate = async (t) => {
     setSelectedTemplate(t);
     setTemplateSearch(t.name);
+    setHeaderMediaUrl('');
+    setMediaPreviewUrl('');
+    setMediaFile(null);
+    setCarouselCardMediaUrls([]);
     const lang =
       t.language ||
       parseTemplateVariablesMeta(t.variables)?.language;
@@ -984,6 +1011,11 @@ export default function CreateCampaignPage() {
           resolved.language ||
           parseTemplateVariablesMeta(resolved.variables)?.language;
         if (resolvedLang) setTemplateLanguage(String(resolvedLang));
+        const carouselParts = getTemplatePreviewParts(resolved);
+        const cardCount = templateNeedsCarouselMedia(resolved)
+          ? (carouselParts?.carouselCards?.length || 0)
+          : 0;
+        setCarouselCardMediaUrls(Array.from({ length: cardCount }, () => ''));
       }
     } catch (_) {
       /* keep basic template */
@@ -1236,6 +1268,14 @@ export default function CreateCampaignPage() {
         setError('This template needs header media (image, video, or document). Choose from the Media Library to continue.');
         return;
       }
+      if (
+        selectedTemplate &&
+        templateNeedsCarouselMedia(selectedTemplate) &&
+        !carouselCardMediaReady(selectedTemplate, carouselCardMediaUrls)
+      ) {
+        setError('This carousel template needs image or video for every card. Choose media from the Media Library.');
+        return;
+      }
       setStep(4);
       return;
     }
@@ -1287,6 +1327,14 @@ export default function CreateCampaignPage() {
       setError('This template needs header media (image, video, or document). Choose from the Media Library before sending.');
       return;
     }
+    if (
+      selectedTemplate &&
+      templateNeedsCarouselMedia(selectedTemplate) &&
+      !carouselCardMediaReady(selectedTemplate, carouselCardMediaUrls)
+    ) {
+      setError('This carousel template needs image or video for every card. Choose media from the Media Library before sending.');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -1310,6 +1358,12 @@ export default function CreateCampaignPage() {
         }
       }
 
+      const storedCarouselUrls = templateNeedsCarouselMedia(selectedTemplate)
+        ? (carouselCardMediaUrls || []).map(
+            (u) => toPermanentUploadPath(u) || (String(u || '').trim() && !String(u).startsWith('blob:') ? String(u).trim() : null)
+          )
+        : null;
+
       const variable_mapping = buildVariableMapping(templateVarMap, templateVarCustom);
       const data = await createCampaignApi({
         name: campaignName.trim(),
@@ -1319,6 +1373,9 @@ export default function CreateCampaignPage() {
         audience,
         variable_mapping,
         header_media_url: resolvedHeaderMediaUrl,
+        ...(Array.isArray(storedCarouselUrls) && storedCarouselUrls.length
+          ? { carousel_card_media_urls: storedCarouselUrls }
+          : {}),
       });
       const campaignId = data.campaignId || data.campaign?.id;
       if (!campaignId) throw new Error('Campaign created but id missing');
@@ -1670,12 +1727,51 @@ export default function CreateCampaignPage() {
                           )}
                         </div>
                       )}
+                      {selectedTemplate && templateNeedsCarouselMedia(selectedTemplate) && (() => {
+                        const parts = getTemplatePreviewParts(selectedTemplate);
+                        const carouselMediaType = String(parts?.carouselMediaType || 'IMAGE').toUpperCase();
+                        const carouselMediaLabel = carouselMediaType === 'VIDEO' ? 'Video' : 'Image';
+                        const cards = parts?.carouselCards || [];
+                        return (
+                          <div className="mt-6 rounded-xl border border-amber-200/90 bg-amber-50/40 p-4 space-y-3">
+                            <label className="block text-sm font-semibold text-gray-800">
+                              Carousel {carouselMediaLabel.toLowerCase()} (each card) *
+                            </label>
+                            <p className="text-xs text-amber-900/80">{headerMediaHint(carouselMediaType)}</p>
+                            {cards.map((card, idx) => {
+                              const stored =
+                                toPermanentUploadPath(carouselCardMediaUrls[idx]) ||
+                                carouselCardMediaUrls[idx] ||
+                                '';
+                              return (
+                                <FlowMediaAttachField
+                                  key={`campaign-carousel-${card.index ?? idx}`}
+                                  mediaType={carouselMediaType === 'VIDEO' ? 'VIDEO' : 'IMAGE'}
+                                  label={`Card ${idx + 1} ${carouselMediaLabel.toLowerCase()}${!stored ? ' *' : ''}`}
+                                  mediaUrl={stored}
+                                  mediaFilename={stored ? String(stored).split('/').pop() : ''}
+                                  onChange={({ mediaUrl: storedUrl }) => {
+                                    const permanent = toPermanentUploadPath(storedUrl) || storedUrl || '';
+                                    setCarouselCardMediaUrls((prev) =>
+                                      Array.from({ length: cards.length }, (_, i) =>
+                                        i === idx ? permanent : (prev[i] || '')
+                                      )
+                                    );
+                                    setError('');
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                     </div>
                     <div>
                       {selectedTemplate ? (
                         <WhatsAppPreview
                           template={selectedTemplate}
                           mediaPreviewUrl={mediaPreviewUrl}
+                          carouselCardMediaUrls={carouselCardMediaUrls}
                           templateVarMap={templateVarMap}
                           templateVarCustom={templateVarCustom}
                           columnMapping={columnMapping}
@@ -1768,6 +1864,7 @@ export default function CreateCampaignPage() {
                           <WhatsAppPreview
                             template={selectedTemplate}
                             mediaPreviewUrl={mediaPreviewUrl}
+                            carouselCardMediaUrls={carouselCardMediaUrls}
                             templateVarMap={templateVarMap}
                             templateVarCustom={templateVarCustom}
                             columnMapping={columnMapping}
