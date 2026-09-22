@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import BrandLogoMark, { BrandLogoWatermark } from '../components/BrandLogoMark';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { resendRegisterOtp, verifyRegisterOtp, logout, markAuthSessionIssued } from '../services/authService';
+import { resendRegisterOtp, verifyRegisterOtp, logout } from '../services/authService';
 import ThemeToggle from '../components/ThemeToggle';
 
 const inputClass =
@@ -56,15 +56,8 @@ function RegisterOtpVerification() {
         } catch (_) {
           /* ignore */
         }
-
-        if (response.token && response.user) {
-          markAuthSessionIssued();
-          navigate('/project-dashboard', { replace: true });
-          return;
-        }
-
         logout();
-        navigate('/login', { state: { email, registered: true } });
+        navigate('/login', { replace: true, state: { email, registered: true } });
       }
     } catch (err) {
       setError(err.message || 'OTP verification failed');

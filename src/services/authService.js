@@ -107,13 +107,6 @@ export const verifyRegisterOtp = async (email, otp) => {
   });
   const data = await parseJsonResponse(response);
   if (!response.ok) throw new Error(data.message || 'OTP verification failed');
-  if (data.success && data.token) {
-    completeAuthSession({
-      token: data.token,
-      user: data.user,
-      role: data.user?.role || 'admin',
-    });
-  }
   return data;
 };
 
