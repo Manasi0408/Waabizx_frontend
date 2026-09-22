@@ -580,6 +580,97 @@ function FlowMediaAttachField({ mediaType, mediaUrl, mediaFilename, onChange, co
   );
 }
 
+function resolveFlowTemplateHeaderMediaType(parts, template) {
+  const fmt = String(parts?.headerFormat || "").toUpperCase();
+  if (["IMAGE", "VIDEO", "DOCUMENT"].includes(fmt)) return fmt;
+  const t = String(template?.type || template?.category || "").toLowerCase();
+  if (t === "image") return "IMAGE";
+  if (t === "video") return "VIDEO";
+  if (t === "document") return "DOCUMENT";
+  return null;
+}
+
+function flowTemplateNeedsHeaderMediaPick(parts, template, headerMediaUrl) {
+  const mediaType = resolveFlowTemplateHeaderMediaType(parts, template);
+  if (!mediaType) return false;
+  const url = headerMediaUrl || parts?.headerImageUrl || "";
+  return !String(url || "").trim();
+}
+
+function FlowTemplateHeaderMediaField({ data, onChange }) {
+  const parts = resolveNodeTemplateParts(data);
+  const mediaType = resolveFlowTemplateHeaderMediaType(parts, {
+    type: data?.templateType,
+    category: data?.templateCategory,
+  });
+  if (!mediaType) return null;
+
+  const storedRaw =
+    data?.header_media_url ||
+    data?.headerMediaUrl ||
+    (String(parts?.headerFormat || "").toUpperCase() === "IMAGE" ? parts?.headerImageUrl : "") ||
+    "";
+  const previewUrl =
+    resolveFlowMediaPreviewUrl(storedRaw) ||
+    resolvePublicMediaUrl(storedRaw, FLOW_PUBLIC_BASE) ||
+    storedRaw;
+
+  const applyHeaderMedia = (patch) => {
+    const stored = toStoredFlowMediaUrl(patch.mediaUrl || patch.imageUrl || patch.headerMediaUrl || "");
+    const displayUrl = stored
+      ? resolveFlowMediaPreviewUrl(stored) ||
+        resolvePublicMediaUrl(stored, FLOW_PUBLIC_BASE) ||
+        stored
+      : "";
+    const nextParts = {
+      ...(parts || {}),
+      headerFormat: mediaType,
+      headerImageUrl: displayUrl,
+    };
+    onChange?.({
+      header_media_url: stored,
+      headerMediaUrl: stored,
+      headerMediaFilename: patch.mediaFilename || data?.headerMediaFilename || "",
+      templateParts: nextParts,
+    });
+  };
+
+  return (
+    <div className="px-2 pb-2 border-b border-gray-200">
+      <FlowMediaAttachField
+        compact
+        mediaType={mediaType}
+        mediaUrl={previewUrl}
+        mediaFilename={data?.headerMediaFilename}
+        onChange={applyHeaderMedia}
+      />
+      {previewUrl ? (
+        <div className="mt-2 rounded-md overflow-hidden border border-gray-200 bg-gray-100 h-[88px]">
+          {mediaType === "VIDEO" ? (
+            <video
+              src={previewUrl}
+              className="w-full h-full object-cover"
+              controls
+              muted
+              playsInline
+            />
+          ) : mediaType === "DOCUMENT" ? (
+            <div className="h-full flex items-center justify-center text-[11px] text-gray-600 px-2 text-center break-all">
+              📄 {data?.headerMediaFilename || previewUrl}
+            </div>
+          ) : (
+            <img
+              src={previewUrl}
+              alt=""
+              className="w-full h-full object-cover"
+            />
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function parseTemplateVariablesMeta(variables) {
   if (!variables) return {};
   if (typeof variables === "string") {
@@ -757,20 +848,22 @@ function resolveNodeTemplateParts(data) {
     const inferred = inferButtonsFromBodyText(parts.body || data?.templateContent || "");
     const merged = mergeTemplateButtons(inferred, fromStored);
     if (merged.length) {
-      return { ...parts, buttons: merged };
+      parts = { ...parts, buttons: merged };
     }
   }
+
+  const headerFromNode = resolveDisplayableHeaderMediaUrl(data.header_media_url, data.headerMediaUrl);
+  const headerImageUrl = parts.headerImageUrl || headerFromNode || null;
+  const headerFormat =
+    parts.headerFormat ||
+    (headerFromNode ? "IMAGE" : null) ||
+    (headerImageUrl && !parts.headerFormat ? "IMAGE" : null);
 
   return {
     ...parts,
     buttons: normalizeTemplateButtons(parts.buttons || []),
-    headerImageUrl:
-      parts.headerImageUrl ||
-      resolveDisplayableHeaderMediaUrl(data.header_media_url, data.headerMediaUrl) ||
-      null,
-    headerFormat:
-      parts.headerFormat ||
-      (resolveDisplayableHeaderMediaUrl(data.header_media_url, data.headerMediaUrl) ? 'IMAGE' : null),
+    headerImageUrl,
+    headerFormat,
   };
 }
 
@@ -1273,6 +1366,17 @@ function runFlowLocal(flow, { userInput, currentNodeId } = {}) {
   const visited = new Set();
   let steps = 0;
 
+  const pickStartKeywordFlowTargetLocal = (outgoing) => {
+    const list = outgoing || [];
+    if (!list.length) return null;
+    const bottom = list.find((e) => String(e.sourceHandle || "") === "start-bottom-source");
+    if (bottom?.target) return bottom.target;
+    const header = list.find((e) => String(e.sourceHandle || "") === "start-header-source");
+    if (header?.target) return header.target;
+    const main = list.find((e) => !String(e.sourceHandle || "").startsWith("template-btn-"));
+    return main?.target || list[0]?.target || null;
+  };
+
   const pickEdge = (outgoing, label, handleId) => {
     const list = outgoing || [];
     if (handleId) {
@@ -1329,7 +1433,7 @@ function runFlowLocal(flow, { userInput, currentNodeId } = {}) {
         nodeId = matchedEdge?.target || pickEdge(outgoing, matched?.text || userInput) || firstTarget;
         continue;
       }
-      nodeId = firstTarget;
+      nodeId = pickStartKeywordFlowTargetLocal(outgoing) || firstTarget;
       continue;
     }
 
@@ -1561,6 +1665,7 @@ function StartNode({ data }) {
               </svg>
             </button>
           </div>
+          <FlowTemplateHeaderMediaField data={data} onChange={(patch) => data?.onChange?.(patch)} />
           <FlowTemplatePreviewCard parts={templateParts} variant="canvas" showButtonHandles prominentHandles />
         </div>
       ) : (
@@ -2223,6 +2328,7 @@ function QuestionNode({ data }) {
               </svg>
             </button>
           </div>
+          <FlowTemplateHeaderMediaField data={data} onChange={(patch) => data?.onChange?.(patch)} />
           <FlowTemplatePreviewCard parts={templateParts} variant="canvas" showButtonHandles prominentHandles />
         </div>
       ) : (
@@ -2493,6 +2599,7 @@ function TemplateNode({ data }) {
               ×
             </button>
           </div>
+          <FlowTemplateHeaderMediaField data={data} onChange={(patch) => data?.onChange?.(patch)} />
           <FlowTemplatePreviewCard parts={templateParts} variant="canvas" showButtonHandles prominentHandles />
         </div>
       ) : (
@@ -2718,6 +2825,7 @@ function Flows() {
   const [approvedTemplates, setApprovedTemplates] = useState([]);
   const [templatePickerNodeId, setTemplatePickerNodeId] = useState("start");
   const [templateViewItem, setTemplateViewItem] = useState(null);
+  const [templateViewHeaderDraft, setTemplateViewHeaderDraft] = useState({ url: "", filename: "" });
   const [mobilePanel, setMobilePanel] = useState(null); // 'palette' | 'config' | null
 
   const nodeTypes = useMemo(
@@ -2908,11 +3016,12 @@ function Flows() {
   }, [approvedTemplates, templatePickerSearch]);
 
   const applyStartTemplateSelection = useCallback(
-    async (template) => {
+    async (template, opts = {}) => {
       const nodeId = templatePickerNodeId || "start";
       const resolved = await resolveFlowTemplate(template);
       const templateParts = getTemplatePreviewParts(resolved);
-      const headerMediaUrl =
+      const pickedHeader =
+        opts.headerMediaUrl ||
         templateParts?.headerImageUrl ||
         resolveDisplayableHeaderMediaUrl(
           resolved?.variables?.headerMediaUrl,
@@ -2920,16 +3029,26 @@ function Flows() {
           resolveHeaderImageFromComponents(resolved?.components || getTemplateComponentsList(resolved))
         ) ||
         null;
+      const headerMediaUrl = pickedHeader ? toStoredFlowMediaUrl(pickedHeader) : null;
+      const headerFormat =
+        templateParts?.headerFormat ||
+        resolveFlowTemplateHeaderMediaType(templateParts, resolved) ||
+        "IMAGE";
       patchNodeData(nodeId, {
         templateId: resolved?.id || template?.id || null,
         templateName: resolved?.name || template?.name || "",
         templateContent: getTemplateBodyText(resolved),
         templateButtons: templateParts?.buttons || [],
         templateParts: headerMediaUrl
-          ? { ...templateParts, headerImageUrl: headerMediaUrl, headerFormat: templateParts?.headerFormat || 'IMAGE' }
+          ? {
+              ...templateParts,
+              headerImageUrl: resolvePublicMediaUrl(headerMediaUrl, FLOW_PUBLIC_BASE) || headerMediaUrl,
+              headerFormat,
+            }
           : templateParts,
         header_media_url: headerMediaUrl,
         headerMediaUrl,
+        headerMediaFilename: opts.headerMediaFilename || "",
         templateLanguage:
           resolved?.variables?.language ||
           parseTemplateVariablesMeta(resolved?.variables)?.language ||
@@ -2938,8 +3057,22 @@ function Flows() {
       });
       setTemplatePickerOpen(false);
       setTemplatePickerSearch("");
+      setTemplateViewHeaderDraft({ url: "", filename: "" });
     },
     [templatePickerNodeId, patchNodeData]
+  );
+
+  const requestUseFlowTemplate = useCallback(
+    (template) => {
+      const parts = getTemplatePreviewParts(template);
+      if (flowTemplateNeedsHeaderMediaPick(parts, template, null)) {
+        setTemplateViewHeaderDraft({ url: "", filename: "" });
+        setTemplateViewItem(template);
+        return;
+      }
+      applyStartTemplateSelection(template);
+    },
+    [applyStartTemplateSelection]
   );
 
   useEffect(() => {
@@ -4463,7 +4596,7 @@ function Flows() {
                       <button
                         type="button"
                         className="col-span-4 text-left text-gray-800 truncate font-medium hover:text-sky-700"
-                        onClick={() => applyStartTemplateSelection(t)}
+                        onClick={() => requestUseFlowTemplate(t)}
                       >
                         {t.name}
                       </button>
@@ -4480,7 +4613,7 @@ function Flows() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => applyStartTemplateSelection(t)}
+                          onClick={() => requestUseFlowTemplate(t)}
                           className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
                         >
                           Use
@@ -4530,6 +4663,33 @@ function Flows() {
                 <div className="min-w-0 order-1 lg:order-2 flex justify-center">
                   <div className="w-full max-w-[min(100%,22rem)]">
                     <FlowTemplatePreviewCard parts={getTemplatePreviewParts(templateViewItem)} variant="full" />
+                    {resolveFlowTemplateHeaderMediaType(
+                      getTemplatePreviewParts(templateViewItem),
+                      templateViewItem
+                    ) ? (
+                      <div className="mt-3 rounded-xl border border-sky-100 bg-sky-50/40 p-3">
+                        <FlowMediaAttachField
+                          compact
+                          mediaType={
+                            resolveFlowTemplateHeaderMediaType(
+                              getTemplatePreviewParts(templateViewItem),
+                              templateViewItem
+                            ) || "IMAGE"
+                          }
+                          mediaUrl={
+                            resolveFlowMediaPreviewUrl(templateViewHeaderDraft.url) ||
+                            templateViewHeaderDraft.url
+                          }
+                          mediaFilename={templateViewHeaderDraft.filename}
+                          onChange={(patch) =>
+                            setTemplateViewHeaderDraft({
+                              url: patch.mediaUrl || patch.imageUrl || "",
+                              filename: patch.mediaFilename || "",
+                            })
+                          }
+                        />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -4537,7 +4697,10 @@ function Flows() {
             <div className="shrink-0 flex flex-wrap justify-end gap-2 border-t border-gray-100 px-4 py-3 sm:px-5 bg-white">
               <button
                 type="button"
-                onClick={() => setTemplateViewItem(null)}
+                onClick={() => {
+                  setTemplateViewItem(null);
+                  setTemplateViewHeaderDraft({ url: "", filename: "" });
+                }}
                 className="px-4 py-2 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700 hover:bg-gray-50"
               >
                 Close
@@ -4545,7 +4708,21 @@ function Flows() {
               <button
                 type="button"
                 onClick={() => {
-                  applyStartTemplateSelection(templateViewItem);
+                  const parts = getTemplatePreviewParts(templateViewItem);
+                  if (
+                    flowTemplateNeedsHeaderMediaPick(
+                      parts,
+                      templateViewItem,
+                      templateViewHeaderDraft.url
+                    )
+                  ) {
+                    window.alert("Please choose header media from the Media Library before using this template.");
+                    return;
+                  }
+                  applyStartTemplateSelection(templateViewItem, {
+                    headerMediaUrl: templateViewHeaderDraft.url || undefined,
+                    headerMediaFilename: templateViewHeaderDraft.filename,
+                  });
                   setTemplateViewItem(null);
                 }}
                 className="px-4 py-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-700"
