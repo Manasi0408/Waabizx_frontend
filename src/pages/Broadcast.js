@@ -29,6 +29,9 @@ import {
   resolveTemplateBillingCategory,
 } from '../utils/planPricing';
 
+const SEND_TEMPLATE_BLOCKED_MSG =
+  'Not able to send template. Insufficient WCC credit or plan expired. Recharge to continue.';
+
 async function prepareImageHeaderForUpload(file) {
   const mime = String(file.type || '').toLowerCase();
   const name = String(file.name || '');
@@ -817,6 +820,8 @@ function Broadcast() {
   const [headerMediaFile, setHeaderMediaFile] = useState(null);
   const [carouselCardMediaUrls, setCarouselCardMediaUrls] = useState([]);
   const [wccCredits, setWccCredits] = useState(null);
+  const [planInfo, setPlanInfo] = useState(null);
+  const [planInfoLoaded, setPlanInfoLoaded] = useState(false);
   const [costEstimate, setCostEstimate] = useState(null);
   const [costBreakdown, setCostBreakdown] = useState([]);
   const [costCategory, setCostCategory] = useState('');
@@ -1063,8 +1068,16 @@ function Broadcast() {
   useEffect(() => {
     if (!user?.id || step !== 4) return;
     getConversationQuota(user.id)
-      .then((q) => setWccCredits(Number(q.wccCredits ?? 0)))
-      .catch(() => setWccCredits(null));
+      .then((q) => {
+        setWccCredits(Number(q.wccCredits ?? 0));
+        setPlanInfo(q?.planInfo ?? null);
+        setPlanInfoLoaded(true);
+      })
+      .catch(() => {
+        setWccCredits(null);
+        setPlanInfo(null);
+        setPlanInfoLoaded(true);
+      });
   }, [user?.id, step]);
 
   // Handle CSV upload
@@ -1215,7 +1228,13 @@ function Broadcast() {
   );
 
   const estimatedCampaignCost = costEstimate != null ? Number(costEstimate) : 0;
-  const wccSufficient = costEstimate == null ? true : Number(wccCredits ?? 0) >= estimatedCampaignCost;
+  const wccInsufficient =
+    (costEstimate != null && Number(wccCredits ?? 0) < estimatedCampaignCost) ||
+    (wccCredits != null && Number(wccCredits) <= 0);
+  const planExpired = planInfoLoaded && !planInfo?.active;
+  const sendTemplateBlocked = planExpired || wccInsufficient;
+  const wccSufficient = !wccInsufficient;
+  const canSendTemplate = !sendTemplateBlocked;
 
   useEffect(() => {
     if (step !== 4 || !selectedTemplate) {
@@ -1310,8 +1329,8 @@ function Broadcast() {
       return;
     }
 
-    if (!wccSufficient) {
-      setError('Insufficient WCC please recharge');
+    if (!canSendTemplate) {
+      setError(SEND_TEMPLATE_BLOCKED_MSG);
       return;
     }
 
@@ -2647,8 +2666,13 @@ function Broadcast() {
                     </div>
                   </div>
                 </div>
-                {!wccSufficient ? (
-                  <p className="text-sm font-semibold text-red-600">Insufficient WCC please recharge</p>
+                {sendTemplateBlocked ? (
+                  <div
+                    className="rounded-xl border-2 border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
+                    role="alert"
+                  >
+                    {SEND_TEMPLATE_BLOCKED_MSG}
+                  </div>
                 ) : null}
               </div>
 
@@ -2664,7 +2688,7 @@ function Broadcast() {
                   <button
                     type="button"
                     onClick={handleCreateBroadcast}
-                    disabled={saving || !campaignName.trim() || !wccSufficient}
+                    disabled={saving || !campaignName.trim() || !canSendTemplate}
                     className="px-6 py-2.5 bg-green-600 text-white rounded-xl font-semibold shadow-md shadow-green-600/25 hover:bg-green-700 hover:shadow-lg transition-all duration-200 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 disabled:shadow-none"
                   >
                     {saving
@@ -2673,8 +2697,8 @@ function Broadcast() {
                         ? 'Schedule Broadcast'
                         : 'Send Broadcast'}
                   </button>
-                  {!wccSufficient && (
-                    <p className="text-red-600 text-sm font-semibold">Insufficient WCC please recharge</p>
+                  {sendTemplateBlocked && (
+                    <p className="text-red-600 text-sm font-semibold max-w-md text-right">{SEND_TEMPLATE_BLOCKED_MSG}</p>
                   )}
                 </div>
               </div>

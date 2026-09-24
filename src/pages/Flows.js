@@ -5,12 +5,16 @@ import { getApiUrl, getApiOrigin } from '../utils/apiBase';
 import ReactFlow, {
   addEdge,
   Background,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
+  getSmoothStepPath,
   Handle,
   MiniMap,
   Position,
   useEdgesState,
   useNodesState,
+  useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { useNavigate } from "react-router-dom";
@@ -2768,6 +2772,78 @@ function sanitizeEdgesForSave(edges) {
   }));
 }
 
+const FLOW_EDGE_TYPE = "deletableSmoothstep";
+
+function DeletableFlowEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style = {},
+  markerEnd,
+  selected,
+}) {
+  const { setEdges } = useReactFlow();
+  const [edgePath, labelX, labelY] = getSmoothStepPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+  });
+
+  const cutEdge = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    setEdges((eds) => eds.filter((edge) => edge.id !== id));
+  };
+
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        path={edgePath}
+        markerEnd={markerEnd}
+        style={{
+          ...style,
+          strokeWidth: selected ? 3 : style.strokeWidth || 2,
+        }}
+      />
+      <EdgeLabelRenderer>
+        <div
+          className="nodrag nopan"
+          style={{
+            position: "absolute",
+            transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+            pointerEvents: "all",
+            zIndex: 1001,
+          }}
+        >
+          <button
+            type="button"
+            onClick={cutEdge}
+            className="flex h-[18px] w-[18px] items-center justify-center rounded-full border border-red-300/90 bg-white text-red-600 shadow-sm ring-1 ring-red-100/80 transition hover:scale-110 hover:bg-red-50 hover:shadow-md"
+            aria-label="Remove connection"
+            title="Remove connection"
+          >
+            <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+      </EdgeLabelRenderer>
+    </>
+  );
+}
+
+const flowEdgeTypes = {
+  [FLOW_EDGE_TYPE]: DeletableFlowEdge,
+};
+
 function Flows() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -3499,6 +3575,7 @@ function Flows() {
           setEdges(
             (loaded.edges || []).map((e) => ({
               id: e.id,
+              type: e.type || FLOW_EDGE_TYPE,
               source: e.source,
               target: e.target,
               sourceHandle: e.sourceHandle || null,
@@ -3950,8 +4027,9 @@ function Flows() {
                   nodes={displayNodes}
                   edges={edges}
                   nodeTypes={nodeTypes}
+                  edgeTypes={flowEdgeTypes}
                   defaultEdgeOptions={{
-                    type: "smoothstep",
+                    type: FLOW_EDGE_TYPE,
                     animated: true,
                     style: { stroke: "#0284c7", strokeWidth: 2 },
                   }}

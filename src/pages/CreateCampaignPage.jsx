@@ -34,6 +34,9 @@ const STEPS = [
   { id: 5, label: 'Preview & Send' },
 ];
 
+const SEND_TEMPLATE_BLOCKED_MSG =
+  'Not able to send template. Insufficient WCC credit or plan expired. Recharge to continue.';
+
 const SCHEDULE_MAX_MONTHS = 2;
 
 function maxScheduleDateTimeLocal() {
@@ -983,6 +986,8 @@ export default function CreateCampaignPage() {
   const [scheduleTime, setScheduleTime] = useState('');
   const [excludeOptedOut, setExcludeOptedOut] = useState(true);
   const [wccCredits, setWccCredits] = useState(null);
+  const [planInfo, setPlanInfo] = useState(null);
+  const [planInfoLoaded, setPlanInfoLoaded] = useState(false);
   const [planLimitModal, setPlanLimitModal] = useState(null);
   const [costEstimate, setCostEstimate] = useState(null);
   const [costBreakdown, setCostBreakdown] = useState([]);
@@ -1048,7 +1053,13 @@ export default function CreateCampaignPage() {
 
   const audienceCount = csvRows.length;
   const estimatedCost = costEstimate != null ? Number(costEstimate) : 0;
-  const wccSufficient = costEstimate == null ? true : Number(wccCredits ?? 0) >= estimatedCost;
+  const wccInsufficient =
+    (costEstimate != null && Number(wccCredits ?? 0) < estimatedCost) ||
+    (wccCredits != null && Number(wccCredits) <= 0);
+  const planExpired = planInfoLoaded && !planInfo?.active;
+  const sendTemplateBlocked = planExpired || wccInsufficient;
+  const wccSufficient = !wccInsufficient;
+  const canSendTemplate = !sendTemplateBlocked;
 
   useEffect(() => {
     if (!csvRows.length || !selectedTemplate) {
@@ -1153,8 +1164,12 @@ export default function CreateCampaignPage() {
           try {
             const q = await getConversationQuota(u.id);
             setWccCredits(Number(q.wccCredits ?? 0));
+            setPlanInfo(q?.planInfo ?? null);
+            setPlanInfoLoaded(true);
           } catch (_) {
             setWccCredits(null);
+            setPlanInfo(null);
+            setPlanInfoLoaded(true);
           }
         }
       } catch (_) {
@@ -1173,8 +1188,15 @@ export default function CreateCampaignPage() {
   useEffect(() => {
     if (step === 5 && user?.id) {
       getConversationQuota(user.id)
-        .then((q) => setWccCredits(Number(q.wccCredits ?? 0)))
-        .catch(() => {});
+        .then((q) => {
+          setWccCredits(Number(q.wccCredits ?? 0));
+          setPlanInfo(q?.planInfo ?? null);
+          setPlanInfoLoaded(true);
+        })
+        .catch(() => {
+          setPlanInfo(null);
+          setPlanInfoLoaded(true);
+        });
     }
   }, [step, user?.id]);
 
@@ -1308,8 +1330,8 @@ export default function CreateCampaignPage() {
   };
 
   const handleSendNow = async () => {
-    if (!wccSufficient) {
-      setError('Insufficient WCC please recharge');
+    if (!canSendTemplate) {
+      setError(SEND_TEMPLATE_BLOCKED_MSG);
       return;
     }
     const audience = buildAudienceRows(csvRows, columnMapping, templateVarMap, templateVarCustom);
@@ -1814,6 +1836,14 @@ export default function CreateCampaignPage() {
                 {/* Step 5 — Preview & Send */}
                 {step === 5 && (
                   <div>
+                    {sendTemplateBlocked ? (
+                      <div
+                        className="mb-6 rounded-xl border-2 border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
+                        role="alert"
+                      >
+                        {SEND_TEMPLATE_BLOCKED_MSG}
+                      </div>
+                    ) : null}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
                       <div className="space-y-6">
                         <div className="flex items-center justify-between">
@@ -1849,14 +1879,14 @@ export default function CreateCampaignPage() {
                         </div>
                         <button
                           type="button"
-                          disabled={busy || !wccSufficient}
+                          disabled={busy || !canSendTemplate}
                           onClick={handleSendNow}
                           className="w-full max-w-xs py-3 rounded-xl font-bold uppercase tracking-wide text-white bg-gradient-to-r from-sky-600 to-blue-700 shadow-lg shadow-sky-600/30 hover:from-sky-500 hover:to-blue-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {busy ? 'Processing…' : isFutureSchedule ? 'Schedule Campaign' : 'Send Now'}
                         </button>
-                        {!wccSufficient && (
-                          <p className="text-red-600 text-sm font-semibold">Insufficient WCC please recharge</p>
+                        {sendTemplateBlocked && (
+                          <p className="text-red-600 text-sm font-semibold">{SEND_TEMPLATE_BLOCKED_MSG}</p>
                         )}
                       </div>
                       <div>
@@ -1936,6 +1966,14 @@ export default function CreateCampaignPage() {
                           </p>
                         </div>
                         </div>
+                        {sendTemplateBlocked ? (
+                          <div
+                            className="rounded-xl border-2 border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800"
+                            role="alert"
+                          >
+                            {SEND_TEMPLATE_BLOCKED_MSG}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
 
