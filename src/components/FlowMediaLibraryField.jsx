@@ -10,6 +10,10 @@ function normalizeStoredFlowMediaPath(url) {
   if (raw.startsWith("uploads/")) return `/${raw.split(/[?#]/)[0]}`;
   try {
     const pathname = new URL(raw).pathname || "";
+    const apiIdx = pathname.indexOf("/api/uploads/");
+    if (apiIdx >= 0) {
+      return `/uploads/${pathname.slice(apiIdx + "/api/uploads/".length).split(/[?#]/)[0]}`;
+    }
     const idx = pathname.indexOf("/uploads/");
     if (idx >= 0) return pathname.slice(idx).split(/[?#]/)[0];
   } catch (_) {
@@ -110,6 +114,7 @@ function FlowMediaLibraryModal({
   uploading = false,
   uploadPct = 0,
   refreshKey = 0,
+  focusTabAfterUpload = null,
 }) {
   const fileInputRef = useRef(null);
   const [loading, setLoading] = useState(false);
@@ -156,6 +161,11 @@ function FlowMediaLibraryModal({
       cancelled = true;
     };
   }, [open, refreshKey]);
+
+  useEffect(() => {
+    if (!open || !focusTabAfterUpload) return;
+    setActiveTab(focusTabAfterUpload);
+  }, [open, focusTabAfterUpload, refreshKey]);
 
   const tabItems = useMemo(
     () => allItems.filter((item) => String(item?.mediaType || "").toUpperCase() === activeTab),
@@ -416,6 +426,7 @@ export default function FlowMediaAttachField({
   const [error, setError] = useState("");
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
+  const [libraryFocusTab, setLibraryFocusTab] = useState(null);
 
   useEffect(() => {
     if (autoOpen && !uploading) {
@@ -456,7 +467,9 @@ export default function FlowMediaAttachField({
         onProgress: (pct) => setUploadPct(pct),
       });
       const stored = toStoredFlowMediaUrl(result.storedPath || result.url);
-      applyMediaSelection(stored, result.filename || uploadFile.name, result.mediaType || detectedType);
+      const uploadedType = result.mediaType || detectedType;
+      applyMediaSelection(stored, result.filename || uploadFile.name, uploadedType);
+      setLibraryFocusTab(mediaTypeToLibraryTab(uploadedType));
       setLibraryRefreshKey((k) => k + 1);
     } catch (e) {
       setError(e?.message || "Failed to upload file");
@@ -504,6 +517,7 @@ export default function FlowMediaAttachField({
         uploading={uploading}
         uploadPct={uploadPct}
         refreshKey={libraryRefreshKey}
+        focusTabAfterUpload={libraryFocusTab}
       />
     </div>
   );

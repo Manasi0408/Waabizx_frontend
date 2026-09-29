@@ -422,6 +422,10 @@ function Inbox({ pageMode = 'inbox' }) {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messageText, setMessageText] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendFeedback, setSendFeedback] = useState(null);
+  const sendFeedbackTimerRef = useRef(null);
+  const lastSendFailureNoticeRef = useRef('');
+  const showSendFeedbackRef = useRef(() => {});
   const [interveneCannedOptions, setInterveneCannedOptions] = useState([]);
   const [interveneTemplateOptions, setInterveneTemplateOptions] = useState([]);
   const [loadingInterveneOptions, setLoadingInterveneOptions] = useState(false);
@@ -496,9 +500,33 @@ function Inbox({ pageMode = 'inbox' }) {
   const typingTimeoutRef = useRef(null);
   const fileInputRef = useRef(null);
   const lastOpenChatFromContactsRef = useRef(null);
+  const focusIncomingAfterRef = useRef(null);
   const handleContactSelectRef = useRef(null);
   const fetchMessagesRef = useRef(null);
   const selectedContactRef = useRef(null);
+
+  const showSendFeedback = (message, type = 'error') => {
+    const text = String(message || '').trim();
+    if (!text) return;
+    setSendFeedback({ type, message: text });
+    if (sendFeedbackTimerRef.current) {
+      clearTimeout(sendFeedbackTimerRef.current);
+    }
+    sendFeedbackTimerRef.current = setTimeout(() => {
+      setSendFeedback(null);
+      sendFeedbackTimerRef.current = null;
+    }, 20000);
+  };
+
+  const clearSendFeedback = () => {
+    setSendFeedback(null);
+    if (sendFeedbackTimerRef.current) {
+      clearTimeout(sendFeedbackTimerRef.current);
+      sendFeedbackTimerRef.current = null;
+    }
+  };
+
+  showSendFeedbackRef.current = showSendFeedback;
 
   useEffect(() => {
     inboxListRef.current = inboxList || [];
@@ -1413,10 +1441,13 @@ function Inbox({ pageMode = 'inbox' }) {
           if (data?.sentViaTemplate) return;
           const errText = String(data?.errorMessage || '').trim();
           if (/re-engagement/i.test(errText)) return;
+          const noticeKey = `${data?.messageId || data?.waMessageId || ''}:${errText || 'failed'}`;
+          if (lastSendFailureNoticeRef.current === noticeKey) return;
+          lastSendFailureNoticeRef.current = noticeKey;
           if (errText) {
-            alert(`Message failed: ${errText}`);
+            showSendFeedbackRef.current(errText);
           } else {
-            alert('Message failed to deliver on WhatsApp.');
+            showSendFeedbackRef.current('Message failed to deliver on WhatsApp.');
           }
         }
         if (data?.wccCredits != null && typeof window !== 'undefined') {
@@ -2236,6 +2267,16 @@ function Inbox({ pageMode = 'inbox' }) {
     }
   }, [messages]);
 
+  useEffect(() => {
+    if (!focusIncomingAfterRef.current || loadingMessages || !messages.length) return;
+    focusIncomingAfterRef.current = null;
+    userScrolledUpRef.current = false;
+    isNearBottomRef.current = true;
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    });
+  }, [messages, loadingMessages, selectedContact?.phone]);
+
   const handleChatScroll = () => {
     const el = chatContainerRef.current;
     if (!el) return;
@@ -2368,7 +2409,7 @@ function Inbox({ pageMode = 'inbox' }) {
   const handleSendMessage = async (e, overrideText) => {
     if (e?.preventDefault) e.preventDefault();
     if (isHistoryPage) {
-      alert('Only approved templates can be sent from History. Use Insert to choose a template.');
+      showSendFeedback('Only approved templates can be sent from History. Use Insert to choose a template.');
       return;
     }
     const phone = selectedContact?.phone;
@@ -2376,7 +2417,7 @@ function Inbox({ pageMode = 'inbox' }) {
     if (!textToSend.trim() || !selectedContact || sending) return;
 
     if (planBlocked) {
-      alert('Your plan has ended. Recharge now to send messages.');
+      showSendFeedback('Your plan has ended. Recharge now to send messages.');
       return;
     }
 
@@ -2386,7 +2427,7 @@ function Inbox({ pageMode = 'inbox' }) {
     // Prevent manual sending when bot flow is active (unless admin has intervened)
     if (!isIntervened && currentFlowState && currentFlowState !== 'completed') {
       console.log('🚫 Manual sending disabled - bot is handling conversation');
-      alert('Bot is currently handling this conversation. Please wait for the bot to complete.');
+      showSendFeedback('Bot is currently handling this conversation. Please wait for the bot to complete.');
       return;
     }
 
@@ -2474,7 +2515,7 @@ function Inbox({ pageMode = 'inbox' }) {
       // Remove optimistic message on error
       setMessages(prev => prev.filter(m => !(m.id === tempId || (m.isOptimistic && m.content === text))));
       
-      alert(`Failed to send message: ${error.message || 'Please try again.'}`);
+      showSendFeedback(error.message || 'Please try again.');
       setMessageText(text); // Restore message text on error
     } finally {
       setSending(false);
@@ -2782,6 +2823,13 @@ function Inbox({ pageMode = 'inbox' }) {
       return [inboxEntry, ...list];
     });
 
+    const focusIncomingAfter = location.state?.focusIncomingAfter || null;
+    if (focusIncomingAfter) {
+      focusIncomingAfterRef.current = focusIncomingAfter;
+      userScrolledUpRef.current = false;
+      isNearBottomRef.current = true;
+    }
+
     handleContactSelectRef.current?.(inboxEntry);
 
     navigate('/inbox', { replace: true, state: {} });
@@ -2795,7 +2843,7 @@ function Inbox({ pageMode = 'inbox' }) {
       setTemplates(result.templates || []);
     } catch (error) {
       console.error('Error fetching templates:', error);
-      alert('Failed to fetch templates: ' + error.message);
+      showSendFeedback(error.message || 'Failed to fetch templates.');
     } finally {
       setLoadingTemplates(false);
     }
@@ -2884,7 +2932,7 @@ function Inbox({ pageMode = 'inbox' }) {
 
   const selectInterveneItemForPreview = (item) => {
     if (isHistoryPage && item?.mode !== 'template') {
-      alert('Only approved templates can be sent from History.');
+      showSendFeedback('Only approved templates can be sent from History.');
       return;
     }
     const raw = typeof item === 'string' ? item : String(item?.insertValue || '');
@@ -2990,7 +3038,7 @@ function Inbox({ pageMode = 'inbox' }) {
     if (!item) return;
     try {
       if (isHistoryPage && item?.mode !== 'template') {
-        alert('Only approved templates can be sent from History.');
+        showSendFeedback('Only approved templates can be sent from History.');
         return;
       }
       // Template option: send as real approved template (not plain text insert).
@@ -3151,7 +3199,7 @@ function Inbox({ pageMode = 'inbox' }) {
       await handleSendMessage(null, resolvedText);
     } catch (e) {
       if (String(e?.message || '').includes('Upload a header')) {
-        alert(e.message);
+        showSendFeedback(e.message);
         return;
       }
       setInterveneQuickPickerOpen(false);
@@ -3160,7 +3208,7 @@ function Inbox({ pageMode = 'inbox' }) {
         prev.filter((m) => !(m.source === 'optimistic' && m.isTemplate && m.phone === selectedContact?.phone))
       );
       if (e?.message) {
-        alert(`Failed to send: ${e.message}`);
+        showSendFeedback(e.message);
       }
     }
   };
@@ -3396,7 +3444,7 @@ function Inbox({ pageMode = 'inbox' }) {
       }, 1000);
     } catch (error) {
       console.error('Error sending template:', error);
-      alert('Failed to send template: ' + error.message);
+      showSendFeedback(error.message || 'Failed to send template.');
     } finally {
       setSending(false);
     }
@@ -3458,7 +3506,7 @@ function Inbox({ pageMode = 'inbox' }) {
         fetchInboxList(false);
       } catch (error) {
         console.error('Error handling bot button:', error);
-        alert('Failed to process: ' + error.message);
+        showSendFeedback(error.message || 'Failed to process message.');
       } finally {
         setSending(false);
       }
@@ -3541,7 +3589,7 @@ function Inbox({ pageMode = 'inbox' }) {
         fetchInboxList(false);
       } catch (error) {
         console.error('Error handling salary input:', error);
-        alert('Failed to process: ' + error.message);
+        showSendFeedback(error.message || 'Failed to process message.');
       } finally {
         setSending(false);
       }
@@ -3633,7 +3681,7 @@ function Inbox({ pageMode = 'inbox' }) {
       }, 500);
     } catch (error) {
       console.error('Error uploading media:', error);
-      alert('Failed to upload media: ' + error.message);
+      showSendFeedback(error.message || 'Failed to upload media.');
     } finally {
       setUploadingMedia(false);
     }
@@ -5071,6 +5119,33 @@ function Inbox({ pageMode = 'inbox' }) {
                       className="px-4 py-2 rounded-xl bg-sky-600 text-white font-semibold text-sm hover:bg-sky-700 shadow-md shadow-sky-600/25 hover:shadow-lg transition-all duration-200 active:scale-[0.98]"
                     >
                       Intervene
+                    </button>
+                  </div>
+                )}
+
+                {sendFeedback?.message && (
+                  <div
+                    className={`border-t px-6 py-3 flex items-start gap-3 shadow-inner ${
+                      sendFeedback.type === 'success'
+                        ? 'border-emerald-200/80 bg-emerald-50/95'
+                        : 'border-red-200/80 bg-red-50/95'
+                    }`}
+                    role="status"
+                  >
+                    <p
+                      className={`text-sm flex-1 whitespace-pre-wrap break-words leading-relaxed ${
+                        sendFeedback.type === 'success' ? 'text-emerald-900' : 'text-red-900'
+                      }`}
+                    >
+                      {sendFeedback.message}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={clearSendFeedback}
+                      className="shrink-0 rounded-lg p-1 text-gray-500 hover:text-gray-800 hover:bg-white/80 transition"
+                      aria-label="Dismiss"
+                    >
+                      ×
                     </button>
                   </div>
                 )}

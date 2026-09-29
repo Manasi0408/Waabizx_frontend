@@ -738,6 +738,24 @@ function Campaigns() {
     }));
   };
 
+  const openInboxForReplyRow = (row) => {
+    const phone = String(row?.phone || '').trim();
+    if (!phone) return;
+    setShowReplyModal(false);
+    setReplyAudienceData(null);
+    setSelectedReplyPhones([]);
+    navigate('/inbox', {
+      state: {
+        openChatContact: {
+          id: row.contactId ?? null,
+          phone,
+          name: (row.name && String(row.name).trim()) || phone,
+        },
+        focusIncomingAfter: row.repliedAt || null,
+      },
+    });
+  };
+
   const handleReplyBroadcast = async () => {
     if (!replyAudienceData || !selectedCampaign) return;
 
@@ -2060,13 +2078,24 @@ function Campaigns() {
                                   replyRows.map((row) => (
                                     <tr
                                       key={row.phone}
-                                      className="border-b border-gray-100 last:border-0 odd:bg-white even:bg-gray-50/50"
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={() => openInboxForReplyRow(row)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                          e.preventDefault();
+                                          openInboxForReplyRow(row);
+                                        }
+                                      }}
+                                      className="border-b border-gray-100 last:border-0 odd:bg-white even:bg-gray-50/50 cursor-pointer hover:bg-teal-50/60 transition-colors"
+                                      title="Open chat and view reply"
                                     >
                                       <td className="px-3 py-2.5">
                                         <input
                                           type="checkbox"
                                           checked={selectedReplyPhones.includes(row.phone)}
                                           onChange={() => toggleReplyPhoneSelection(row.phone)}
+                                          onClick={(e) => e.stopPropagation()}
                                           className="h-4 w-4 rounded border-gray-300 text-teal-600 focus:ring-teal-500"
                                         />
                                       </td>
@@ -2228,8 +2257,8 @@ function Campaigns() {
       {/* Audience Logs Modal */}
       {showAudienceModal && selectedCampaign && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-5xl w-full max-h-[90vh] overflow-y-auto ring-1 ring-black/5">
-            <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 to-sky-50/40">
+          <div className="motion-pop bg-white rounded-2xl shadow-2xl shadow-gray-900/15 border border-gray-100/90 max-w-5xl w-full max-h-[90vh] flex flex-col ring-1 ring-black/5">
+            <div className="shrink-0 p-6 border-b border-gray-100 bg-gradient-to-r from-slate-50 to-sky-50/40 rounded-t-2xl">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-xl font-bold text-gray-800">Audience Logs</h3>
@@ -2249,7 +2278,7 @@ function Campaigns() {
                 </button>
               </div>
             </div>
-            <div className="p-6">
+            <div className="flex-1 min-h-0 p-6 overflow-hidden flex flex-col">
               {loadingAudience ? (
                 <div className="text-center py-12">
                   <div className="animate-spin rounded-full h-12 w-12 border-2 border-sky-200 border-t-sky-600 mx-auto" />
@@ -2260,10 +2289,12 @@ function Campaigns() {
                   <p className="text-gray-600">No audience logs found</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead className="bg-gradient-to-r from-sky-50/95 to-slate-50/90 border-b border-gray-200/80">
+                <div className="rounded-xl border border-gray-200 overflow-hidden flex flex-col min-h-0 flex-1 max-h-[60vh]">
+                  <div className="overflow-auto flex-1 min-h-0">
+                  <table className="w-full min-w-[720px]">
+                    <thead className="bg-gradient-to-r from-sky-50/95 to-slate-50/90 border-b border-gray-200/80 sticky top-0 z-[1]">
                       <tr>
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Name</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Phone</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Variables</th>
@@ -2275,6 +2306,7 @@ function Campaigns() {
                     <tbody className="divide-y divide-gray-200">
                       {audienceLogs.map((log) => (
                         <tr key={log.id} className="hover:bg-sky-50/40 transition-colors duration-200">
+                          <td className="px-4 py-3 text-sm text-gray-900 whitespace-nowrap">{log.name || '—'}</td>
                           <td className="px-4 py-3 text-sm text-gray-900">{log.phone}</td>
                           <td className="px-4 py-3">
                             <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
@@ -2299,6 +2331,7 @@ function Campaigns() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               )}
             </div>
