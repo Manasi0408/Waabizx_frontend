@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "../api/axios";
+import { fetchProjectList } from "../services/projectListService";
 import ProjectCard from "../components/ProjectCard";
 import ThemeToggle from "../components/ThemeToggle";
 import { normalizeRole } from "../utils/managerAccess";
@@ -16,8 +17,8 @@ function ProjectDashboard() {
 
   const fetchProjects = async () => {
     try {
-      const res = await axios.get("/projects/list");
-      setProjects(res.data.projects || []);
+      const { projects: list } = await fetchProjectList({ retries: 1 });
+      setProjects(list);
     } catch (error) {
       console.log(error);
     }

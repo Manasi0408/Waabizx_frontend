@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import BrandLogoMark from '../components/BrandLogoMark';
 import { useLocation, useNavigate, Link } from "react-router-dom";
 import axios from "../api/axios";
+import { fetchProjectList, getCachedProjectList } from "../services/projectListService";
 import { logout } from "../services/authService";
 import HeaderThemeToggle from "./HeaderThemeToggle";
 import {
@@ -39,7 +40,7 @@ function AgentTopbar({ onMenuClick }) {
   const navigate = useNavigate();
   const wrapRef = useRef(null);
   const [selectedProject, setSelectedProject] = useState(() => readSelectedProject());
-  const [assignedProjects, setAssignedProjects] = useState([]);
+  const [assignedProjects, setAssignedProjects] = useState(() => getCachedProjectList() || []);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
 
   const sessionUser = readSessionUser();
@@ -88,14 +89,13 @@ function AgentTopbar({ onMenuClick }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await axios.get("/projects/list");
-        const projects = res.data?.projects || [];
+        const { projects } = await fetchProjectList({ retries: 1 });
         if (cancelled) return;
         setAssignedProjects(projects);
         const synced = syncSelectedProjectWithAllowed(projects);
         if (synced) setSelectedProject(synced);
       } catch (_) {
-        if (!cancelled) setAssignedProjects([]);
+        /* keep cached / in-memory list */
       }
     })();
 

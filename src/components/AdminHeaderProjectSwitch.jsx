@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import axios from '../api/axios';
+import { fetchProjectList, getCachedProjectList } from '../services/projectListService';
 
 function readStoredUser() {
   try {
@@ -42,7 +42,7 @@ export default function AdminHeaderProjectSwitch() {
   const location = useLocation();
   const wrapRef = useRef(null);
   const [open, setOpen] = useState(false);
-  const [projects, setProjects] = useState([]);
+  const [projects, setProjects] = useState(() => getCachedProjectList() || []);
 
   const isAdmin = useMemo(() => {
     const r = String(readStoredUser()?.role || '').toLowerCase();
@@ -71,10 +71,10 @@ export default function AdminHeaderProjectSwitch() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await axios.get('/projects/list');
-        if (!cancelled) setProjects(res.data?.projects || []);
+        const { projects: list } = await fetchProjectList({ retries: 1 });
+        if (!cancelled) setProjects(list);
       } catch {
-        if (!cancelled) setProjects([]);
+        /* Keep cached / in-memory list on failure. */
       }
     })();
     return () => {
