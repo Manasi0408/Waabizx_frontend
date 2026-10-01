@@ -46,6 +46,92 @@ const computePlanEndingSoon = (planActive, planRenewalDate) => {
   };
 };
 
+const formatPhone = (phone) => {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return '—';
+  if (digits.length === 10) {
+    return `+91 ${digits.slice(0, 5)} ${digits.slice(5)}`;
+  }
+  if (digits.length === 12 && digits.startsWith('91')) {
+    return `+91 ${digits.slice(2, 7)} ${digits.slice(7)}`;
+  }
+  return String(phone || '').trim() || '—';
+};
+
+/** Recharge alerts for super-admin follow-up (expired first, then ending within 7 days). */
+function getPlanRechargeAlert(row) {
+  if (!String(row?.planSlug || '').trim()) return null;
+
+  const renewal = row.planRenewalDate ? new Date(row.planRenewalDate) : null;
+  const renewalLabel =
+    renewal && !Number.isNaN(renewal.getTime())
+      ? renewal.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+      : null;
+
+  const isPastRenewal =
+    renewal && !Number.isNaN(renewal.getTime()) && renewal.getTime() < Date.now();
+
+  if (row.planExpired || isPastRenewal) {
+    return {
+      type: 'expired',
+      message: 'Plan expired — please recharge',
+      detail: renewalLabel ? `Expired on ${renewalLabel}` : 'Ask the business to renew their plan',
+    };
+  }
+
+  if (!row.planActive) return null;
+
+  const soon = computePlanEndingSoon(true, row.planRenewalDate);
+  if (soon) {
+    return {
+      type: 'soon',
+      message: 'Plan ends soon — please recharge to continue',
+      detail:
+        soon.daysLeft === 1
+          ? `Ends on ${soon.endDate} (tomorrow)`
+          : `Ends on ${soon.endDate} (${soon.daysLeft} days left)`,
+    };
+  }
+
+  return null;
+}
+
+function planAttentionSortRank(row) {
+  const alert = getPlanRechargeAlert(row);
+  if (alert?.type === 'expired') return 0;
+  if (alert?.type === 'soon') return 1;
+  return 2;
+}
+
+function PlanRechargeBadge({ alert }) {
+  if (!alert) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-emerald-800 ring-1 ring-emerald-200/90">
+        Active
+      </span>
+    );
+  }
+  const isExpired = alert.type === 'expired';
+  return (
+    <div
+      className={`max-w-[220px] rounded-xl border px-2.5 py-2 ring-1 ${
+        isExpired
+          ? 'border-red-200/90 bg-gradient-to-br from-red-50 to-rose-50/70 ring-red-100/80'
+          : 'border-amber-200/90 bg-gradient-to-br from-amber-50 to-orange-50/60 ring-amber-100/80'
+      }`}
+    >
+      <p className={`text-[10px] font-bold leading-snug ${isExpired ? 'text-red-900' : 'text-amber-900'}`}>
+        {alert.message}
+      </p>
+      {alert.detail ? (
+        <p className={`mt-0.5 text-[10px] leading-snug ${isExpired ? 'text-red-800/90' : 'text-amber-800/90'}`}>
+          {alert.detail}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 const formatWcc = (value) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return '0';
@@ -878,29 +964,45 @@ function SuperAdminBusinessesPanel() {
   }, [load]);
 
   const purchasedRows = useMemo(
-    () => rows.filter((r) => r.planActive && r.planSlug),
+    () => rows.filter((r) => String(r.planSlug || '').trim()),
     [rows]
   );
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return purchasedRows;
-    return purchasedRows.filter((r) => {
-      const planDisplay = resolveRowPlanValueInclGst(r, planCatalog);
-      const planValue = planDisplay.value;
-      const hay = [
-        r.businessName,
-        r.adminEmail,
-        r.projectName,
-        r.planSlug,
-        r.planCycle,
-        planValue != null ? String(planValue) : '',
-      ]
-        .map((v) => String(v || '').toLowerCase())
-        .join(' ');
-      return hay.includes(q);
+    let list = purchasedRows;
+    if (q) {
+      list = purchasedRows.filter((r) => {
+        const planDisplay = resolveRowPlanValueInclGst(r, planCatalog);
+        const planValue = planDisplay.value;
+        const hay = [
+          r.businessName,
+          r.contactNumber,
+          r.adminEmail,
+          r.projectName,
+          r.planSlug,
+          r.planCycle,
+          planValue != null ? String(planValue) : '',
+        ]
+          .map((v) => String(v || '').toLowerCase())
+          .join(' ');
+        return hay.includes(q);
+      });
+    }
+    return list.slice().sort((a, b) => {
+      const rankDiff = planAttentionSortRank(a) - planAttentionSortRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      const ta = a.planRenewalDate ? new Date(a.planRenewalDate).getTime() : Number.MAX_SAFE_INTEGER;
+      const tb = b.planRenewalDate ? new Date(b.planRenewalDate).getTime() : Number.MAX_SAFE_INTEGER;
+      if (ta !== tb) return ta - tb;
+      return String(a.businessName || '').localeCompare(String(b.businessName || ''));
     });
   }, [purchasedRows, search, planCatalog]);
+
+  const needsRechargeCount = useMemo(
+    () => purchasedRows.filter((r) => getPlanRechargeAlert(r)).length,
+    [purchasedRows]
+  );
 
   const { page, setPage, totalPages, paginatedItems, totalItems, pageSize } = useSuperAdminPagination(
     filtered,
@@ -1001,34 +1103,80 @@ function SuperAdminBusinessesPanel() {
 
       {adjustSuccess ? <SuperAdminAlert type="success">{adjustSuccess}</SuperAdminAlert> : null}
 
-      <SuperAdminStatGrid className="sm:grid-cols-3">
+      <SuperAdminStatGrid className="sm:grid-cols-2 lg:grid-cols-4">
         <SuperAdminStatTile label="Plan purchases" value={purchasedRows.length} />
+        <SuperAdminStatTile label="Needs recharge" value={needsRechargeCount} tone="amber" />
         <SuperAdminStatTile label="Admins" value={uniqueAdmins} tone="sky" />
         <SuperAdminStatTile label="Total remaining WCC" value={formatWcc(totalWcc)} tone="emerald" />
       </SuperAdminStatGrid>
 
+      {needsRechargeCount > 0 ? (
+        <div className="motion-pop rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <span className="font-semibold">{needsRechargeCount}</span> business
+          {needsRechargeCount === 1 ? '' : 'es'} need recharge (expired or ending within 7 days). They are sorted to
+          the top of the list below.
+        </div>
+      ) : null}
+
       <SuperAdminPanel accent="indigo" padding="p-0" interactive={false}>
-        <div className="flex flex-col gap-3 border-b border-gray-100 bg-gradient-to-r from-white via-sky-50/40 to-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between md:px-5">
-          <h3 className="text-sm font-bold text-gray-900">Purchased plans</h3>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search business, email, project, plan…"
-            className="w-full rounded-xl border-2 border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-400 sm:w-80"
-          />
+        <div className="flex flex-col gap-3 border-b border-gray-100 bg-gradient-to-r from-white via-indigo-50/40 to-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between md:px-5">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">All businesses with plans</h3>
+            <p className="mt-0.5 text-xs text-gray-500">
+              {filtered.length} row{filtered.length === 1 ? '' : 's'}
+              {search.trim() ? ' matching search' : ''}
+              {needsRechargeCount > 0 ? ' · recharge alerts first' : ''}
+            </p>
+          </div>
+          <div className="relative w-full sm:max-w-xs">
+            <svg
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              aria-hidden
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+              />
+            </svg>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, phone, email, project…"
+              className="w-full rounded-xl border-2 border-gray-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20"
+            />
+          </div>
         </div>
 
         {loading ? (
-          <div className="py-12 text-center text-sm text-gray-500">Loading businesses…</div>
+          <div className="flex justify-center py-16">
+            <div className="h-10 w-10 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />
+          </div>
         ) : filtered.length === 0 ? (
-          <div className="py-12 text-center text-sm text-gray-500">No businesses with purchased plans yet.</div>
+          <div className="px-4 py-16 text-center">
+            <p className="text-sm font-semibold text-gray-700">
+              {search.trim() ? 'No businesses match your search' : 'No businesses with purchased plans yet'}
+            </p>
+            <p className="mx-auto mt-1 max-w-md text-xs text-gray-500">
+              {search.trim()
+                ? 'Try business name, contact number, or login email.'
+                : 'When an admin buys a plan for a project, it will appear here with contact details.'}
+            </p>
+          </div>
         ) : (
           <>
-            <div className="overflow-x-auto">
+            <div className="hidden overflow-x-auto lg:block">
               <table className="min-w-full text-left text-sm">
                 <thead className="bg-gray-50/80 text-[11px] font-bold uppercase tracking-wide text-gray-500">
                   <tr>
+                    <th className="whitespace-nowrap px-3 py-3">Plan status</th>
                     <th className="whitespace-nowrap px-3 py-3">Business name</th>
+                    <th className="whitespace-nowrap px-3 py-3">Contact</th>
                     <th className="whitespace-nowrap px-3 py-3">Login email</th>
                     <th className="whitespace-nowrap px-3 py-3">Project name</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Remaining WCC</th>
@@ -1046,27 +1194,23 @@ function SuperAdminBusinessesPanel() {
                   {paginatedItems.map((row) => {
                     const planDisplay = resolveRowPlanValueInclGst(row, planCatalog);
                     const planLabel = resolvePlanLabel(planCatalog, row);
-                    const planEndingSoon = computePlanEndingSoon(row.planActive, row.planRenewalDate);
+                    const rechargeAlert = getPlanRechargeAlert(row);
+                    const rowHighlight = rechargeAlert?.type === 'expired'
+                      ? 'bg-red-50/30 hover:bg-red-50/50 hover:shadow-[inset_3px_0_0_0_rgb(239,68,68)]'
+                      : rechargeAlert?.type === 'soon'
+                        ? 'bg-amber-50/25 hover:bg-amber-50/45 hover:shadow-[inset_3px_0_0_0_rgb(245,158,11)]'
+                        : 'hover:bg-indigo-50/40 hover:shadow-[inset_3px_0_0_0_rgb(99,102,241)]';
                     return (
                       <tr
                         key={`${row.adminId}-${row.projectId}`}
-                        className="transition-all duration-200 hover:bg-indigo-50/40 hover:shadow-[inset_3px_0_0_0_rgb(99,102,241)]"
+                        className={`transition-all duration-200 ${rowHighlight}`}
                       >
-                        <td className="px-3 py-3">
-                          {planEndingSoon ? (
-                            <div className="mb-1.5 max-w-xs rounded-lg border border-amber-200/90 bg-gradient-to-br from-amber-50 to-orange-50/60 px-2 py-1.5 ring-1 ring-amber-100/80">
-                              <p className="text-[10px] font-semibold leading-snug text-amber-900">
-                                Plan ends soon — please recharge to continue
-                              </p>
-                              <p className="mt-0.5 text-[10px] text-amber-800/90">
-                                Ends on <span className="font-bold">{planEndingSoon.endDate}</span>
-                                {planEndingSoon.daysLeft === 1
-                                  ? ' (tomorrow)'
-                                  : ` (${planEndingSoon.daysLeft} days left)`}
-                              </p>
-                            </div>
-                          ) : null}
-                          <span className="whitespace-nowrap font-semibold text-gray-900">{row.businessName}</span>
+                        <td className="px-3 py-3 align-top">
+                          <PlanRechargeBadge alert={rechargeAlert} />
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 font-semibold text-gray-900">{row.businessName}</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-gray-700">
+                          {formatPhone(row.contactNumber)}
                         </td>
                         <td className="whitespace-nowrap px-3 py-3 text-gray-600">{row.adminEmail || '—'}</td>
                         <td className="whitespace-nowrap px-3 py-3 text-gray-800">{row.projectName}</td>
@@ -1130,6 +1274,88 @@ function SuperAdminBusinessesPanel() {
                 </tbody>
               </table>
             </div>
+
+            <div className="space-y-3 p-4 lg:hidden motion-stagger-children">
+              {paginatedItems.map((row) => {
+                const planDisplay = resolveRowPlanValueInclGst(row, planCatalog);
+                const planLabel = resolvePlanLabel(planCatalog, row);
+                const rechargeAlert = getPlanRechargeAlert(row);
+                const initial = String(row.businessName || '?').charAt(0).toUpperCase();
+                return (
+                  <article
+                    key={`m-${row.adminId}-${row.projectId}`}
+                    className="motion-card-rich rounded-2xl border border-gray-100/90 bg-white p-4 shadow-sm ring-1 ring-gray-100/80"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-indigo-600 to-blue-700 text-sm font-bold text-white shadow-sm">
+                        {initial}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-bold text-gray-900">{row.businessName}</p>
+                        <p className="mt-0.5 text-xs text-gray-500">{row.projectName}</p>
+                        <div className="mt-2">
+                          <PlanRechargeBadge alert={rechargeAlert} />
+                        </div>
+                      </div>
+                    </div>
+                    <dl className="mt-3 grid grid-cols-1 gap-2 text-xs text-gray-600 sm:grid-cols-2">
+                      <div>
+                        <dt className="font-semibold text-gray-500">Contact</dt>
+                        <dd className="mt-0.5 font-medium text-gray-800">{formatPhone(row.contactNumber)}</dd>
+                      </div>
+                      <div>
+                        <dt className="font-semibold text-gray-500">Email</dt>
+                        <dd className="mt-0.5 break-all text-gray-800">{row.adminEmail || '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="font-semibold text-gray-500">Plan</dt>
+                        <dd className="mt-0.5 text-gray-800">{planLabel}</dd>
+                      </div>
+                      <div>
+                        <dt className="font-semibold text-gray-500">Renewal</dt>
+                        <dd className="mt-0.5 text-gray-800">{formatDisplayDate(row.planRenewalDate)}</dd>
+                      </div>
+                      <div>
+                        <dt className="font-semibold text-gray-500">Remaining WCC</dt>
+                        <dd className="mt-0.5 font-semibold tabular-nums text-gray-900">
+                          {formatWcc(row.wccRemainingCredits ?? row.wccCount)}
+                        </dd>
+                      </div>
+                    </dl>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdjustSuccess('');
+                          setAdjustPlanRow(row);
+                        }}
+                        className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                      >
+                        Adjust Plan
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdjustSuccess('');
+                          setAdjustRow(row);
+                        }}
+                        className="rounded-lg border border-sky-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-sky-700 hover:bg-sky-50"
+                      >
+                        Adjust WCC
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWccWalletRow(row)}
+                        className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                      >
+                        WCC Wallet
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
             <SuperAdminPagination
               page={page}
               totalPages={totalPages}

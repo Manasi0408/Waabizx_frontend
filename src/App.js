@@ -22,6 +22,7 @@ import WhatsAppButtonPage from './pages/WhatsAppButtonPage';
 import RcsPage from './pages/RcsPage';
 import ApiTokenPage from './pages/ApiTokenPage';
 import Chatbot from './components/Chatbot';
+import AIChatWidget from './components/AIChat/AIChatWidget';
 import MainSidebarNav from './components/MainSidebarNav';
 import AppShellSidebar from './components/AppShellSidebar';
 import AdminHeaderProjectSwitch from './components/AdminHeaderProjectSwitch';
@@ -2207,7 +2208,10 @@ function App() {
 
       </Routes>
 
-      {/* Chatbot appears on all authenticated pages (except SuperAdmin) */}
+      {/* Public website: GPT assistant (login, register, public pages) */}
+      <AIChatWidget />
+
+      {/* Authenticated in-app assistant (flows / inbox handoff) */}
       {String(localStorage.getItem("role") || "").toLowerCase() !== "super_admin" ? <Chatbot /> : null}
 
     </Router>
