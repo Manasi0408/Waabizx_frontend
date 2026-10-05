@@ -597,14 +597,21 @@ function Campaigns() {
         details.template_billing_category ||
         campaign.template_billing_category ||
         'marketing';
-      const ratePerMessage =
-        details.rate_per_message != null
-          ? Number(details.rate_per_message)
-          : getMessageRateForBillingCategory(billingCategory);
       const totalCreditUsage =
         details.totalCreditUsage ??
         campaign.totalCreditUsage ??
         estimateCampaignMessageCost(sentCount, billingCategory);
+
+      let ratePerMessage =
+        details.rate_per_message != null
+          ? Number(details.rate_per_message)
+          : getMessageRateForBillingCategory(billingCategory);
+      if (sentCount > 0 && Number(totalCreditUsage) > 0) {
+        const effectiveRate = Number(totalCreditUsage) / sentCount;
+        if (Number.isFinite(effectiveRate) && effectiveRate > 0) {
+          ratePerMessage = effectiveRate;
+        }
+      }
 
       const campaignData = {
         ...details,

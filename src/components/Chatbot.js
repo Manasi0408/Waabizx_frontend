@@ -3,6 +3,18 @@ import { useLocation } from 'react-router-dom';
 import { isAuthenticated } from '../services/authService';
 import { sendAIMessage } from '../api/aiApi';
 import { resolveActiveProjectId } from '../utils/activeProject';
+import {
+  endCustomerLiveSession,
+  fetchMyLiveSession,
+  requestManualAgent,
+  sendCustomerLiveMessage,
+  fetchLiveSessionHistory,
+} from '../services/chatbotLiveService';
+import {
+  initializeSocket,
+  onSocketEvent,
+  offSocketEvent,
+} from '../services/socketService';
 
 const STORAGE_PREFIX = 'waabizx.ai-chat.v1';
 
@@ -63,6 +75,79 @@ function loadPersistedMessages(projectId, accountKey) {
   }
 }
 
+const MANUAL_HELP_INTENT_PATTERNS = [
+  /\bmanual\s+(help|assist(ance)?|support)\b/i,
+  /\b(manual|human|live)\s+agent\b/i,
+  /\btalk\s+(to|with)\s+(a\s+)?(human|person|agent|someone|support)\b/i,
+  /\bwant\s+to\s+talk\s+(with|to)\s+(a\s+)?human\b/i,
+  /\b(need|want|connect)\s+(to\s+)?(a\s+)?(human|manual|live)\b/i,
+  /\breal\s+person\b/i,
+  /\bhuman\s+(help|support|assist)/i,
+];
+
+function messageRequestsManualHelp(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return MANUAL_HELP_INTENT_PATTERNS.some((p) => p.test(t));
+}
+
+const BOT_HUMAN_OFFER_PATTERNS = [
+  /\bconnect with (a )?human\b/i,
+  /\bconnect you with (a )?(human|agent|team)\b/i,
+  /\bwould you like to connect with (a )?(human|agent)\b/i,
+  /\bwould you like.*human agent\b/i,
+  /\btalk to (a )?human (agent)?\b/i,
+  /\blike to connect with.*human\b/i,
+];
+
+function textOffersHumanHelp(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return BOT_HUMAN_OFFER_PATTERNS.some((p) => p.test(t));
+}
+
+const HUMAN_CONFIRM_PATTERNS = [
+  /^yes\b/i,
+  /^yeah\b/i,
+  /^yep\b/i,
+  /^yup\b/i,
+  /^sure\b/i,
+  /^ok(ay)?[!.]?$/i,
+  /^please\b/i,
+  /\byes[,.]?\s*(please|connect|i\s+want)/i,
+  /\bi\s+want( to)?\s+(connect|talk|speak)/i,
+  /\bconnect\s+me\b/i,
+  /\bplease\s+connect\b/i,
+  /\bgo\s+ahead\b/i,
+  /\babsolutely\b/i,
+  /\bdefinitely\b/i,
+];
+
+function messageConfirmsHumanHelp(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (messageRequestsManualHelp(t)) return true;
+  return HUMAN_CONFIRM_PATTERNS.some((p) => p.test(t));
+}
+
+function messageDeclinesHumanHelp(text) {
+  return /\b(no|nope|nah|not\s+now|maybe\s+later|cancel)\b/i.test(String(text || '').trim());
+}
+
+function mapLiveApiMessages(rows) {
+  return (Array.isArray(rows) ? rows : []).map((m) => ({
+    id: `live-${m.id}`,
+    text: String(m.body || ''),
+    sender:
+      m.senderRole === 'customer'
+        ? 'user'
+        : m.senderRole === 'agent'
+          ? 'agent'
+          : 'system',
+    timestamp: m.createdAt ? new Date(m.createdAt) : new Date(),
+  }));
+}
+
 function persistMessages(projectId, accountKey, messages) {
   try {
     const payload = (Array.isArray(messages) ? messages : []).map((m) => ({
@@ -95,6 +180,13 @@ function Chatbot() {
   });
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [liveSession, setLiveSession] = useState(null);
+  const [liveBusy, setLiveBusy] = useState(false);
+  /** True only after customer confirms human help in this browser session. */
+  const [showManualHelpOffer, setShowManualHelpOffer] = useState(false);
+  /** Bot asked "connect with human?" — wait for yes/no before showing Manual help. */
+  const [awaitingHumanConfirm, setAwaitingHumanConfirm] = useState(false);
+  const aiPrefixRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const messagesRef = useRef(messages);
@@ -123,6 +215,10 @@ function Chatbot() {
     setActiveAccountKey(nextAccountKey);
 
     skipNextPersistRef.current = true;
+    setLiveSession(null);
+    aiPrefixRef.current = null;
+    setShowManualHelpOffer(false);
+    setAwaitingHumanConfirm(false);
     const stored = loadPersistedMessages(nextProjectId, nextAccountKey);
     setMessages(stored || [createWelcomeMessage()]);
     setInputMessage('');
@@ -179,6 +275,188 @@ function Chatbot() {
     }
   }, [isOpen]);
 
+  const finishLiveSession = useCallback(() => {
+    setLiveSession(null);
+    aiPrefixRef.current = null;
+    setShowManualHelpOffer(false);
+    setAwaitingHumanConfirm(false);
+  }, []);
+
+  const mergeLiveIntoView = useCallback(
+    (apiMessages, session) => {
+      const prefix = aiPrefixRef.current;
+      const liveRows = mapLiveApiMessages(apiMessages);
+      if (Array.isArray(prefix)) {
+        setMessages([...prefix, ...liveRows]);
+      } else {
+        setMessages((prev) => {
+          const kept = prev.filter((m) => !String(m.id).startsWith('live-'));
+          return [...kept, ...liveRows];
+        });
+      }
+      if (!session?.id) return;
+      if (session.status === 'closed') {
+        finishLiveSession();
+        return;
+      }
+      setLiveSession({ id: session.id, status: session.status });
+      setShowManualHelpOffer(false);
+      setAwaitingHumanConfirm(false);
+    },
+    [finishLiveSession]
+  );
+
+  const loadClosedSessionTranscript = useCallback(
+    async (sessionId) => {
+      if (!sessionId) return;
+      try {
+        const hist = await fetchLiveSessionHistory(sessionId);
+        mergeLiveIntoView(hist?.messages || [], { id: sessionId, status: 'closed' });
+      } catch {
+        finishLiveSession();
+      }
+    },
+    [mergeLiveIntoView, finishLiveSession]
+  );
+
+  const refreshLiveSession = useCallback(async () => {
+    if (!resolveActiveProjectId()) return;
+    try {
+      const data = await fetchMyLiveSession();
+      const session = data?.session;
+      if (!session?.id) {
+        if (liveSession?.id) {
+          await loadClosedSessionTranscript(liveSession.id);
+        }
+        return;
+      }
+      mergeLiveIntoView(data?.messages, session);
+    } catch {
+      /* ignore poll errors */
+    }
+  }, [liveSession?.id, mergeLiveIntoView, loadClosedSessionTranscript]);
+
+  useEffect(() => {
+    if (!authed) return undefined;
+    refreshLiveSession();
+  }, [authed, activeProjectId, refreshLiveSession]);
+
+  useEffect(() => {
+    if (!authed || !isOpen) return undefined;
+    refreshLiveSession();
+    if (!liveSession?.id) return undefined;
+    const t = setInterval(refreshLiveSession, 3000);
+    return () => clearInterval(t);
+  }, [authed, isOpen, liveSession?.id, refreshLiveSession]);
+
+  useEffect(() => {
+    if (!authed) return undefined;
+    const token = localStorage.getItem('token');
+    let userId = null;
+    try {
+      const raw = localStorage.getItem('user');
+      if (raw) {
+        const u = JSON.parse(raw);
+        userId = u?.id ?? u?.userId;
+      }
+    } catch {
+      /* ignore */
+    }
+    if (!token || !userId) return undefined;
+
+    initializeSocket(userId, token);
+
+    const onSessionUpdate = (payload) => {
+      if (payload?.session) {
+        mergeLiveIntoView(payload.messages || [], payload.session);
+      } else {
+        refreshLiveSession();
+      }
+    };
+    const onActivity = () => {
+      refreshLiveSession();
+    };
+    const onSessionEnded = (payload) => {
+      const sid = payload?.sessionId;
+      if (sid) {
+        loadClosedSessionTranscript(sid);
+      } else {
+        finishLiveSession();
+      }
+      refreshLiveSession();
+    };
+
+    onSocketEvent('chatbot-live:session-update', onSessionUpdate);
+    onSocketEvent('chatbot-live:activity', onActivity);
+    onSocketEvent('chatbot-live:session-ended', onSessionEnded);
+
+    return () => {
+      offSocketEvent('chatbot-live:session-update', onSessionUpdate);
+      offSocketEvent('chatbot-live:activity', onActivity);
+      offSocketEvent('chatbot-live:session-ended', onSessionEnded);
+    };
+  }, [authed, mergeLiveIntoView, refreshLiveSession, finishLiveSession, loadClosedSessionTranscript]);
+
+  const handleRequestManualAgent = async () => {
+    if (liveBusy || liveSession?.status === 'requesting' || liveSession?.status === 'active') {
+      return;
+    }
+    setLiveBusy(true);
+    try {
+      aiPrefixRef.current = messagesRef.current.filter((m) => !String(m.id).startsWith('live-'));
+      const data = await requestManualAgent();
+      setShowManualHelpOffer(false);
+      setAwaitingHumanConfirm(false);
+      mergeLiveIntoView(data?.messages, data?.session);
+    } catch (error) {
+      const errText =
+        error?.response?.data?.message ||
+        error?.message ||
+        'Could not request a manual assistant. Try again.';
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          text: errText,
+          sender: 'system',
+          timestamp: new Date(),
+        },
+      ]);
+    } finally {
+      setLiveBusy(false);
+    }
+  };
+
+  const handleEndLiveChat = async () => {
+    if (!liveSession?.id || liveBusy) return;
+    setLiveBusy(true);
+    try {
+      await endCustomerLiveSession(liveSession.id);
+      finishLiveSession();
+      await refreshLiveSession();
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          text:
+            error?.response?.data?.message ||
+            error?.message ||
+            'Could not end the session.',
+          sender: 'system',
+          timestamp: new Date(),
+        },
+      ]);
+    } finally {
+      setLiveBusy(false);
+    }
+  };
+
+  const inLiveChat =
+    liveSession?.status === 'requesting' || liveSession?.status === 'active';
+
+  const showManualHelpButton = showManualHelpOffer && !inLiveChat;
+
   const handleSendMessage = async (e) => {
     e.preventDefault();
     const text = inputMessage.trim();
@@ -193,9 +471,29 @@ function Chatbot() {
 
     setMessages((prev) => [...prev, userMessage]);
     setInputMessage('');
+
+    if (messageRequestsManualHelp(text)) {
+      setShowManualHelpOffer(true);
+      setAwaitingHumanConfirm(false);
+    } else if (awaitingHumanConfirm) {
+      if (messageConfirmsHumanHelp(text)) {
+        setShowManualHelpOffer(true);
+        setAwaitingHumanConfirm(false);
+      } else if (messageDeclinesHumanHelp(text)) {
+        setAwaitingHumanConfirm(false);
+        setShowManualHelpOffer(false);
+      }
+    }
+
     setIsTyping(true);
 
     try {
+      if (inLiveChat && liveSession?.id) {
+        await sendCustomerLiveMessage(liveSession.id, text);
+        await refreshLiveSession();
+        return;
+      }
+
       const data = await sendAIMessage(text);
       const replyText =
         data?.success && data?.reply
@@ -211,6 +509,10 @@ function Chatbot() {
           timestamp: new Date(),
         },
       ]);
+      if (textOffersHumanHelp(replyText)) {
+        setAwaitingHumanConfirm(true);
+        setShowManualHelpOffer(false);
+      }
     } catch (error) {
       console.error('Error sending AI message:', error);
       const errText =
@@ -275,13 +577,19 @@ function Chatbot() {
               </div>
               <div className="min-w-0">
                 <h3 className="truncate text-[15px] font-bold tracking-tight sm:text-base">WaabizX Assistant</h3>
-                <p className="text-xs font-medium text-sky-100/95">Powered by AI</p>
+                <p className="text-xs font-medium text-sky-100/95">
+                  {inLiveChat
+                    ? liveSession?.status === 'active'
+                      ? 'Live · manual assistant'
+                      : 'Waiting for an agent…'
+                    : 'Powered by AI'}
+                </p>
               </div>
             </div>
             <button
               type="button"
               onClick={() => setIsOpen(false)}
-              className="rounded-full p-2 text-white/95 transition-all hover:bg-white/15 active:scale-95"
+              className="shrink-0 rounded-full p-2 text-white/95 transition-all hover:bg-white/15 active:scale-95"
               aria-label="Close chatbot"
             >
               <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -294,12 +602,24 @@ function Chatbot() {
             <div className="space-y-4">
               {messages.map((message) => (
                 <div key={message.id} className="animate-fade-in">
-                  <div className={`mb-2 flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div
+                    className={`mb-2 flex ${
+                      message.sender === 'user'
+                        ? 'justify-end'
+                        : message.sender === 'system'
+                          ? 'justify-center'
+                          : 'justify-start'
+                    }`}
+                  >
                     <div
                       className={`max-w-[88%] rounded-2xl px-4 py-3 shadow-sm transition-all duration-200 sm:max-w-[85%] ${
                         message.sender === 'user'
                           ? 'rounded-br-md bg-gradient-to-r from-sky-600 to-blue-700 text-white shadow-md shadow-sky-600/25 ring-1 ring-sky-500/30'
-                          : 'rounded-bl-md border border-gray-100/90 bg-white/95 text-gray-800 ring-1 ring-gray-100/80'
+                          : message.sender === 'agent'
+                            ? 'rounded-bl-md border border-emerald-100 bg-emerald-50/90 text-gray-800 ring-1 ring-emerald-100/80'
+                            : message.sender === 'system'
+                              ? 'rounded-xl bg-amber-50/90 px-3 py-2 text-xs italic text-amber-900 ring-1 ring-amber-100/80'
+                              : 'rounded-bl-md border border-gray-100/90 bg-white/95 text-gray-800 ring-1 ring-gray-100/80'
                       }`}
                     >
                       <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.text}</p>
@@ -340,11 +660,36 @@ function Chatbot() {
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder="Ask about WaabizX…"
+                  placeholder={
+                    inLiveChat ? 'Message the manual assistant…' : 'Ask about WaabizX…'
+                  }
                   className="w-full rounded-xl border-2 border-gray-200/90 bg-white px-3.5 py-2.5 text-sm shadow-sm outline-none transition-all placeholder:text-gray-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-500/15 disabled:cursor-not-allowed disabled:opacity-50 sm:px-4 sm:py-3"
                   disabled={isTyping}
                 />
               </div>
+              {inLiveChat ? (
+                <button
+                  type="button"
+                  onClick={handleEndLiveChat}
+                  disabled={liveBusy || isTyping}
+                  className="shrink-0 rounded-xl border-2 border-red-200 bg-white px-2.5 py-2 text-[11px] font-bold leading-tight text-red-700 shadow-sm transition-all hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 sm:px-3 sm:py-2.5 sm:text-xs"
+                  title="End live chat with agent"
+                >
+                  End
+                  <span className="hidden sm:inline"> live</span>
+                </button>
+              ) : showManualHelpButton ? (
+                <button
+                  type="button"
+                  onClick={handleRequestManualAgent}
+                  disabled={liveBusy || isTyping}
+                  className="shrink-0 rounded-xl border-2 border-sky-200 bg-white px-2.5 py-2 text-[11px] font-bold leading-tight text-sky-700 shadow-sm transition-all hover:border-sky-300 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50 sm:px-3 sm:py-2.5 sm:text-xs"
+                  title="Connect with a human agent"
+                >
+                  Manual
+                  <span className="hidden sm:inline"> help</span>
+                </button>
+              ) : null}
               <button
                 type="submit"
                 disabled={!inputMessage.trim() || isTyping}

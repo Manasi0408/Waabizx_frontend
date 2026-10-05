@@ -73,6 +73,7 @@ import {
   readStoredUser,
 } from './utils/managerAccess';
 import SessionExpiryGuard from './components/SessionExpiryGuard';
+import ChatbotAgentPanel from './pages/ChatbotAgentPanel';
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -104,6 +105,7 @@ const getDefaultRouteForCurrentUser = () => {
   if (role === "admin") return "/project-dashboard";
   if (role === "manager") return getManagerFallbackRoute(readStoredUser());
   if (role === "agent") return "/agent";
+  if (role === "chatbot_agent") return "/chatbot-agent";
   return "/project-dashboard";
 };
 
@@ -158,6 +160,15 @@ const AgentDashboardRoute = () => {
   const role = getCurrentUserRole();
   if (token && (role === "agent" || role === "admin" || role === "manager")) {
     return <AgentHomePage />;
+  }
+  return <Navigate to={token ? getDefaultRouteForCurrentUser() : "/login"} replace />;
+};
+
+const ChatbotAgentRoute = () => {
+  const token = localStorage.getItem("token");
+  const role = getCurrentUserRole();
+  if (token && role === "chatbot_agent") {
+    return <ChatbotAgentPanel />;
   }
   return <Navigate to={token ? getDefaultRouteForCurrentUser() : "/login"} replace />;
 };
@@ -2154,6 +2165,15 @@ function App() {
         />
 
         <Route
+          path="/chatbot-agent"
+          element={
+            <ProtectedRoute>
+              <ChatbotAgentRoute />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
           path="/inbox"
           element={
             <ProtectedRoute>
@@ -2212,7 +2232,13 @@ function App() {
       <AIChatWidget />
 
       {/* Authenticated in-app assistant (flows / inbox handoff) */}
-      {String(localStorage.getItem("role") || "").toLowerCase() !== "super_admin" ? <Chatbot /> : null}
+      {(() => {
+        const r = String(localStorage.getItem("role") || "")
+          .toLowerCase()
+          .replace(/-/g, "_");
+        if (r === "super_admin" || r === "superadmin" || r === "chatbot_agent") return null;
+        return <Chatbot />;
+      })()}
 
     </Router>
   );

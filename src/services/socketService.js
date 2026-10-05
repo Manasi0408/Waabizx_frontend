@@ -52,7 +52,10 @@ export const initializeSocket = (userId, token) => {
         }
       } catch (e) {}
 
-      if (role === "agent") {
+      if (role === "chatbot_agent") {
+        socket.emit("join", "chatbot_agents");
+        console.log("Joined chatbot_agents room");
+      } else if (role === "agent") {
         socket.emit("join", `agent_${userId}`);
         console.log(`Joined agent room: agent_${userId}`);
       } else {

@@ -165,6 +165,8 @@ function Login() {
           navigate('/admin');
         } else if (normalizedRole === 'agent') {
           navigate('/agent');
+        } else if (normalizedRole === 'chatbot_agent') {
+          navigate('/chatbot-agent');
         } else {
           navigate('/admin');
         }

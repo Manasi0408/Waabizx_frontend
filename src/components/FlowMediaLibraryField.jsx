@@ -237,6 +237,9 @@ function FlowMediaLibraryModal({
               <p className="mt-0.5 text-sm text-slate-500">
                 {formatStorageMb(storageUsedBytes)} used of {formatStorageMb(storageLimitBytes)}
               </p>
+              <p className="mt-1 text-xs font-medium text-sky-700">
+                Click a file below to use it — upload only when you need something new.
+              </p>
             </div>
           </div>
           <button
@@ -340,9 +343,10 @@ function FlowMediaLibraryModal({
             </div>
           ) : (
             <>
-              <div className="text-sm font-semibold text-slate-800 mb-4">
-                Recently used ({filteredItems.length})
+              <div className="text-sm font-semibold text-slate-800 mb-1">
+                Your library ({filteredItems.length})
               </div>
+              <p className="mb-4 text-xs text-slate-500">Previously uploaded files stay here until you delete them.</p>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                 {filteredItems.map((item) => {
                   const previewUrl = resolveFlowMediaPreviewUrl(item.publicUrl || item.url);
@@ -468,9 +472,11 @@ export default function FlowMediaAttachField({
       });
       const stored = toStoredFlowMediaUrl(result.storedPath || result.url);
       const uploadedType = result.mediaType || detectedType;
-      applyMediaSelection(stored, result.filename || uploadFile.name, uploadedType);
       setLibraryFocusTab(mediaTypeToLibraryTab(uploadedType));
       setLibraryRefreshKey((k) => k + 1);
+      if (stored) {
+        applyMediaSelection(stored, result.filename || uploadFile.name, uploadedType);
+      }
     } catch (e) {
       setError(e?.message || "Failed to upload file");
     } finally {
